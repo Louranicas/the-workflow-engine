@@ -115,6 +115,75 @@ fn bench_m32_5check(c: &mut Criterion) {
 
 **Target:** 5-check sequence < 200 ms p99 (Conductor `/health` HTTP is the dominant cost).
 
+## Substrate-side load benchmarks (NA-GAP-04 closure)
+
+The four benches above all measure **engine-side** performance — m20 work in the engine's process, m4/m7 in the engine's SQLite, m32 against a mocked Conductor. Per NA-GAP-04, this misses a structural question: what is each substrate's own load envelope, measured at the substrate, before workflow-trace traffic degrades the substrate's foreground work for *other* habitat services (or for the user's shell, in atuin's case)?
+
+The engine cannot dictate a substrate's load policy — that's the co-tenant rule. But the engine MUST measure its own substrate-side load contribution and gate cadence increases against substrate-back-pressure signals defined in each substrate dossier.
+
+### Substrate-side benches (per substrate, measured at substrate)
+
+| Substrate | Bench | Measurement surface | Threshold (substrate-protective) |
+|---|---|---|---|
+| **S-A atuin** ([`substrates/atuin.md`](substrates/atuin.md) § back-pressure) | `benches/substrate_load_atuin.rs` | m1 cursor advance rate vs atuin daemon `wal_size_bytes` + `busy_timeout_exceeded` count | wal_size growth attributable to m1 < 5% over baseline; busy_timeout < 1/min |
+| **S-B injection.db** ([`substrates/injection_db.md`](substrates/injection_db.md)) | `benches/substrate_load_injection_db.rs` | m3 read cadence vs injection.db `database_locked` rate + habitat-memory daemon TTL-sweep contention | locked rate < 1/min; m3 reads should pause during daemon sweep window |
+| **S-C stcortex** ([`substrates/stcortex.md`](substrates/stcortex.md)) | `benches/substrate_load_stcortex.rs` | m42 reinforce rate + m13 read rate vs stcortex `:3000` reducer queue depth + idempotency-cache size | reducer queue p99 < 50ms; idempotency cache size stable (TTL sweep keeping pace) |
+| **S-D Conductor** ([`substrates/conductor.md`](substrates/conductor.md)) | `benches/substrate_load_conductor.rs` | m32 dispatch rate vs Conductor wave-pane handoff latency (semantic-endpoint probe) | semantic-endpoint p99 < 100ms; wave-pane backlog < 10 |
+| **S-E SYNTHEX v2** ([`substrates/synthex.md`](substrates/synthex.md)) | `benches/substrate_load_synthex.rs` | m40 NexusEvent push rate vs SYNTHEX v2 coordinator queue + R13 quiet-period state | push accepted < 5ms p99; coordinator queue depth growth bounded |
+| **S-F LCM** ([`substrates/lcm.md`](substrates/lcm.md)) | `benches/substrate_load_lcm.rs` | m41 RPC rate vs LCM supervisor loop_id state-transition latency | loop_id created → ready p99 < 200ms; deploy backlog bounded |
+
+### Methodology
+
+Each substrate-side bench follows the same pattern:
+
+1. **Pre-measure substrate baseline** — capture the substrate's own foreground metrics (e.g. atuin busy_timeout rate from a fresh write-only shell session; stcortex reducer p99 from a no-workflow-trace consumer-only window) over a 60s baseline window.
+2. **Apply workflow-trace load** — drive the engine's per-substrate write path at a controlled rate (`{N}` events/sec) for 60s.
+3. **Re-measure substrate metrics** — capture the same foreground metrics during the load window.
+4. **Compute delta + attribute** — substrate-side delta is what workflow-trace cost the substrate. The threshold gate is on the **delta**, not absolute (since substrates have their own non-workflow-trace traffic).
+5. **Emit `SubstrateLoadProfile { substrate_id, baseline, loaded, delta_pct, threshold_crossed }`** — surfaced via `cargo bench` JSON output for `criterion`.
+
+### Wave-end discipline
+
+```bash
+# Stage 1: engine-side benches (as before)
+cargo bench --workspace
+
+# Stage 2: substrate-side benches (new — requires live substrates)
+cargo bench --bench 'substrate_load_*' --features substrate-load -- --baseline previous_wave_end
+
+# Stage 3: substrate-impact report (cross-bench analysis)
+~/.local/bin/wf-bench-substrate-report --window 7d
+```
+
+Substrate-side benches are **opt-in** via `--features substrate-load` because they require live substrates and are noisier than engine-side benches; they run at Wave-end + nightly, NOT in PR-CI (PR-CI continues to run engine-side benches only).
+
+### Substrate-drift gating
+
+When [`cross-cutting/substrate-drift.md`](cross-cutting/substrate-drift.md) canary fires `SubstrateDriftDetected` for a given substrate, **substrate-side benches for that substrate are quarantined** — their thresholds may no longer represent reality. The bench harness checks substrate-drift state at start and skips quarantined substrates with a `[QUARANTINED]` annotation, unblocking Wave-end without false regression flags.
+
+### Per-substrate cadence-throttle rules
+
+Output of substrate-side benches feeds a **per-substrate cadence-throttle table** that engine modules consult before increasing read/write cadence:
+
+```rust
+// SPEC ONLY
+pub struct SubstrateCadenceLimit {
+    pub substrate_id: SubstrateId,
+    pub current_load_pct: f64,        // measured from last bench
+    pub recommended_max_ops_per_sec: f64,
+    pub last_measured_at: i64,
+}
+```
+
+m1 (atuin), m3 (injection.db), m13 (stcortex), m40/m41/m42 (Cluster H) all consult this table before tightening cadence. If `current_load_pct > 80`, cadence is locked at current; if > 95, cadence is auto-throttled by 20%. The table is engine-internal (not substrate-controlled), populated from substrate-side bench output.
+
+### Anti-patterns specific to substrate-side benchmarking
+
+- **Measuring at the engine** — defeats the purpose; the gap NA-GAP-04 surfaced is precisely "engine-side measurement misses substrate-internal contention". Substrate-side benches MUST measure at the substrate.
+- **Synthetic substrate fixtures alone** — a mock SQLite doesn't reproduce atuin daemon's WAL contention; substrate-side benches MUST run against live substrates (or, deferred, substrate fixtures per NA-GAP-08 — see [`../ai_docs/decisions/2026-05-17-substrate-as-actor-deferrals.md`](../ai_docs/decisions/2026-05-17-substrate-as-actor-deferrals.md)).
+- **Single-window measurement** — sub-second windows hide substrate-internal periodic events (atuin WAL checkpoint cadence, habitat-memory daemon TTL sweep, stcortex idempotency-cache rotation). 60s minimum; ideally 5-min windows captured over a 24-hour daily-cycle.
+- **Ignoring co-tenant traffic** — substrates are shared (atuin serves all shells; stcortex serves all habitat services). Benches MUST not assume the substrate is otherwise idle.
+
 ## Regression detection
 
 ```bash

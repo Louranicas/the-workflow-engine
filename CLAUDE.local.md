@@ -11,6 +11,99 @@
 
 ---
 
+## 🟢 RESUME FROM HERE — S1002127 Cold-Start Entry (Workflow-Trace Scaffold Closeout)
+
+> **For a fresh Claude session:** read this section FIRST, then drop into the workstream rich-block below (`## S1002127 — Scaffold Waves 0/1/2/3/4 (LIVE)`) for Wave-by-Wave detail.
+
+**Git anchor:** commit `2536f4a` on `main`, pushed `origin` (GitHub) + `gitlab`. Walk with `git show 2536f4a --stat | head` for the 326-file scaffold inventory; `git log --oneline 2536f4a..HEAD` for any post-closeout deltas.
+
+**stcortex anchor** (Surface 3 — substrate persistence; namespace `workflow_trace_scaffold_s1002127`):
+
+```bash
+# Inspect via CLI:
+~/.local/bin/stcortex inspect workflow_trace_scaffold_s1002127 --limit 20
+
+# Or via MCP from inside Claude:
+mcp__stcortex-mcp__stcortex_inspect(namespace="workflow_trace_scaffold_s1002127", limit=20)
+mcp__stcortex-mcp__stcortex_recall(namespace="workflow_trace_scaffold_s1002127", anchors=["workflow_trace_scaffold_s1002127_genesis"])
+```
+
+Stored **6 memories** (IDs 16603-16608) + **14 bidi pathways** (7 pairs) — written 2026-05-17 S1002127:
+
+| Memory ID | Slug | Modality | Role |
+|---|---|---|---|
+| **16603** | `workflow_trace_scaffold_s1002127_genesis` | meta | **PRIMARY ENTRY** — full scaffold state + RESUME ENTRY pointer back to this file |
+| 16604 | `workflow_trace_decision_v1_3_binding` | semantic | v1.3 binding spec (26 modules · 8 clusters · 2 binaries · ORAC pattern) |
+| 16605 | `workflow_trace_decision_m42_pivot` | semantic | D-S1001982-01 m42 stcortex-only pivot ADR |
+| 16606 | `workflow_trace_decision_prime_directive_waiver` | semantic | Luke S1002127 scope-override verbatim + tight/wide table |
+| 16607 | `workflow_trace_decision_g8_persistence` | semantic | D-S1002127-01 G8 stcortex persistence plan ADR |
+| 16608 | `workflow_trace_decision_escape_surface_cardinality_7` | semantic | D-S1002127-02 EscapeSurfaceProfile cardinality 6→7 ADR |
+
+Pathways (slug-based bidi, 7 pairs; weights 0.80-0.95): `genesis ↔ v1_3_binding` (0.95) · `genesis ↔ prime_directive_waiver` (0.95) · `genesis ↔ g8_persistence` (0.95) · `genesis ↔ escape_surface_7` (0.90) · `v1_3_binding ↔ m42_pivot` (0.85) · `v1_3_binding ↔ escape_surface_7` (0.85) · `m42_pivot ↔ g8_persistence` (0.80). Reverse-anchors (`ai_docs:<path> ; vault:[[<wikilink>]] ; claude_local:<heading>`) embedded in every memory `content` field per [G8 persistence ADR](ai_docs/optimisation-v7/decisions/2026-05-17-g8-stcortex-persistence-plan.md) rule § 1.d.
+
+**POVM (Surface 3-alternate — MIRRORED 2026-05-17 per Luke S1002127 override):** Initial Command interpretation was to skip POVM per the m42 stcortex-only ADR. Luke explicitly overrode with `also execute the POVM mirror` directive. Command position recorded:
+
+> _Luke override accepted. Per CLAUDE.md "make the call, act, flag": I'm mirroring to POVM as instructed but the m42 stcortex-only ADR stays in force — stcortex remains canonical source of truth; POVM serves as historical mirror only (not a write-back source). Loading POVM MCP tools._
+
+6 memories ingested under POVM v2 namespace `workflow_trace_scaffold_s1002127` (`source: command-s1002127-scaffold-closeout`):
+
+| stcortex ID | POVM UUID | Role |
+|---|---|---|
+| 16603 | `6a479092-96a7-4eec-b390-a847db8f4455` | GENESIS |
+| 16604 | `14a16b73-04ae-4636-8413-cafb221d1e6f` | v1.3 binding spec |
+| 16605 | `79ea0e65-92e6-41d1-b754-fb58a0ff7591` | D-S1001982-01 m42 ADR (mirror is Luke-override; does NOT retract ADR) |
+| 16606 | `2c2a5c9f-dd74-447b-b928-35f80d4bbebb` | PRIME_DIRECTIVE_WAIVER |
+| 16607 | `6ce671a6-4d16-4340-a5e7-82230314d253` | D-S1002127-01 G8 persistence ADR |
+| 16608 | `5e0f15a5-f72e-497d-8753-16e99a3eb18c` | D-S1002127-02 EscapeSurfaceProfile cardinality-7 ADR |
+
+POVM v2 has no native bidi-pathway primitive (different paradigm); the 14 bidi pathways in stcortex are NOT mirrored — namespace grouping (`workflow_trace_scaffold_s1002127`) serves as the implicit relation surface in POVM. m42 ADR routing (stcortex-only for substrate-feedback writes) **remains in force**; POVM mirror is historical-anchor-only.
+
+**🔴 INCIDENTAL DRIFT FLAG (AP-V7-13 firing live):** `povm_stats` at write time reported `learning_health=0.9162` (pre-CR-2 inflated value) — workspace post-CR-2 expected ~0.067. POVM v2 health-200 but serving pre-CR-2 binary. This is the EXACT condition that triggered the m42 ADR. Flagged for separate Luke action; does not affect this mirror's integrity (POVM is just a static store for our purposes).
+
+**Obsidian anchors** (Surface 2 — vault mirror; bidi):
+
+- Project-local vault (`the-workflow-engine-vault/`):
+  - [[Scaffold Wave 0-2 — Session S1002127]] — session summary note (Wave 2E authored; Wave 3/4 closeout appended)
+  - [[Cluster A Scaffold — Module Specs S1002127]] … [[Cluster H Scaffold — Module Specs S1002127]] — 8 per-cluster scaffold notes
+  - [[HOME]] · [[MASTER_INDEX]] · [[GOD_TIER_CONSOLIDATION_S1001982]] · [[ULTIMATE_DEPLOYMENT_FRAMEWORK_S1001982]]
+- Main habitat vault (`~/projects/claude_code/`):
+  - [[workflow-trace — S1002127 Scaffold Closeout]] — new anchor note (this closeout; bidi-linked here)
+  - [[stcortex — Pioneer Capability Dossier 2026-05-10]] — substrate workflow-trace routes m42 to
+  - [[POVM Engine]] — substrate workflow-trace is DECOUPLED from (m42 ADR)
+
+**ai_docs anchors** (Surface 1 — canonical):
+
+- [`PRIME_DIRECTIVE_WAIVER.md`](PRIME_DIRECTIVE_WAIVER.md) — scope override authorising the scaffold
+- [`CHANGELOG.md`](CHANGELOG.md) — versioned spec deltas v0.0.0-spec.0/1/2/3 + Wave 4
+- [`GATE_STATE.md`](GATE_STATE.md) — G3 dropped · G4 CLOSED · G7 PENDING · G9 BLOCKED · B4 CLOSED
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — 26-module / 8-cluster / 9-layer canonical map
+- [`ai_specs/INDEX.md`](ai_specs/INDEX.md) · [`ai_specs/MODULE_MATRIX.md`](ai_specs/MODULE_MATRIX.md)
+- [`ai_docs/INDEX.md`](ai_docs/INDEX.md) · [`ultramap/README.md`](ultramap/README.md)
+- [`ai_docs/NA_GAP_ANALYSIS_S1002127_SCAFFOLD.md`](ai_docs/NA_GAP_ANALYSIS_S1002127_SCAFFOLD.md) — Frame-A dual-pass analysis (11 NA gaps)
+- 3 ADRs in [`ai_docs/optimisation-v7/decisions/`](ai_docs/optimisation-v7/decisions/):
+  - `2026-05-17-m42-stcortex-only-pivot.md` (D-S1001982-01)
+  - `2026-05-17-g8-stcortex-persistence-plan.md` (D-S1002127-01)
+  - `2026-05-17-escape-surface-cardinality-7-privilege-escalation.md` (D-S1002127-02)
+
+**State at closeout** (2026-05-17 S1002127):
+
+- HOLD-v2 envelope INTACT (`0 .rs` files in active scope; `0 Cargo.toml`)
+- G9 NOT fired — Luke types `start coding workflow-trace` to unlock; first wave will be Cluster D Day 1 (m8 build-cfg → m9 namespace guard → m10 Ember CI → m11 decay) per non-negotiable phase-1 framework
+- Zen G7 AMEND-loop: AUDIT-REQUEST v2 filed (2026-05-17T160500Z); v3 owed for D-S1002127-02 cardinality bump
+- 3 Luke physical actions standing: B1 G7 verdict · B2 v1.3 patch green-light · B3 Conductor `auto_start=false` → `devenv start weaver/zen/enforcer`
+- Workspace-root `~/claude-code-workspace/CLAUDE.local.md` "The Workflow Engine" row stale (project charter forbids Command from amending; Luke action required OR explicit waiver to authorise Command)
+
+**One-line resume for a fresh Claude context window:**
+
+```bash
+cd /home/louranicas/claude-code-workspace/the-workflow-engine && \
+  git log --oneline -1 && \
+  ~/.local/bin/stcortex inspect workflow_trace_scaffold_s1002127 --limit 6 2>/dev/null && \
+  head -120 CLAUDE.local.md
+```
+
+---
+
 ## How this file maps to CLAUDE.md
 
 | CLAUDE.md / workspace protocol | What this file provides |
@@ -84,7 +177,7 @@
 - ✅ 16 Mermaid diagrams across `ultramap/`
 - ✅ All facts preserved: m42 POVM-decoupled · AP-V7-07 m23 no-auto-promote · AP-V7-08 m32 no-self-dispatch · `lcm.loop.create` (not `lcm.deploy`) · Cluster D `ship_first: true` × 4 · CC-1b resolved as `CC-1.subA` · EscapeSurfaceProfile 7-variant ordinal (rg shows 84 hits / 12 files)
 - ✅ Four-surface persistence: ai_docs ✓ · vault ✓ · stcortex namespace RESERVED (G8 ADR pre-specifies writes) · CLAUDE.local.md anchor (this section)
-- ⏳ Wave 4.B NA-GAP substrate-as-primary remediation in flight (closes NA-GAP-01..11)
+- ✅ Wave 4.B NA-GAP substrate-as-primary remediation **CLOSED** 2026-05-17 (S1002127 continuation) — 8/11 NA gaps fully closed; 3/11 (NA-07 module / NA-08 / NA-10) deferred to v0.2.0 via D-S1002127-03 ADR with compensating controls. CHANGELOG `v0.0.0-spec.4` records full deltas.
 
 **What landed (Waves 0+1+2+3 + part of 4):** ~210 files / ~145k+ words.
 - Wave 0 (22 root anchors); Wave 1 (26 per-module specs, ~70k words); Wave 2A (`.claude/` 28 files); Wave 2B (ai_docs deep 11 files / ~19k); Wave 2C (ai_specs cross-cutting 33 files / ~29k; CC-1b → `CC-1.subA`); Wave 2D (ultramap deep 13 files / 16 Mermaid); Wave 2E (Obsidian sync 16 vault file changes + 14 repo files)
@@ -95,8 +188,8 @@
 - See [`CHANGELOG.md`](CHANGELOG.md) for full per-wave deltas. NO `.rs` files. NO Cargo.toml.
 
 **In flight (CLAUDE.md §5.2 broadcast etiquette):**
-- Wave 4.B `na-gap-analyst → substrate-as-primary remediation` agent — authoring `ai_specs/substrates/{atuin,stcortex,injection_db,synthex,lcm,conductor,watcher,operator}.md` + `cross-cutting/refusal-taxonomy.md` + `cross-cutting/substrate-drift.md`
-- Zen G7 AMEND-loop: amended AUDIT-REQUEST v3 owed to Zen (citing D-S1002127-02 ADR + 12 affected files; ~`2026-05-17T<utc>_command_g7_audit_request_v3_cardinality_7_amendment.md`)
+- ~~Wave 4.B `na-gap-analyst → substrate-as-primary remediation`~~ — **CLOSED 2026-05-17** with full 5-item closeout: `substrate-couplings/` directory (4 files) + ERROR_TAXONOMY.md amendment (RefusalToken) + m42_stcortex_emit.md § 5.1 outbox-policy amendment + BENCHMARK_SPEC.md substrate-side benchmarks amendment + `ai_docs/decisions/2026-05-17-substrate-as-actor-deferrals.md` ADR (D-S1002127-03). 8/11 NA gaps closed; 3/11 deferred to v0.2.0 with compensating controls.
+- Zen G7 AMEND-loop: amended AUDIT-REQUEST v3 owed to Zen — **scope expanded** to include D-S1002127-02 (cardinality 7) + D-S1002127-03 (substrate-as-actor deferrals) + 4 amended files + 4 new substrate-couplings/ files (~`2026-05-17T<utc>_command_g7_audit_request_v3_cardinality_7_plus_wave4b_amendment.md`)
 - Workspace-root CLAUDE.local.md "The Workflow Engine" row stale — project charter forbids me from editing; Luke action standing
 
 **Flagged for Luke / Zen / Watcher escalation:**

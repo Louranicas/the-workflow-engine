@@ -8,7 +8,7 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ## [Unreleased]
 
-### Pending (Wave 4 candidates — post-S1002127)
+### Pending (Wave 5 candidates — post-Wave-4.B-closeout)
 - ai_docs/INDEX + ai_specs/INDEX status markers `TBD Wave 2` → `LIVE` (cosmetic)
 - ai_specs/INDEX heading-form variance documentation (3 canonical forms: `## N.` / `## N —` / `## §N`)
 - Vault HOME.md wikilinks to Wave-2B deep docs (`ARCHITECTURE_DEEP_DIVE`, `CODE_MODULE_MAP`, `CARGO_LAYOUT_SPEC`, etc.) — currently bidi anchor present in HOME but no per-doc wikilinks
@@ -17,21 +17,77 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 - m11 compound decay worked-examples → back-propagate to m11 spec test fixtures
 - m42 CC-5 closure-test 5-step ritual → back-propagate to m42 spec § tests
 - Cluster D Day-1 gantt → back-propagate to V7 runbook-01 Phase-1 Genesis
-- NA-GAP-01..11 remediation (Frame-A substrate-as-primary; ~8h work; **HIGH-VALUE pre-G9** per na-gap-analyst)
-  - Consider authoring `ai_specs/substrates/{atuin,stcortex,injection_db,synthex,lcm,conductor,watcher,operator}.md` with lifecycle / refusal / drift models
-  - Introduce first-class `RefusalToken` taxonomy distinguishing substrate-authored vs engine-authored refusal
-  - Add substrate fixtures to `tests/` planning (post-G9)
-  - Make m32 refusals engine-emitted (Class-C wire events), not Watcher-inferred from absence
-  - Document operator-as-substrate dynamics (consent-fatigue cap, attention budget)
 - agent-claim-verifier checks 6 + 16 in CI regression slot (post-G9)
 - Bottom-anchor decision on 11 specs (Cluster B/C/E/F missing trailing `Back to:`) — Command accepted top-anchor-sufficient; can re-author if Luke disagrees
 - **Workspace-root CLAUDE.local.md "The Workflow Engine" row amendment** — flagged stale by 4-surface verifier; project charter forbids; **Luke action required**
+
+### Pending (v0.2.0 deferrals — see [`ai_docs/decisions/2026-05-17-substrate-as-actor-deferrals.md`](ai_docs/decisions/2026-05-17-substrate-as-actor-deferrals.md))
+- W1: m16_substrate_drift_canary module (NA-GAP-07 module half; cross-cutting half closed Wave 4.B)
+- W2: tests/substrate_fixtures/ suite (NA-GAP-08)
+- W3: substrate-mediated trust cross-habitat ADR (NA-GAP-10)
 
 ### Pending (binding-spec gating; not scaffold scope)
 - Luke `start coding workflow-trace` (G9) — gated on G1-G8 sequence
 - Zen G7 verdict on v1.3 amendment + this scaffold (AUDIT-REQUEST v2 filed 2026-05-17T160500Z)
 - B4 Ember §5.1 Held-semantics amendment (Watcher's lane; awaits Luke direction)
 - B3 Conductor `auto_start=false` (Luke @ terminal `devenv start weaver/zen/enforcer`)
+
+---
+
+## [v0.0.0-spec.4] — 2026-05-17 (S1002127 — Wave 4.B closeout: NA-GAP substrate-as-actor remediation)
+
+### Added — substrate-couplings (NA-GAP-03 + NA-GAP-09 closure)
+- **`ai_specs/substrate-couplings/INDEX.md`** — new directory landing + verification-discipline pattern (`Engine-observable` / `Substrate-confirmable` / `Verification surface` / `Silent-failure shape` / `Remediation hint`) + substrate-confirmable-receipt convention
+- **`ai_specs/substrate-couplings/CC-5-decomposed.md`** — primary deliverable; decomposes CC-5's single Watcher-Class-I observation into **5 substrate-substrate edges** (E1 m32→S-C; E2 m32→S-E→S-C via Hebbian coord; E3 S-C→habitat-memory→S-B injection.db; E4 m32→S-F→V3-partner; E5 S-C→digest→S-G operator). Each edge has dossier with latency/observability/silent-failure shape/remediation. Class-I supplementation deferred to v0.2.0. Includes refusal-token table per edge.
+- **`ai_specs/substrate-couplings/CC-4-decomposed.md`** — 3 edges (m32→S-D Conductor wave dispatch; S-D refusal-path; m30→S-G operator AP-V7-07 acceptance). Includes AP-V7-13 enrichment (Conductor health-200 ≠ wave-pane-up case mirrors live POVM-CR-2 incident).
+- **`ai_specs/substrate-couplings/CC-7-decomposed.md`** — 4 edges (m15 pressure→S-G; S-G→spec amendment fanout; S-G→S-watcher Ember §5.1 gate AP27-enforced; S-G fatigue→m12 consent budget). Operator-as-substrate per NA-GAP-05.
+
+### Amended — RefusalToken introduction (NA-GAP-02 closure)
+- **`ai_specs/ERROR_TAXONOMY.md`** — new section after Cross-cluster propagation: "RefusalToken — typing refusal by authorship". Cross-references `cross-cutting/refusal-taxonomy.md`. Includes per-variant classification table (which existing thiserror variants are refusals vs failures vs unavailability). Adds cross-reference to substrate-drift as third class (looks-like-refusal but neither refusal nor unavailability — CR-2 canonical case).
+
+### Amended — m42 outbox-policy (NA-GAP-06 closure)
+- **`ai_specs/modules/cluster-H/m42_stcortex_emit.md § 5.1 Outbox-policy`** — new section between Algorithm sketch and Boilerplate lifts. Covers:
+  - § 5.1.a: drain ordering on substrate recovery (envelope.id ascending; idempotency-honoured replay; offline-snapshot reconciliation; throttle cap)
+  - § 5.1.b: outbox saturation limit (warn 64 MB / refuse 256 MB / panic 1 GB with rationale)
+  - § 5.1.c: offline-snapshot staleness threshold (warn 5 min / refuse 1 hr / panic 24 hr at boot)
+  - § 5.1.d: substrate-confirmable receipt (proposed `cc5_replay_observed_at` on stcortex side)
+  - § 5.1.e: metric inventory (6 new metrics including `reinforce_outbox_warn_total`, `reinforce_outbox_saturated_total`, `reinforce_drain_throttled_total`)
+
+### Amended — substrate-side benchmarks (NA-GAP-04 closure)
+- **`ai_specs/BENCHMARK_SPEC.md § Substrate-side load benchmarks`** — new section after m32 5-check bench. Defines:
+  - Six substrate-side benches (one per substrate; measurement surface AT the substrate, not the engine)
+  - Methodology (baseline → load → re-measure → delta → emit `SubstrateLoadProfile`)
+  - Wave-end discipline (opt-in `--features substrate-load`; substrate-drift quarantine on `SubstrateDriftDetected`)
+  - Per-substrate cadence-throttle rules consumed by m1/m3/m13/m40/m41/m42
+  - Anti-patterns specific to substrate-side benchmarking (measuring-at-engine; single-window measurement; ignoring co-tenant traffic)
+
+### Added — v0.2.0 deferrals ADR
+- **`ai_docs/decisions/2026-05-17-substrate-as-actor-deferrals.md`** (D-S1002127-03) — registers W1 (m16_substrate_drift_canary), W2 (tests/substrate_fixtures/), W3 (substrate-mediated trust cross-habitat ADR). Documents v0.1.0 compensating controls per deferred item. Defends split as structural-in-v0.1.0 / automation-in-v0.2.0 (not Frame collapse). Filed at `ai_docs/decisions/` (NOT `optimisation-v7/decisions/`) per NA-05 recommendation path; rationale documented in frontmatter.
+
+### Amended — registers
+- **`ai_specs/INDEX.md`** — new section "Substrate-substrate couplings (NA-GAP-03/09 closure — Wave 4.B)" after Substrate dossiers; lists 4 substrate-couplings files. Footer `Back to:` extended with `substrate-couplings/` and v0.2.0 deferrals ADR links.
+
+### Wave 4.B coverage summary
+
+| NA-GAP item | Closure surface | Status |
+|---|---|---|
+| NA-01 (substrate lifecycle/refusal/drift model in scaffold) | 8 substrate dossiers (Wave 4.B earlier) | ✅ CLOSED |
+| NA-02 (substrate-authored vs engine-authored refusal conflation) | `cross-cutting/refusal-taxonomy.md` + ERROR_TAXONOMY.md amendment | ✅ CLOSED |
+| NA-03 (substrate-substrate couplings hidden in CC-5) | `substrate-couplings/` (4 files) | ✅ CLOSED |
+| NA-04 (engine assumes substrates have no own attention budget) | substrate dossiers § back-pressure + BENCHMARK_SPEC.md amendment + m42 outbox-policy | ✅ CLOSED |
+| NA-05 (operator as oracle, not substrate) | `substrates/operator.md` + CC-7-decomposed.md | ✅ CLOSED |
+| NA-06 (offline-fallback asymmetric — outbox/read policy under-specified) | m42_stcortex_emit.md § 5.1 outbox-policy amendment | ✅ CLOSED |
+| NA-07 (substrate-drift detection implicit not first-class) | `cross-cutting/substrate-drift.md` (Wave 4.B earlier) + m16 module deferred to v0.2.0 (ADR D-S1002127-03) | ✅ PARTIAL (cross-cutting half closed; module deferred) |
+| NA-08 (no substrate-side test fixtures) | Deferred to v0.2.0 W2 (ADR D-S1002127-03) | ⏳ DEFERRED with compensating control (per-module integration tests gated `#[ignore]`) |
+| NA-09 (CC-5 verification engine-observable not substrate-observable) | substrate-confirmable-receipt convention in `substrate-couplings/INDEX.md` + 5 proposed receipts (CC-5) + 3 (CC-4) + 4 (CC-7) | ✅ CLOSED (substrate-side change requests in deferral ADR) |
+| NA-10 (Cluster D trust engine-internal not substrate-mediated) | Deferred to v0.2.0 W3 (ADR D-S1002127-03) | ⏳ DEFERRED with compensating control (operator-as-substrate trust via CC-7-decomposed; m9 namespace bounds blast radius) |
+| NA-11 (refusal-token observability gap — no Class C substrate emission) | `cross-cutting/refusal-taxonomy.md` § WireEvent::Refusal Class-C envelope + refusal-token tables in all 3 CC-decomposed files | ✅ CLOSED |
+
+**Wave 4.B verdict:** 8/11 NA gaps fully closed; 3/11 (NA-07 module / NA-08 / NA-10) deferred to v0.2.0 with documented compensating controls + work-item registry in D-S1002127-03.
+
+### Flagged
+- Zen G7 AUDIT-REQUEST v3 amendment needed: must include Wave 4.B deltas (3 substrate-couplings/ files + 1 ADR + 3 amendments). Stays inside D-B6 AMEND-loop scope.
+- Substrate-side change requests (5 receipts in CC-5; 3 in CC-4; 4 in CC-7) are **cross-habitat coordination items** — none of them are workflow-trace engine-side changes; tracked for v0.2.0 cross-habitat ADR cycle.
 
 ---
 

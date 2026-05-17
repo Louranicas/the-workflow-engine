@@ -254,6 +254,69 @@ m40_emitter.emit(event).await
 
 The pattern: each cluster's error enum wraps `BridgeError` for cross-cluster failures. `BridgeError` itself wraps the specific lower-level errors (`reqwest::Error`, etc.). This means the call-graph upward preserves both the cluster source AND the lower-level cause.
 
+## RefusalToken — typing refusal by authorship (NA-GAP-02 closure)
+
+Some variants in the cluster-level enums above are **refusals** (a substrate, the engine, or the operator CHOSE to refuse a request) rather than **failures** (an IO error, a parse error, a transient timeout). Per [`cross-cutting/refusal-taxonomy.md`](cross-cutting/refusal-taxonomy.md), refusals carry a `RefusalToken` distinguishing **who authored the refusal**:
+
+```rust
+// Defined in cross-cutting/refusal-taxonomy.md § RefusalToken — three top-level kinds
+pub enum RefusalToken {
+    SubstrateAuthored { substrate_id, refusal_class, recovery_hint, observed_at },
+    EngineAuthored    { invariant_id, refusal_class, recovery_hint, observed_at },
+    OperatorRefusal   { operator_id, refusal_class, attention_remaining, recovery_hint, observed_at },
+}
+```
+
+### Which variants above are refusals (vs failures)
+
+Each "refusal" variant carries `Option<RefusalToken>` so the caller can render `recovery_hint` and the `WireEvent::Refusal` emit-path can fire with correct attribution. Variants that are **true failures** (IO, parse, timeout) do NOT carry a token — they carry their original cause and surface as `Unavailability` per the refusal-taxonomy distinction.
+
+| Enum variant | Class | Token kind | Notes |
+|---|---|---|---|
+| `NamespaceError::PrefixMismatch` | Engine-authored refusal | `EngineAuthored { invariant: m9::namespace_guard, AP30 }` | Engine refuses to write outside `workflow_trace_*` |
+| `BankError::AutoPromoteRefused` | Engine-authored refusal | `EngineAuthored { invariant: m30::AP-V7-07, AcceptanceRequiresHumanSignature }` | Engine refuses auto-promote without operator signature |
+| `BankError::SunsetInvalid` | Engine-authored refusal | `EngineAuthored { invariant: m30::sunset_window }` | Engine refuses to admit sunset-invalid workflow |
+| `BankError::EscapeSurfaceInconsistent` | Engine-authored refusal | `EngineAuthored { invariant: m30::escape_surface_declared_vs_derived }` | Mismatch between declared + derived (7-variant cardinality per D-S1002127-02) |
+| `DispatchError::ConductorDispatchDisabled` | Substrate-authored refusal | `SubstrateAuthored { S-D, EnforcementDisabled }` | Conductor refused dispatch (NoOp mode) |
+| `DispatchError::VerificationStale` | Engine-authored refusal | `EngineAuthored { invariant: m32::check[2] }` | m32 5-check #2 refused — verification expired |
+| `DispatchError::DefinitionDrifted` | Engine-authored refusal | `EngineAuthored { invariant: m32::check[3] }` | m32 5-check #3 refused — definition_hash mismatch |
+| `DispatchError::WorkflowSunset` | Engine-authored refusal | `EngineAuthored { invariant: m32::check[4] }` | m32 5-check #4 refused — sunset_at exceeded |
+| `DispatchError::CooldownActive` | Engine-authored refusal | `EngineAuthored { invariant: m32::check[5] }` | m32 5-check #5 refused — cooldown active |
+| `DispatchError::SelfDispatchRefused` | Engine-authored refusal | `EngineAuthored { invariant: m32::AP-V7-08, SelfDispatch }` | m32 refuses to dispatch a workflow whose steps target m32 |
+| `ReinforceError::Namespace(NamespaceError::PrefixMismatch)` | Engine-authored refusal | `EngineAuthored { invariant: m9::namespace_guard }` | m42 wraps m9 refusal at AP30 boundary |
+| `ReinforceError::SubstrateUnavailable` | **Unavailability (NOT refusal)** | — (no token; carry `UnavailableReason`) | stcortex not present to respond — not refusing |
+| `StcortexWriterError::SubstrateUnavailable` | **Unavailability (NOT refusal)** | — | Same — m13 cannot reach `:3000` |
+| `BridgeError::*Unreachable` | **Unavailability (NOT refusal)** | — | Network-level unavailability |
+
+The remaining variants (`*Sqlite`, `*Serde`, `*Bridge(reqwest::Error)`, `*Io`, `Timeout`, `*Failed`) are **true failures** — IO / parse / transient. They do NOT carry tokens and do NOT fire `WireEvent::Refusal`.
+
+### Refusal emission discipline
+
+Every refusal variant must, at its emit site:
+
+1. **Return the typed error** with `Option<RefusalToken>` populated.
+2. **Emit `WireEvent::Refusal { token, workflow_id, emitted_by, emitted_at }`** via m40 to `:8092/v3/nexus/push` (per [`cross-cutting/refusal-taxonomy.md`](cross-cutting/refusal-taxonomy.md) § Emission discipline).
+3. **Surface `recovery_hint`** through m12 reports + m32 banner (operator-facing).
+
+This makes "successful refusal" first-class wire-protocol traffic, not Watcher-inferred from absence (NA-GAP-11 closure).
+
+### Substrate-authored refusal classes per substrate
+
+Each substrate dossier in [`substrates/`](substrates/) enumerates its own `SubstrateRefusalClass` variants. See:
+
+- [`substrates/atuin.md`](substrates/atuin.md) § 3 — `SqliteBusy`, `DatabaseLocked`, `KvNamespaceMissing`, `SchemaDetectFailure`
+- [`substrates/stcortex.md`](substrates/stcortex.md) § 3 — `RefuseWriteNoConsumer`, `InvalidSlug`, `NamespacePolicy`, `ConsumerTokenExpired`, `SchemaMismatch`
+- [`substrates/conductor.md`](substrates/conductor.md) § 3 — `EnforcementDisabled`, `SemanticEndpointFailed`, `WeaverZenEnforcerNotStarted`
+- [`substrates/synthex.md`](substrates/synthex.md) § 3 — `R13QuietPeriod`, `SchemaRejected`, `RateLimited`, `ConsumerRevoked`
+- [`substrates/lcm.md`](substrates/lcm.md) § 3 — `SupervisorNotLive`, `DeployCancelPending`, `SchemaRejected`, `RpcTimeout`, `M0Unverified`
+- [`substrates/watcher.md`](substrates/watcher.md) § 3 — `R13QuietPeriod`, `AP27SelfModRefused`, `EmberUnanimityFailed`, `ScopeViolationOutsideM8M51`
+- [`substrates/injection_db.md`](substrates/injection_db.md) § 3 — `SqliteBusy`, `SchemaMissing`, `TtlSweepActive`
+- [`substrates/operator.md`](substrates/operator.md) § 3 — operator-as-substrate modes (modelled as `OperatorRefusal`, not `SubstrateAuthored`)
+
+### Cross-reference to substrate-drift
+
+A third class of "looks-like-refusal" event is **substrate-drift** — substrate is Available, returns HTTP 200, but its semantics have drifted (CR-2 POVM `learning_health` 13.6× inflation is canonical). This is neither refusal nor unavailability; it is detected via the canary contract in [`cross-cutting/substrate-drift.md`](cross-cutting/substrate-drift.md). When canaries fire `SubstrateDriftDetected`, downstream Result chains MUST treat affected substrate responses as **suspect-until-canary-confirms** even though no Result::Err was returned.
+
 ## CLI bin error handling
 
 At the `wf-crystallise` / `wf-dispatch` `main()` level:

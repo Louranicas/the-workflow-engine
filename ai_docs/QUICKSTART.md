@@ -206,6 +206,41 @@ wf-dispatch dispatch <workflow>
 
 ---
 
+## Wave 4.B substrate-as-actor cold-start additions (2026-05-17)
+
+The Wave 4.B closeout (NA-GAP remediation) introduced new surfaces. **If you are authoring a spec that touches a substrate (atuin, stcortex, injection.db, Conductor, SYNTHEX v2, LCM) or the operator, read these FIRST:**
+
+```bash
+# Frame A — substrates-as-actors
+batcat ai_specs/substrates/INDEX.md          # landing + reading order
+batcat ai_specs/substrates/<S-X>.md          # per-substrate dossier (S-A..S-G + S-watcher)
+
+# Substrate-substrate coupling decompositions (when authoring CC-5, CC-4, or CC-7)
+batcat ai_specs/substrate-couplings/INDEX.md
+batcat ai_specs/substrate-couplings/CC-<N>-decomposed.md
+
+# Refusal-token taxonomy (when authoring any fallible substrate-touching path)
+batcat ai_specs/cross-cutting/refusal-taxonomy.md
+
+# Substrate-drift detection (canary contract participation)
+batcat ai_specs/cross-cutting/substrate-drift.md
+
+# v0.2.0 deferral ADR (NA-GAP-07 module / NA-GAP-08 fixtures / NA-GAP-10 trust)
+batcat ai_docs/decisions/2026-05-17-substrate-as-actor-deferrals.md
+```
+
+The substrate dossiers carry **drift_indicators** + **back_pressure_signals** + **refusal_modes** + **substrate-confirmable receipts** — these are the post-G9 contract surfaces every substrate-touching module spec consumes.
+
+---
+
+## Add a cluster operational landing (post-G9; pre-G9 = HOLD)
+
+Per-cluster runtime landings live at [`layers/cluster-{A-H}/README.md`](../layers/) — these are the OPERATIONAL view (metrics, capacity, failure escalation) counterpart to the prescriptive [`ai_specs/layers/cluster-{A-H}.md`](../ai_specs/layers/). They're scaffolded pre-G9 (8 files); runtime sections are placeholders until post-G9 implementation.
+
+Per-module operational landings ([`modules/m<N>_<name>.md`](../modules/)) are reserved for **post-G9** authoring — see [`modules/README.md`](../modules/README.md) for the rationale (cannot meaningfully describe runtime behaviour pre-G9).
+
+---
+
 ## Cross-references
 
 - **Onboarding (deeper):** [`ONBOARDING.md`](ONBOARDING.md)
@@ -214,6 +249,8 @@ wf-dispatch dispatch <workflow>
 - **Cargo layout spec (pre-Cargo.toml):** [`CARGO_LAYOUT_SPEC.md`](CARGO_LAYOUT_SPEC.md)
 - **Performance budgets:** [`PERFORMANCE.md`](PERFORMANCE.md)
 - **Anti-patterns full catalogue:** [`ANTIPATTERNS_REGISTER.md`](optimisation-v7/ANTIPATTERNS_REGISTER.md)
+- **NA gap analysis (Frame A — required reading before authoring substrate-touching modules):** [`NA_GAP_ANALYSIS_S1002127_SCAFFOLD.md`](NA_GAP_ANALYSIS_S1002127_SCAFFOLD.md)
+- **Decision register:** [`optimisation-v7/DECISION_REGISTER.md`](optimisation-v7/DECISION_REGISTER.md) + ADRs in [`decisions/`](decisions/) + [`optimisation-v7/decisions/`](optimisation-v7/decisions/)
 
 > **Back to:** [`README.md`](../README.md) · [`CLAUDE.md`](../CLAUDE.md) · [`ONBOARDING.md`](ONBOARDING.md)
 

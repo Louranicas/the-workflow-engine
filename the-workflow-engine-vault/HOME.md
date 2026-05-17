@@ -1,7 +1,7 @@
 ---
 title: The Workflow Engine — Vault HOME
-date: 2026-05-17 (S1001982)
-status: planning-only · single-phase deployment (Luke override) · HOLD-v2 active (G1-G9 gated)
+date: 2026-05-17 (S1002127 · Wave 4.B closeout)
+status: planning-only · single-phase deployment (Luke override) · HOLD-v2 active (G1-G9 gated) · Wave 4.B NA-GAP remediation LIVE
 authority: Luke @ node 0.A
 ---
 
@@ -9,11 +9,42 @@ authority: Luke @ node 0.A
 
 > Back to: `~/claude-code-workspace/the-workflow-engine/` · [[CLAUDE.md]] · [[CLAUDE.local.md]]
 
-This vault holds the planning-pilot artefacts for the workflow-engine codebase. **No code, no scaffold, no build has occurred.** All artefacts are planning surface within the AP24 + Zen-gate-block envelope.
+This vault holds the planning-pilot artefacts for the workflow-engine codebase. **No code, no scaffold, no build has occurred** (HOLD-v2 envelope active: 0 `.rs` / 0 `Cargo.toml` in active scope). All artefacts are planning surface within the AP24 + Zen-gate-block envelope.
 
 ---
 
-## Recent — Wave 0/1/2 Scaffold (S1002127)
+## Recent — Wave 4.B closeout (S1002127 continuation, 2026-05-17 evening)
+
+**NA-GAP substrate-as-actor remediation** — Frame A (substrates as primary entities, not as resources the engine consumes) absorbed into the scaffold. 8/11 NA gaps closed in this wave; 3/11 deferred to v0.2.0 via D-S1002127-03 ADR with documented compensating controls. CHANGELOG entry: `v0.0.0-spec.4`.
+
+### Five-item closeout
+
+1. **`ai_specs/substrate-couplings/`** — NEW directory (4 files: `INDEX.md`, `CC-5-decomposed.md`, `CC-4-decomposed.md`, `CC-7-decomposed.md`). Decomposes engine-side CC contracts into their substrate-substrate edges with per-edge observability contracts. Closes **NA-GAP-03** + **NA-GAP-09**.
+2. **`ai_specs/ERROR_TAXONOMY.md` amendment** — RefusalToken cross-reference + per-variant classification table (which thiserror variants are refusals vs failures vs unavailability). Closes **NA-GAP-02**.
+3. **`ai_specs/modules/cluster-H/m42_stcortex_emit.md` § 5.1 amendment** — Outbox-policy (drain ordering / saturation 64MB-warn / 256MB-refuse / 1GB-panic; snapshot staleness 5min-warn / 1hr-refuse / 24hr-panic). Closes **NA-GAP-06**.
+4. **`ai_specs/BENCHMARK_SPEC.md` amendment** — Substrate-side load benchmarks (measured AT substrate, NOT at engine; 6 substrate benches; per-substrate cadence-throttle rules). Closes **NA-GAP-04**.
+5. **`ai_docs/decisions/2026-05-17-substrate-as-actor-deferrals.md`** (D-S1002127-03 ADR) — Registers v0.2.0 work items W1 (m16_substrate_drift_canary module), W2 (tests/substrate_fixtures/), W3 (substrate-mediated trust cross-habitat ADR). Documents v0.1.0 compensating controls.
+
+### Audit-driven sync (post-closeout)
+
+- **`ai_specs/substrates/INDEX.md`** — landing for the 8 substrate dossiers
+- **`layers/cluster-{A-H}/README.md` × 8** — per-cluster operational landings (runtime view counterpart to `ai_specs/layers/cluster-X.md` design specs)
+- **`modules/README.md`** — placeholder declaring per-module operational landings deferred to post-G9 (HOLD-v2 compliant rationale)
+- **Root `README.md`** — repository-layout table refreshed; cold-start adds substrate-couplings + refusal-taxonomy + substrate-drift; live-state section added
+- **`ai_docs/QUICKSTART.md`** — Wave 4.B substrate-as-actor cold-start additions section
+
+### Linked vault notes (NEW or referenced)
+
+- **Wave 4.B closeout work products** (canonical at `~/claude-code-workspace/the-workflow-engine/`):
+  - `ai_specs/substrates/INDEX.md` + 8 dossiers
+  - `ai_specs/substrate-couplings/INDEX.md` + 3 decomposed files
+  - `ai_specs/cross-cutting/refusal-taxonomy.md` + `substrate-drift.md`
+  - `ai_docs/decisions/2026-05-17-substrate-as-actor-deferrals.md` (D-S1002127-03)
+  - Three ADRs in `ai_docs/optimisation-v7/decisions/`: m42 pivot (D-S1001982-01), G8 persistence (D-S1002127-01), EscapeSurfaceProfile cardinality 7 (D-S1002127-02)
+
+---
+
+## Recent — Wave 0/1/2/3 Scaffold (S1002127)
 
 **Filed 2026-05-17 (S1002127)** under the [[../PRIME_DIRECTIVE_WAIVER|PRIME_DIRECTIVE_WAIVER]] — structure + specs + config only, NO `.rs` source files, NO `Cargo.toml` at root, NO `cargo` of any kind. G9 still not fired; HOLD-v2 envelope respected.
 

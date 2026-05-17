@@ -245,6 +245,68 @@ reinforce(workflow_id, outcome):
                   Ok(ReinforceOutcome::SubstrateError { status, body })
 ```
 
+## 5.1. Outbox-policy (NA-GAP-06 closure: drain ordering, saturation, snapshot staleness)
+
+The Algorithm sketch above details the per-call write path. NA-GAP-06 surfaced three under-specified outbox-policy axes that govern **what happens between fresh writes**: drain ordering on substrate recovery, saturation behaviour, and offline-snapshot staleness threshold. All three are policy-level (not per-write) and must be machine-checked by integration tests.
+
+### 5.1.a. Drain ordering on substrate recovery
+
+When the breaker transitions Closed (after HALF_OPEN probe success), m42 has a backlog: every payload written to `outbox.jsonl` while breaker was Open carries `posted: false`. Per ADR R3 + the offline-snapshot path (Algorithm sketch step 6), unposted envelopes have also been written to `{offline_snapshot_path}/m42-replay.jsonl` (if configured). On recovery:
+
+| Phase | Action | Invariant |
+|---|---|---|
+| **Detection** | `retry_sweep` (background task; cadence `outbox_retry_interval_secs`, default 60s) discovers `posted: false` envelopes in `outbox.jsonl` and the breaker is Closed | sweep is single-task per binary (no race) |
+| **Replay order** | Envelopes drained in `envelope.id` ascending order (creation order = causal order; the `id` field is monotonic from `AtomicU64::fetch_add`) | causal ordering preserved across recovery |
+| **Per-envelope retry** | Each envelope re-runs the m13 write path; on success → mark `posted: true` (in-place line-rewrite via marker, NOT delete); on failure → break sweep, leave breaker management to the next allow-check | idempotency_seen entry (TtlSet) re-honoured to avoid duplicate reinforce on stcortex |
+| **Idempotency** | If stcortex still has the prior `request_id` in its idempotency window (default 1h), the replay returns `Skipped` — counts as success for drain accounting | matches m24_povm_bridge.rs idempotency pattern lift |
+| **Offline-snapshot reconciliation** | After full outbox drain, `m42-replay.jsonl` is compared against the now-`posted: true` envelopes; replay-only entries (no matching outbox row) are also drained, then archived to `{offline_snapshot_path}/m42-replay-archive-{ts}.jsonl` | offline snapshot does not silently grow; archival cadence is per-recovery |
+| **Throttle** | Drain rate capped at `outbox_drain_max_per_sec` (default 20) to avoid post-recovery stcortex thundering-herd (per [`../substrates/stcortex.md`](../substrates/stcortex.md) backpressure signals) | substrate-load-aware; observed via `reinforce_drain_throttled_total` |
+
+### 5.1.b. Outbox saturation limit
+
+Outbox is JSONL-on-disk, durability-by-`sync_data`; under sustained stcortex outage with high dispatch rate, file size grows unbounded. Saturation behaviour:
+
+| Threshold | Action | Metric |
+|---|---|---|
+| `outbox_saturation_warn_bytes` (default 64 MB) | Log warning; emit `reinforce_outbox_warn_total += 1`; surface via WireEvent::Refusal (`SubstrateAuthored { S-C, OutboxApproachingSaturation }`) | `reinforce_outbox_warn_total` |
+| `outbox_saturation_refuse_bytes` (default 256 MB) | New `reinforce()` calls return `Ok(ReinforceOutcome::OutboxSaturated)` immediately (without appending) → m32 surfaces as `SubstrateAuthored { S-C, OutboxSaturated }`; the outcome is **logged as a dropped reinforce** in m12 reports | `reinforce_outbox_saturated_total` |
+| `outbox_saturation_panic_bytes` (default 1 GB) | Panic with `outbox.jsonl exceeded 1 GB — operator intervention required` (operator must rotate / replay manually); engine intentionally fails-loud rather than fails-silent | none (panic) |
+
+Rationale: **failing-loud at saturation is the AP-V7-13-aware path** — silent unbounded outbox growth is the worst-case substrate-drift accomplice (engine looks healthy while accumulating un-replayed reinforce events for weeks).
+
+Outbox rotation: on every `retry_sweep` cycle, drained envelopes (now `posted: true`) older than `outbox_compact_age_days` (default 7) are compacted out via in-place truncate-and-rewrite; the compacted-out envelope summaries are archived to `{outbox_path}/m42-compact-archive-{ts}.jsonl` for audit.
+
+### 5.1.c. Offline-snapshot staleness threshold
+
+Per [workspace CLAUDE.md memory row 8](../../../CLAUDE.md) stcortex policy, on stcortex unreachable, reads should fall back to `data/snapshots/latest.json` and writes go to the offline-snapshot path. The read-fallback's staleness must be bounded:
+
+| Threshold | Action |
+|---|---|
+| `snapshot_staleness_warn_secs` (default 300s / 5 min) | Engine logs warning on every read using the snapshot; metric `m13_snapshot_stale_read_total += 1`; surfaces via WireEvent::Refusal (`SubstrateAuthored { S-C, SnapshotApproachingStaleness }`) on first cross of threshold |
+| `snapshot_staleness_refuse_secs` (default 3600s / 1 hr) | Reads from snapshot return `Err(StcortexWriterError::SnapshotTooStale { stale_secs })` — engine no longer trusts the offline snapshot |
+| `snapshot_staleness_panic_secs` (default 86400s / 24 hr) | Engine refuses to proceed at all — startup probe fails if snapshot stale > 1 day at boot |
+
+The staleness threshold is applied **per-read**, not per-snapshot-age: if a fresh snapshot lands at `T`, reads up to `T + warn` are quiet, between `warn` and `refuse` log + emit, beyond `refuse` fail-fast.
+
+m42 itself **does NOT read snapshots** (m42 is write-only — see § 11 invariant "AP-WT-F3 substrate-input poisoning: m42 is write-only; reads zero state"); this policy governs sister modules (m13 stcortex-writer reads, m31 selection reads via m14). It is documented here for symmetry with the write-side outbox policy.
+
+### 5.1.d. Substrate-confirmable receipt
+
+Per [`../substrate-couplings/CC-5-decomposed.md`](../substrate-couplings/CC-5-decomposed.md) § 3, m42's drain operation may carry a substrate-confirmable receipt: stcortex writes `cc5_replay_observed_at` on a pathway when it detects an idempotency-cache-miss reinforce arriving from a replay path. This receipt allows the engine to confirm "drain reached the substrate end-to-end" rather than just "outbox marked posted" — the difference matters under network partitions where m13 saw HTTP 200 but the substrate-internal Hebbian update silently dropped. Substrate-side change request tracked in [`../../../ai_docs/decisions/`](../../../ai_docs/decisions/).
+
+### 5.1.e. Metric inventory (additions for NA-GAP-06)
+
+| Metric | Trigger | Owner |
+|---|---|---|
+| `reinforce_outbox_warn_total` | outbox crosses warn threshold | retry_sweep |
+| `reinforce_outbox_saturated_total` | reinforce() returned OutboxSaturated | reinforce() |
+| `reinforce_drain_throttled_total` | retry_sweep paced down due to drain rate cap | retry_sweep |
+| `reinforce_drain_replayed_total` | envelope marked posted via drain | retry_sweep |
+| `reinforce_drain_skipped_idempotent_total` | replay returned Skipped (substrate already saw request_id) | retry_sweep |
+| `m13_snapshot_stale_read_total` | snapshot-fallback read crossed warn threshold | m13 (sister module; documented here for symmetry) |
+
+These metrics close the **observability gap** NA-GAP-06 surfaced: today the engine has no signal between "outbox written" and "stcortex acknowledged"; with these, every state transition has an emit-point.
+
 ## 6. Boilerplate lifts
 
 Per V7 cluster-H plan § m42 § Boilerplate-lift source (Category 08 Nexus-LCM-RPC gold standard + Category 02 stcortex consumer):

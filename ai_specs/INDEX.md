@@ -102,6 +102,19 @@ Per [`../ai_docs/NA_GAP_ANALYSIS_S1002127_SCAFFOLD.md`](../ai_docs/NA_GAP_ANALYS
 | **S-watcher** The Watcher ☤ persona | [`substrates/watcher.md`](substrates/watcher.md) | persona | indirect |
 | **S-G** Operator (operator-as-substrate per NA-GAP-05) | [`substrates/operator.md`](substrates/operator.md) | persona | m12, m23→m30, m30, m32 banner, Luke directives, Zen G7 |
 
+## Substrate-substrate couplings (NA-GAP-03/09 closure — Wave 4.B)
+
+`synergies/CC-*.md` enumerates engine-side cross-cluster contracts. `substrate-couplings/CC-*-decomposed.md` enumerates the **substrate-substrate edges** hidden inside those contracts — information channels between persistent substrate-state stores, owned by substrates (not the engine).
+
+| File | Parent synergy | Substrate edges | NA-GAP closure |
+|---|---|---|---|
+| [`substrate-couplings/INDEX.md`](substrate-couplings/INDEX.md) | — | landing + verification-discipline pattern + substrate-confirmable-receipt convention | NA-GAP-09 framework |
+| [`substrate-couplings/CC-5-decomposed.md`](substrate-couplings/CC-5-decomposed.md) | [`synergies/CC-5.md`](synergies/CC-5.md) (SPECIAL DEPTH) | 5 edges: m32→S-C, m32→S-E→S-C, S-C→habitat-memory→S-B, m32→S-F→V3-partner, S-C→digest→S-G | NA-GAP-03, NA-GAP-09 PRIMARY |
+| [`substrate-couplings/CC-4-decomposed.md`](substrate-couplings/CC-4-decomposed.md) | [`synergies/CC-4.md`](synergies/CC-4.md) | 3 edges: m32→S-D, S-D refusal-path, m30→S-G operator (AP-V7-07 acceptance signature) | NA-GAP-03 (secondary) + AP-V7-13 enrichment |
+| [`substrate-couplings/CC-7-decomposed.md`](substrate-couplings/CC-7-decomposed.md) | [`synergies/CC-7.md`](synergies/CC-7.md) | 4 edges: m15→S-G pressure-row, S-G→spec-amendment fanout, S-G→S-watcher Ember §5.1 gate, S-G consent-budget→m12 | NA-GAP-03 (operator) + NA-GAP-05 (operator-as-substrate) |
+
+Engine-internal CCs (CC-1, CC-1.subA, CC-2, CC-3, CC-6) are NOT decomposed here — they have no substrate-substrate edges beyond the trivial atuin-read / SQLite-internal cases already documented in `substrates/`.
+
 ---
 
 ## Schematics
@@ -110,4 +123,4 @@ Per [`../ai_docs/NA_GAP_ANALYSIS_S1002127_SCAFFOLD.md`](../ai_docs/NA_GAP_ANALYS
 
 ---
 
-> **Back to:** [`../README.md`](../README.md) · [`../ARCHITECTURE.md`](../ARCHITECTURE.md) · sister [`../ai_docs/INDEX.md`](../ai_docs/INDEX.md) · [`MODULE_MATRIX.md`](MODULE_MATRIX.md) · NA remediation [`../ai_docs/NA_GAP_ANALYSIS_S1002127_SCAFFOLD.md`](../ai_docs/NA_GAP_ANALYSIS_S1002127_SCAFFOLD.md) · [`substrates/`](substrates/) · [`cross-cutting/refusal-taxonomy.md`](cross-cutting/refusal-taxonomy.md) · [`cross-cutting/substrate-drift.md`](cross-cutting/substrate-drift.md)
+> **Back to:** [`../README.md`](../README.md) · [`../ARCHITECTURE.md`](../ARCHITECTURE.md) · sister [`../ai_docs/INDEX.md`](../ai_docs/INDEX.md) · [`MODULE_MATRIX.md`](MODULE_MATRIX.md) · NA remediation [`../ai_docs/NA_GAP_ANALYSIS_S1002127_SCAFFOLD.md`](../ai_docs/NA_GAP_ANALYSIS_S1002127_SCAFFOLD.md) · [`substrates/`](substrates/) · [`substrate-couplings/`](substrate-couplings/) · [`cross-cutting/refusal-taxonomy.md`](cross-cutting/refusal-taxonomy.md) · [`cross-cutting/substrate-drift.md`](cross-cutting/substrate-drift.md) · v0.2.0 deferrals [`../ai_docs/decisions/2026-05-17-substrate-as-actor-deferrals.md`](../ai_docs/decisions/2026-05-17-substrate-as-actor-deferrals.md)

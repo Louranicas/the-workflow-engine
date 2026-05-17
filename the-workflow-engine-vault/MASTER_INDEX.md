@@ -1,8 +1,8 @@
 ---
 title: MASTER INDEX — the-workflow-engine vault
-date: 2026-05-17 (S1001982)
+date: 2026-05-17 (S1002127 · Wave 4.B closeout)
 kind: index
-status: planning-only · HOLD-v2 active
+status: planning-only · HOLD-v2 active · Wave 4.B NA-GAP remediation LIVE
 ---
 
 # MASTER INDEX
@@ -61,7 +61,61 @@ Subordinate to [[Modules Synergy Clusters and Feature Verification S1001982]] ·
 - [[cluster-E-evidence-pressure]] — m14, m15 (habitat-outcome-lift + pressure log)
 - [[cluster-F-iteration]] — m20, m21, m22, m23 (iterators + gradient-preservation)
 - [[cluster-G-bank-select-dispatch-verify]] — m30, m31, m32, m33 (bank + select + dispatch + verify)
-- [[cluster-H-substrate-feedback]] — m40, m41, m42 (SYNTHEX + LCM + POVM Hebbian)
+- [[cluster-H-substrate-feedback]] — m40, m41, m42 (SYNTHEX + LCM + POVM Hebbian) — **m42 POVM-decoupled per 2026-05-17 D-S1001982-01 ADR**
+
+## 5c. Wave 4 + 4.B — NA-GAP substrate-as-actor remediation (Frame A)
+
+Per the NA gap analysis at `~/claude-code-workspace/the-workflow-engine/ai_docs/NA_GAP_ANALYSIS_S1002127_SCAFFOLD.md`, the scaffold's anthropocentric module-primary view was complemented by a Frame A (substrates-as-actors) pass in Wave 4 + Wave 4.B closeout. 8/11 NA gaps closed; 3/11 deferred to v0.2.0 via ADR D-S1002127-03.
+
+### Substrate dossiers (Wave 4 — 8 substrate-as-actor profiles)
+
+Canonical at `~/claude-code-workspace/the-workflow-engine/ai_specs/substrates/`:
+
+- `ai_specs/substrates/INDEX.md` — landing + reading order
+- `ai_specs/substrates/atuin.md` (S-A — shell-history SQLite)
+- `ai_specs/substrates/injection_db.md` (S-B — causal-chain SQLite)
+- `ai_specs/substrates/stcortex.md` (S-C — SpacetimeDB pioneer memory; CANONICAL substrate-drift case CR-2)
+- `ai_specs/substrates/conductor.md` (S-D — HABITAT-CONDUCTOR enforcement)
+- `ai_specs/substrates/synthex.md` (S-E — SYNTHEX v2 NexusEvent; Hebbian coordinator since S226)
+- `ai_specs/substrates/lcm.md` (S-F — LCM loop create/cancel MCP)
+- `ai_specs/substrates/watcher.md` (S-watcher — The Watcher ☤ persona; AP27-bounded)
+- `ai_specs/substrates/operator.md` (S-G — operator-as-substrate per NA-GAP-05)
+
+### Substrate-substrate couplings (Wave 4.B — 4 decomposition files)
+
+Canonical at `~/claude-code-workspace/the-workflow-engine/ai_specs/substrate-couplings/`:
+
+- `ai_specs/substrate-couplings/INDEX.md` — verification-discipline pattern + substrate-confirmable-receipt convention
+- `ai_specs/substrate-couplings/CC-5-decomposed.md` — 5 substrate-substrate edges in the substrate learning loop (PRIMARY; closes NA-GAP-03 + NA-GAP-09)
+- `ai_specs/substrate-couplings/CC-4-decomposed.md` — 3 edges (m32→S-D Conductor dispatch + m30→S-G operator AP-V7-07; AP-V7-13 enrichment)
+- `ai_specs/substrate-couplings/CC-7-decomposed.md` — 4 edges (operator-as-substrate pressure → spec amendment fanout → S-watcher Ember gate → fatigue feedback)
+
+### Cross-cutting NA-remediation specs
+
+Canonical at `~/claude-code-workspace/the-workflow-engine/ai_specs/cross-cutting/`:
+
+- `ai_specs/cross-cutting/refusal-taxonomy.md` — `RefusalToken` taxonomy (SubstrateAuthored / EngineAuthored / OperatorRefusal) + `WireEvent::Refusal` Class-C envelope (closes NA-GAP-02 + NA-GAP-11)
+- `ai_specs/cross-cutting/substrate-drift.md` — first-class substrate-drift detection (canary contract + `SubstrateDriftDetected` event + CR-2 POVM canonical case; closes NA-GAP-07 cross-cutting half)
+
+### Decision register (Wave 4.B ADRs)
+
+- **D-S1001982-01** — `ai_docs/optimisation-v7/decisions/2026-05-17-m42-stcortex-only-pivot.md` (m42 POVM decoupling; 48-decision grilling outcome)
+- **D-S1002127-01** — `ai_docs/optimisation-v7/decisions/2026-05-17-g8-stcortex-persistence-plan.md` (G8 stcortex persistence pre-spec; ~46 memories + ~60 pathways planned at G8-green)
+- **D-S1002127-02** — `ai_docs/optimisation-v7/decisions/2026-05-17-escape-surface-cardinality-7-privilege-escalation.md` (EscapeSurfaceProfile 6→7 with `PrivilegeEscalation`)
+- **D-S1002127-03** — `ai_docs/decisions/2026-05-17-substrate-as-actor-deferrals.md` (v0.2.0 work items W1/W2/W3 for NA-GAP-07 module / NA-GAP-08 fixtures / NA-GAP-10 trust)
+
+### Per-cluster operational landings (Wave 4.B audit)
+
+Operational view counterpart to `ai_specs/layers/cluster-X.md` design specs, scaffolded at `~/claude-code-workspace/the-workflow-engine/layers/cluster-{A-H}/README.md`. Per-module operational landings (`modules/m<N>_<name>.md` × 26) are reserved for post-G9 per `modules/README.md` rationale (cannot meaningfully describe runtime behaviour pre-G9).
+
+### Surface amendments (Wave 4.B)
+
+- `ai_specs/ERROR_TAXONOMY.md` — added `RefusalToken` section + per-variant classification table
+- `ai_specs/modules/cluster-H/m42_stcortex_emit.md` § 5.1 — outbox-policy (drain ordering / saturation 64MB-warn / 256MB-refuse / 1GB-panic; snapshot staleness 5min/1hr/24hr thresholds)
+- `ai_specs/BENCHMARK_SPEC.md` — substrate-side load benchmarks section (6 substrate benches; per-substrate cadence-throttle rules)
+- `ai_specs/INDEX.md` — substrate-couplings/ section + footer back-refs
+- `README.md` (root) — repository-layout table refreshed; cold-start adds Wave 4.B surfaces
+- `ai_docs/QUICKSTART.md` — Wave 4.B substrate-as-actor cold-start additions
 
 ## 6. Boilerplate modules archive (reference-only)
 

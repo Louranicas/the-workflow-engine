@@ -1,0 +1,209 @@
+[
+  {
+    "id": "AP-V7-01",
+    "title": "Health-200 != behaviour-verified",
+    "severity": "HIGH",
+    "pattern": "curl[^|]*localhost:[0-9]+/health[^|]*200",
+    "mitigation": "Pair every /health 200 with a behavioural probe (e.g. learning_health field, build SHA, calibration marker) before declaring substrate ready. AP discovered when POVM :8125 served pre-CR-2 binary while /health returned 200.",
+    "related": ["AP-V7-13", "AP30"],
+    "source_url": "ai_docs/optimisation-v7/ANTIPATTERNS_REGISTER.md#ap-v7-13"
+  },
+  {
+    "id": "AP-V7-02",
+    "title": "Silence-as-consent in multi-pane orchestration",
+    "severity": "MEDIUM",
+    "pattern": "(?i)\\b(silence|no\\s+response)\\s*=\\s*consent",
+    "mitigation": "Peer non-response is silence, not consent. Use explicit ACK file drops in ~/projects/shared-context/agent-cross-talk/ + AskUserQuestion before progressing dependent steps.",
+    "related": ["AP-V7-08"],
+    "source_url": "ai_docs/optimisation-v7/ANTIPATTERNS_REGISTER.md#ap-v7-08"
+  },
+  {
+    "id": "AP-V7-03",
+    "title": "Verb collapse across Phase A/B boundary",
+    "severity": "HIGH",
+    "pattern": "\\b(recommend|dispatch|propose|select)\\b.*m([1-9]|1[0-5])\\b",
+    "mitigation": "Phase A modules (m1-m15) are PASSIVE: ingest, correlate, record, emit, refuse. Active verbs (recommend, dispatch, propose, select) belong to Phase B (m20-m33). Verb-lock enforced by v1.3.",
+    "related": ["AP-V7-11"],
+    "source_url": "ai_docs/optimisation-v7/ANTIPATTERNS_REGISTER.md"
+  },
+  {
+    "id": "AP-V7-04",
+    "title": "POVM dual-path coupling (RESOLVED)",
+    "severity": "RESOLVED",
+    "pattern": "m42_povm_dual",
+    "mitigation": "m42 pivoted to stcortex-only routing 2026-05-17. Module renamed src/m42_povm_dual/ -> src/m42_stcortex_emit/. POVM dependency removed; see ADR.",
+    "related": ["AP-V7-13"],
+    "source_url": "ai_docs/optimisation-v7/decisions/2026-05-17-m42-stcortex-only-pivot.md"
+  },
+  {
+    "id": "AP-V7-05",
+    "title": "Module-count drift across artefacts (RESOLVED)",
+    "severity": "RESOLVED",
+    "pattern": "\\b(28|11|25)\\s+modules\\b",
+    "mitigation": "OI-3 reconciled at 26 modules with m1-m42 unpadded. Any artefact claiming 28/11/25 is stale; refresh from ai_specs/MODULE_MATRIX.md.",
+    "related": ["AP-V7-06"],
+    "source_url": "ai_docs/GENESIS_PROMPT_V1_3.md"
+  },
+  {
+    "id": "AP-V7-06",
+    "title": "Padded vs unpadded module IDs",
+    "severity": "RESOLVED",
+    "pattern": "\\bm0[0-9]\\b",
+    "mitigation": "OI-4 locked at unpadded throughout (m1, m2, m11, m42). Never m01, m02. Frontmatter parsers must accept unpadded only.",
+    "related": ["AP-V7-05"],
+    "source_url": "ai_docs/GENESIS_PROMPT_V1_3.md"
+  },
+  {
+    "id": "AP-V7-07",
+    "title": "Auto-promotion m23 -> m30 (proposer-to-bank without human review)",
+    "severity": "HIGH",
+    "pattern": "m23.*->.*m30|m23.*direct.*m30|auto.*promote.*bank",
+    "mitigation": "m23 proposes; humans review; m30 accepts. Bypass is a refusal-mode violation. CC-4 contract REQUIRES a review pause-state between m23 and m30.",
+    "related": ["AP-V7-08", "AP27"],
+    "source_url": "ai_docs/optimisation-v7/ANTIPATTERNS_REGISTER.md"
+  },
+  {
+    "id": "AP-V7-08",
+    "title": "Self-dispatch via m32",
+    "severity": "HIGH",
+    "pattern": "m32.*dispatch.*m32|workflow.*self.*dispatch",
+    "mitigation": "m32 dispatches workflows; m32 itself is not a workflow. Recursion trap. Guard via workflow_runs_row.kind != 'dispatcher_self'.",
+    "related": ["AP-V7-02"],
+    "source_url": "ai_docs/optimisation-v7/ANTIPATTERNS_REGISTER.md"
+  },
+  {
+    "id": "AP-V7-09",
+    "title": "Cluster D not woven first",
+    "severity": "HIGH",
+    "pattern": "(?i)cluster\\s*[A|B|C].*before.*cluster\\s*D",
+    "mitigation": "Trust aspect-layer (m8/m9/m10/m11) MUST ship Day 1 before any reader (Cluster A/B/C). Retrofit costs an audit of every call site. Phase 1 sequencing in deployment framework enforces.",
+    "related": ["AP-V7-03"],
+    "source_url": "the-workflow-engine-vault/deployment%20framework/phase-1-genesis-day-0-3.md"
+  },
+  {
+    "id": "AP-V7-10",
+    "title": "LCM workspace-of-crates pattern when ORAC single-crate is correct",
+    "severity": "MEDIUM",
+    "pattern": "\\[workspace\\]|members\\s*=\\s*\\[",
+    "mitigation": "Single deployment target with shared lib + 2 binaries -> ORAC single-crate pattern, not LCM 10-crate workspace. Use [[bin]] entries + src/lib.rs.",
+    "related": ["AP-V7-12"],
+    "source_url": "ai_docs/optimisation-v7/GENERATIONS/G2-consolidation.md"
+  },
+  {
+    "id": "AP-V7-11",
+    "title": "Active verbs in Phase A modules (m1-m15) (RESOLVED via v1.3 verb-lock)",
+    "severity": "RESOLVED",
+    "pattern": "\\bm([1-9]|1[0-5])\\b.*\\b(recommend|propose|dispatch|select|decide)\\b",
+    "mitigation": "v1.3 verb-lock active. Phase A vocabulary: ingest, correlate, record, emit, refuse. Reviewer rejects PRs with active verbs in Phase A modules.",
+    "related": ["AP-V7-03"],
+    "source_url": "ai_docs/GENESIS_PROMPT_V1_3.md"
+  },
+  {
+    "id": "AP-V7-12",
+    "title": "Cargo.toml-via-cargo-init inside workspace",
+    "severity": "MEDIUM",
+    "pattern": "cargo\\s+(init|new)",
+    "mitigation": "Pre-G9: do not cargo init at all. Post-G9: if creating a sub-crate that should NOT join parent workspace, add [workspace] = {} to isolate. Better: keep ORAC single-crate pattern.",
+    "related": ["AP-V7-10", "AP24"],
+    "source_url": ".claude/skills/scaffold-mastery/SKILL.md"
+  },
+  {
+    "id": "AP-V7-13",
+    "title": "Diagnostics theatre - refresh-date stamps without re-executed probes",
+    "severity": "MEDIUM",
+    "pattern": "Refreshed:\\s*20[0-9]{2}-[0-9]{2}-[0-9]{2}",
+    "mitigation": "Every Refreshed:DATE stamp on a runbook/doc MUST be paired with '> probes re-verified live DATE' evidence (re-executed curl/sqlite/cargo output). Stale stamps hide live failures.",
+    "related": ["AP-V7-01"],
+    "source_url": "ai_docs/optimisation-v7/ANTIPATTERNS_REGISTER.md"
+  },
+  {
+    "id": "AP24",
+    "title": "Coding without explicit 'start coding <project>' signal",
+    "severity": "CRITICAL",
+    "pattern": "cargo\\s+(init|new|build|run|install)",
+    "mitigation": "Pre-G9 (Luke has not typed 'start coding workflow-trace'): refuse any cargo init/new/build/run. PRIME_DIRECTIVE_WAIVER scope is structure + specs + .claude config only; not Rust source.",
+    "related": ["AP-V7-12"],
+    "source_url": "../CLAUDE.md"
+  },
+  {
+    "id": "AP27",
+    "title": "Watcher self-modification",
+    "severity": "CRITICAL",
+    "pattern": "watcher.*self.*modif|m46|m47|m48|m49|m50|m51",
+    "mitigation": "The Watcher persona is governed at Luke @ node 0.A; AP27 forbids self-modification of m46-m51 scope. Ember 7-trait unanimity gate must approve any change to watcher modules.",
+    "related": ["AP-V7-07"],
+    "source_url": "../synthex-v2/obsidian-synthex-v2/synthex-v2/The%20Watcher.md"
+  },
+  {
+    "id": "AP29",
+    "title": "Sync HTTP in tokio::spawn (starves runtime)",
+    "severity": "HIGH",
+    "pattern": "tokio::spawn[\\s\\S]{0,200}\\b(ureq|reqwest::blocking)",
+    "mitigation": "ureq/reqwest::blocking inside tokio::spawn starves the async runtime. Use reqwest::Client (async) or tokio::task::spawn_blocking for sync HTTP. Catalogued in session-225 (ORAC restoration).",
+    "related": [],
+    "source_url": "../../.claude/projects/-home-louranicas-claude-code-workspace/memory/session-225-orac-restoration.md"
+  },
+  {
+    "id": "AP30",
+    "title": "Namespace string drift (use namespace.rs constants)",
+    "severity": "HIGH",
+    "pattern": "\"workflow[_-]trace[_-]?[a-z]*\"",
+    "mitigation": "All stcortex/POVM namespace strings live in workflow_core::namespace as const fn. Never literal string in module code. m9 namespace guard refuses writes prefixed other than workflow_trace_.",
+    "related": ["AP-V7-04"],
+    "source_url": "ai_docs/optimisation-v7/GENERATIONS/G2-consolidation.md"
+  },
+  {
+    "id": "AP32",
+    "title": "V8 CodeSynthor CLI hang in pipelines",
+    "severity": "MEDIUM",
+    "pattern": "v8.*\\|.*head|codesynthor.*\\|.*tail",
+    "mitigation": "V8 CLI streams output and may hang when piped through head/tail. Use --json --no-stream or capture full output to tempfile before piping. See session-104.",
+    "related": ["AP33", "AP34"],
+    "source_url": "../../.claude/projects/-home-louranicas-claude-code-workspace/memory/session-104.md"
+  },
+  {
+    "id": "AP33",
+    "title": "V8 binary absence (OTP-supervised not yet up)",
+    "severity": "MEDIUM",
+    "pattern": "v8-(scan|ultrascan|sentry)",
+    "mitigation": "V8 daemon on :8111 may be down or supervised-restarting. Probe /health before invoking v8-* binaries; fall back to JSON-output capture if HTTP unhealthy.",
+    "related": ["AP32"],
+    "source_url": "../../.claude/projects/-home-louranicas-claude-code-workspace/memory/session-104.md"
+  },
+  {
+    "id": "AP34",
+    "title": "V8 JSON fallback drift (schema-version)",
+    "severity": "MEDIUM",
+    "pattern": "v8.*--json",
+    "mitigation": "V8 --json output has versioned schema; older readers may break on new fields. Always validate against codesynthor-v8 schemas/ before consuming downstream.",
+    "related": ["AP32"],
+    "source_url": "../../.claude/projects/-home-louranicas-claude-code-workspace/memory/session-104.md"
+  },
+  {
+    "id": "AP35",
+    "title": "V8 OTP restart storm",
+    "severity": "HIGH",
+    "pattern": "v8.*restart",
+    "mitigation": "Elixir OTP supervises V8; rapid restart loops can mask root-cause (e.g. RELEASE_NAME bug fixed session-094). Inspect /var/log/v8/release_*.log before restarting.",
+    "related": ["AP32"],
+    "source_url": "../../.claude/projects/-home-louranicas-claude-code-workspace/memory/session-104.md"
+  },
+  {
+    "id": "AP36",
+    "title": "V8 FD exhaustion under sustained scan",
+    "severity": "MEDIUM",
+    "pattern": "v8-ultrascan",
+    "mitigation": "v8-ultrascan opens many file handles; raise ulimit -n 8192 before sustained scans or batch in chunks of 500 files.",
+    "related": ["AP32"],
+    "source_url": "../../.claude/projects/-home-louranicas-claude-code-workspace/memory/session-104.md"
+  },
+  {
+    "id": "AP37",
+    "title": "V8 /health path drift (not /api/health)",
+    "severity": "LOW",
+    "pattern": "localhost:8111/api/health",
+    "mitigation": "V8 health is at /health (not /api/health like SYNTHEX). Probe with curl -sS localhost:8111/health.",
+    "related": ["AP32"],
+    "source_url": "../../.claude/projects/-home-louranicas-claude-code-workspace/memory/session-104.md"
+  }
+]

@@ -1,0 +1,79 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://workflow-trace.local/schemas/pressure_register_event.json",
+  "title": "PressureRegisterEvent",
+  "description": "m15 pressure-register JSONL event. Append-only, one-event-per-file (atomic emit, no shared lock). Feeds CC-7 Pressure-Driven Evolution: spec interviews consume these events to drive F2 interview rounds. Wilson-CI-aggregated downstream by m14.",
+  "type": "object",
+  "required": ["event_id", "ts_ms", "pressure_kind", "intensity", "origin"],
+  "additionalProperties": false,
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "description": "UUIDv4 — per-event idempotency",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "ts_ms": {
+      "type": "integer",
+      "description": "Unix epoch ms",
+      "minimum": 1700000000000
+    },
+    "pressure_kind": {
+      "type": "string",
+      "description": "Kind of pressure observed",
+      "enum": [
+        "context_window_strain",
+        "battern_step_overrun",
+        "cascade_loop_detected",
+        "workflow_run_repeat",
+        "lift_evidence_weak",
+        "lift_evidence_strong",
+        "verification_failure",
+        "dispatch_blocked",
+        "namespace_violation",
+        "ember_rubric_fail",
+        "decay_floor_breach"
+      ]
+    },
+    "intensity": {
+      "type": "number",
+      "description": "Normalised intensity [0.0, 1.0] (0 = below noise floor, 1 = saturation)",
+      "minimum": 0.0,
+      "maximum": 1.0
+    },
+    "origin": {
+      "type": "object",
+      "description": "Where the pressure was observed",
+      "required": ["module_id", "binary"],
+      "properties": {
+        "module_id": {
+          "type": "string",
+          "pattern": "^m([1-9]|1[0-9]|2[0-9]|3[0-9]|4[0-2])$",
+          "description": "Originating workflow-trace module (m1-m42 unpadded; AP-V7-06)"
+        },
+        "binary": {
+          "type": "string",
+          "enum": ["wf-crystallise", "wf-dispatch"]
+        },
+        "session_id": {"type": ["string", "null"]},
+        "workflow_id": {"type": ["string", "null"]}
+      }
+    },
+    "context": {
+      "type": ["object", "null"],
+      "description": "Optional structured context (intensity drivers, sample size, etc.)",
+      "additionalProperties": true
+    },
+    "wilson_ci": {
+      "type": ["object", "null"],
+      "description": "Optional Wilson confidence interval (populated when n>=20)",
+      "required": ["n", "successes", "lower", "upper", "z"],
+      "properties": {
+        "n": {"type": "integer", "minimum": 20},
+        "successes": {"type": "integer", "minimum": 0},
+        "lower": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "upper": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "z": {"type": "number", "description": "z-score (1.96 for 95% CI)"}
+      }
+    }
+  }
+}

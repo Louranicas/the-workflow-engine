@@ -1,0 +1,72 @@
+# config/default.toml.template — TEMPLATE (NOT a live config)
+#
+# Back to: ../README.md · ../CLAUDE.md · ../CLAUDE.local.md
+#
+# This file is a TEMPLATE under the S1002127 scaffold waiver. The `.template`
+# suffix is load-bearing: no service-loader or hook will accidentally pick it
+# up as a live config. The real `default.toml` lands post-G9, drops the suffix,
+# and passes ../ai_docs/optimisation-v7/STANDARDS/ validation gates.
+#
+# Section schema is the planning-time shape; field names and defaults may shift
+# at G5 interview / G7 spec audit.
+
+# --- Service identity ---------------------------------------------------------
+[service]
+name            = "workflow-trace"     # final naming TBD at G2 (working name)
+version         = "0.0.0-spec.0"       # spec-versioned pre-G9
+binary          = "wf-crystallise"     # which binary this config targets (override per-binary if needed)
+
+# --- HTTP server (planning — port TBD) ---------------------------------------
+[server]
+bind_addr       = "127.0.0.1"          # localhost-only by default (per habitat security posture)
+port            = 8190                 # TBD; reserve from devenv free-port pool; check ../config/devenv-service.toml.template
+health_path     = "/health"
+
+# --- Logging -----------------------------------------------------------------
+[log]
+level           = "info"               # default; production overrides to "warn"
+format          = "json"               # structured logs (per workspace charter)
+target          = "stdout"             # devenv tail captures stdout
+trace_sampling  = 0.0                  # off by default; production turns on at 0.01
+
+# --- Substrate paths (Cluster A) ---------------------------------------------
+[substrates]
+atuin_db        = "~/.local/share/atuin/history.db"
+stcortex_url    = "127.0.0.1:3000"     # NB: no http:// prefix per workspace ORAC convention
+injection_db    = "~/.local/share/habitat/injection.db"
+
+# --- m7 workflow_runs hub (Cluster C) ----------------------------------------
+[m7]
+sqlite_path     = "~/.local/share/workflow-trace/workflow_runs.db"
+journal_mode    = "WAL"
+synchronous     = "NORMAL"
+busy_timeout_ms = 5000
+
+# --- Cluster D trust knobs (always on — D NOT feature-gated) -----------------
+[trust]
+ember_rubric_path           = "~/projects/claude_code/Ember 7-Trait Gate Rubric.md"
+namespace_guard_strict      = true     # m9 hard-asserts on namespace violation
+fitness_decay_alpha         = 1.0      # m11 frequency exponent (TBD G5)
+fitness_decay_beta          = 1.0      # m11 fitness exponent (TBD G5)
+fitness_decay_lambda        = 0.0033   # m11 recency decay rate per day (~30-day half-life; TBD G5)
+
+# --- Cluster F iteration (KEYSTONE — feature `intelligence`) -----------------
+[iteration]
+prefixspan_min_support      = 3        # m20 minimum support count
+prefixspan_max_pattern_len  = 10       # m20 max pattern length
+variant_jaccard_threshold   = 0.7      # m21 variant similarity cutoff (Levenshtein)
+kmeans_k                    = 8        # m22 cluster count
+proposer_wilson_ci_z        = 1.96     # m23 Wilson 95% CI z-score
+
+# --- Cluster H substrate feedback (feature `monitoring`) ---------------------
+[feedback]
+synthex_url     = "127.0.0.1:8092"     # SYNTHEX v2 (NB: v1 :8090 retired)
+synthex_push_path = "/v3/nexus/push"
+lcm_mcp_socket  = "~/.local/share/lcm/mcp.sock"
+stcortex_pathway_ns = "workflow_trace_*"   # G8-gated; rejected pre-G8 by m9 namespace guard
+
+# --- Enabled features --------------------------------------------------------
+[features]
+enabled = ["default", "api"]           # production typically adds "intelligence", "monitoring", "evolution"
+
+# --- end of template ---------------------------------------------------------

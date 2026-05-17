@@ -1,0 +1,247 @@
+# plan.toml — workflow-trace scaffold-mastery input
+#
+# Authoritative machine-readable architecture declaration. Read by:
+#   - scaffold-gen --from-plan plan.toml . (post-G9 scaffold)
+#   - .claude/hooks/ (scaffold-alignment verification)
+#   - Wave-2 verifier agents (4-surface persistence + agent-claim verification)
+#
+# Per CLAUDE.md PRIME DIRECTIVE: this file is metadata, NOT Rust source. Authoring
+# allowed under S1002127 PRIME_DIRECTIVE_WAIVER (markdown + scaffold + .claude config + plan.toml).
+#
+# Phase status: PLANNING-ONLY · HOLD-v2 active · G9 not fired · no `cargo init`.
+# Scaffold-gen --from-plan invocation MUST NOT fire until Luke types `start coding workflow-trace`.
+
+[metadata]
+name        = "workflow-trace"
+description = "Record cascading-command + Battern + context-window observations; propose workflow variants; dispatch ratified workflows via HABITAT-CONDUCTOR."
+version     = "0.0.0-spec.0"          # spec-versioned pre-G9; bumps to 0.1.0 on first commit + cargo check green
+authors     = ["Luke @ node 0.A", "Command (Tab 1)", "The Watcher ☤", "Zen (G7 audit)"]
+license     = "TBD (workspace default)"
+edition     = "2021"
+rust_version = "1.83"                 # workspace toolchain
+port        = 8190                    # TBD — devenv.toml registration at G9
+binding_spec = "ai_docs/GENESIS_PROMPT_V1_3.md"
+canonical_ultramap = "ai_docs/optimisation-v7/ULTRAMAP.md"
+
+[scaffold_meta]
+pattern              = "orac-single-crate"   # NOT lcm-workspace; one crate, two [[bin]], shared lib
+crate_count          = 1
+binary_count         = 2
+lib_inside_crate     = true                  # workflow_core lives in src/lib.rs
+g9_unlock_required   = true                  # do not run scaffold-gen until G9 fires
+four_surfaces        = [
+  "ai_docs/",                                # surface 1: canonical descriptive + prescriptive routing
+  "the-workflow-engine-vault/",              # surface 2: Obsidian vault mirror
+  "stcortex:workflow_trace_*",               # surface 3: RESERVED pre-G8 (no writes until G8 green); see ai_docs/optimisation-v7/decisions/2026-05-17-g8-stcortex-persistence-plan.md
+  "CLAUDE.local.md",                         # surface 4: session-state delta anchor
+]                                            # Four-surface persistence rule: one surface survives = plan survives
+
+[quality]
+min_tests_per_module = 50                     # KEYSTONE Cluster F: 250+
+total_test_budget    = 1599                   # per STANDARDS/TEST_DISCIPLINE.md
+deny_unwrap          = true
+deny_unsafe          = true
+deny_clippy_warnings = true
+deny_pedantic_warnings = true
+doc_comments_public  = true
+gate_chain           = ["check", "clippy", "pedantic", "test"]   # zero tolerance; abort on first
+pipestatus_required  = true                   # AP-V7-13 — never `cargo … | tail`
+
+[consent]
+modulation_not_command       = true           # "should" vs "must" for non-safety
+implementation_order         = "required"     # Cluster D MUST ship Day 1 before A
+verb_lock_phase_a            = false          # single-phase override; passive verbs RECOMMENDED for m1-m15
+g9_signal_required           = "start coding workflow-trace"   # AP24
+
+[dependencies]
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+thiserror   = "2"
+tracing     = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio       = { version = "1", features = ["full"] }
+rusqlite    = { version = "0.31", features = ["bundled"] }
+reqwest     = { version = "0.12", features = ["json"] }
+clap        = { version = "4", features = ["derive"] }
+chrono      = { version = "0.4", features = ["serde"] }
+uuid        = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+proptest    = "1"
+criterion   = "0.5"
+mockito     = "1"
+assert_cmd  = "2"
+
+[features]
+default       = ["full"]
+full          = ["api", "intelligence", "monitoring", "evolution"]
+api           = []                  # m12 reports, m32 dispatch CLI surface
+intelligence  = []                  # m14/m15 evidence + m20-m23 iteration
+monitoring    = []                  # m40/m41/m42 substrate feedback
+evolution     = []                  # m11 lifecycle/sunset decay
+
+# Cluster D (m8/m9/m10/m11) intentionally NOT feature-gated — aspect-layer invariants.
+# m8 uses cargo:rustc-cfg=povm_calibrated (env-only, not a Cargo feature) so it cannot be bypassed.
+
+[[bin_targets]]
+name = "wf-crystallise"
+path = "src/bin/wf-crystallise/main.rs"
+description = "Read-heavy: ingest + observation + correlation + iteration + substrate feedback emit"
+owned_modules = ["m1","m2","m3","m4","m5","m6","m7","m12","m13","m14","m15","m20","m21","m22","m23","m40","m41","m42"]
+
+[[bin_targets]]
+name = "wf-dispatch"
+path = "src/bin/wf-dispatch/main.rs"
+description = "Curated bank + selection + Conductor dispatcher + 4-agent verifier"
+owned_modules = ["m30","m31","m32","m33"]
+
+# ───── LAYERS ─────────────────────────────────────────────────────────────────
+
+[[layers]]
+key = "L0"
+dir_name = "_substrate_frame"
+name = "Substrate Frame"
+description = "atuin / stcortex / injection.db / SYNTHEX / LCM / Conductor / Watcher (observed, not authored)"
+depends_on = []
+rationale = "Boundary layer; this codebase reads from L0 substrates but does not modify them"
+authored = false
+
+[[layers]]
+key = "L1"
+dir_name = "cluster_a_substrate_ingest"
+name = "Cluster A — Substrate Ingest"
+description = "atuin / stcortex narrowed-scope / injection.db readers"
+depends_on = []
+rationale = "L1 is the read boundary; modules emit typed row iterators only"
+authored = true
+feature_gate = []
+
+[[layers]]
+key = "L2"
+dir_name = "cluster_b_habitat_observation"
+name = "Cluster B — Habitat Observation"
+description = "Cascade correlator (opaque IDs) / battern step record / context cost EMA"
+depends_on = ["L1"]
+rationale = "Interpretation begins at L2; uses L1's typed iterators"
+authored = true
+feature_gate = []
+
+[[layers]]
+key = "L3"
+dir_name = "cluster_c_correlation_output"
+name = "Cluster C — Correlation + Output"
+description = "Hub workflow_runs (F9 zero-weight) / CLI reports / stcortex writer (3-band gate)"
+depends_on = ["L1", "L2"]
+rationale = "Central correlation hub; F9 zero-weight JSONB consumer_inputs column"
+authored = true
+feature_gate = ["api"]
+
+[[layers]]
+key = "L4"
+dir_name = "cluster_d_trust"
+name = "Cluster D — Trust (cross-cutting)"
+description = "povm_calibrated cfg / namespace guard / Ember CI gate / fitness-weighted decay"
+depends_on = []
+rationale = "Aspect-layer invariant; ships Day 1 before any reader; NOT feature-gated"
+authored = true
+feature_gate = []
+ship_first = true                  # Day 1 ordering invariant
+
+[[layers]]
+key = "L5"
+dir_name = "cluster_e_evidence_pressure"
+name = "Cluster E — Evidence + Pressure"
+description = "Wilson-CI lift metric / pressure register (JSONL)"
+depends_on = ["L1","L2","L3","L4"]
+rationale = "Evidence feeds Cluster F iteration; pressure register drives CC-7"
+authored = true
+feature_gate = ["intelligence"]
+
+[[layers]]
+key = "L6"
+dir_name = "cluster_f_iteration"
+name = "Cluster F — Iteration (KEYSTONE)"
+description = "PrefixSpan miner / variant builder / Wilson CI / gradient-preservation proposer"
+depends_on = ["L1","L2","L3","L4","L5"]
+rationale = "KEYSTONE — net-new structural-gap authorship (Gap 1); 250+ tests"
+authored = true
+feature_gate = ["intelligence"]
+
+[[layers]]
+key = "L7"
+dir_name = "cluster_g_bank_dispatch"
+name = "Cluster G — Bank/Select/Dispatch/Verify"
+description = "Curated bank (EscapeSurfaceProfile) / selector / Conductor dispatcher / 4-agent verifier"
+depends_on = ["L1","L2","L3","L4","L5","L6"]
+rationale = "CC-4 proposal→bank→dispatch pipeline; CC-6 verification-gated dispatch"
+authored = true
+feature_gate = ["api"]               # m32 dispatch CLI behind api
+
+[[layers]]
+key = "L8"
+dir_name = "cluster_h_substrate_feedback"
+name = "Cluster H — Substrate Feedback"
+description = "NexusEvent emit / LCM RPC / stcortex emit (POVM decoupled)"
+depends_on = ["L1","L2","L3","L4","L5","L6","L7"]
+rationale = "CC-5 substrate-learning loop closes back to L6 via stcortex pathway weights"
+authored = true
+feature_gate = ["monitoring"]
+
+# L9 substrate-frame engine intentionally absent — single-phase override partially waived R6 frame-separation.
+
+# ───── MODULES (26) ─────────────────────────────────────────────────────────────
+# Naming: unpadded m1-m42 (OI-4 locked). dir naming pattern: m<N>_<snake_case_name>.
+
+# Cluster A — L1
+[[modules]] layer="L1"  name="m1_atuin_consumer"            description="atuin SQLite reader; cursor-pagination; subprocess fallback"        test_kind="unit"     depends_on=[]                      loc_estimate=80
+[[modules]] layer="L1"  name="m2_stcortex_consumer"         description="stcortex narrowed consumer; reducer-callback dedup"                test_kind="async"    depends_on=[]                      loc_estimate=80
+[[modules]] layer="L1"  name="m3_injection_db_consumer"     description="injection.db causal_chain reader; resolved/unresolved partition"   test_kind="unit"     depends_on=[]                      loc_estimate=70
+
+# Cluster B — L2
+[[modules]] layer="L2"  name="m4_cascade_correlator"        description="Opaque FNV-1a XOR cluster IDs; pairwise correlator"                test_kind="property" depends_on=["m1_atuin_consumer"]              loc_estimate=160
+[[modules]] layer="L2"  name="m5_battern_step_record"       description="Battern step recorder; unlabelled batterns preserved"              test_kind="unit"     depends_on=["m1_atuin_consumer"]              loc_estimate=130
+[[modules]] layer="L2"  name="m6_context_cost"              description="20-session EMA context cost; excludes Converged outcomes"          test_kind="unit"     depends_on=["m1_atuin_consumer"]              loc_estimate=170
+
+# Cluster C — L3
+[[modules]] layer="L3"  name="m7_workflow_runs"             description="Central hub; JSONB consumer_inputs; F9 zero-weight"                test_kind="integration" depends_on=["m4_cascade_correlator","m6_context_cost","m3_injection_db_consumer"]   loc_estimate=140
+[[modules]] layer="L3"  name="m12_cli_reports"              description="CLI report emitter; api feature"                                   test_kind="unit"     depends_on=["m7_workflow_runs"]                loc_estimate=110
+[[modules]] layer="L3"  name="m13_stcortex_writer"          description="stcortex writer; 3-band LTP/LTD gate; JSONL deferred buffer"       test_kind="async"    depends_on=["m7_workflow_runs","m2_stcortex_consumer"]   loc_estimate=120
+
+# Cluster D — L4 (cross-cutting; ships Day 1)
+[[modules]] layer="L4"  name="m8_povm_build_prereq"         description="build.rs; cargo:rustc-cfg=povm_calibrated; compile_error! guard"   test_kind="unit"     depends_on=[]                      loc_estimate=60
+[[modules]] layer="L4"  name="m9_watcher_namespace_guard"   description="App-layer namespace assertion (AP30); ~30 LOC"                     test_kind="unit"     depends_on=[]                      loc_estimate=60
+[[modules]] layer="L4"  name="m10_ember_ci_gate"            description="Watcher 7-trait rubric CI gate for user-facing strings"            test_kind="unit"     depends_on=[]                      loc_estimate=90
+[[modules]] layer="L4"  name="m11_fitness_weighted_decay"   description="Gap 2 NEW PRIMITIVE: freq×fitness×recency compound decay"           test_kind="property" depends_on=[]                      loc_estimate=90
+
+# Cluster E — L5
+[[modules]] layer="L5"  name="m14_habitat_outcome_lift"     description="Wilson-CI lift metric; None for n<20"                              test_kind="property" depends_on=["m7_workflow_runs"]                loc_estimate=110
+[[modules]] layer="L5"  name="m15_pressure_register"        description="JSONL one-event-per-file; PHASE-B-RESERVATION-NOTICE emit"         test_kind="unit"     depends_on=[]                      loc_estimate=90
+
+# Cluster F — L6 (KEYSTONE)
+[[modules]] layer="L6"  name="m20_prefixspan_miner"         description="Gap 1: PrefixSpan sequential miner over session-grouped rows"      test_kind="property" depends_on=["m5_battern_step_record"]            loc_estimate=300
+[[modules]] layer="L6"  name="m21_variant_builder"          description="Workflow variant builder; normalized Levenshtein clustering"       test_kind="property" depends_on=["m20_prefixspan_miner"]              loc_estimate=200
+[[modules]] layer="L6"  name="m22_kmeans_feature"           description="K-means feature clusterer for proposal grouping"                   test_kind="property" depends_on=["m21_variant_builder"]               loc_estimate=170
+[[modules]] layer="L6"  name="m23_workflow_proposer"        description="Gradient-preservation proposer; top-K-by-distance N=3"             test_kind="property" depends_on=["m22_kmeans_feature","m14_habitat_outcome_lift"]   loc_estimate=180
+
+# Cluster G — L7
+[[modules]] layer="L7"  name="m30_curated_bank"             description="Gap 3: EscapeSurfaceProfile ordinal enum; curated workflow store"   test_kind="integration" depends_on=["m11_fitness_weighted_decay"]    loc_estimate=220
+[[modules]] layer="L7"  name="m31_selector"                 description="Composite α/β/γ/δ + diversity gate selector"                       test_kind="property" depends_on=["m30_curated_bank"]                 loc_estimate=240
+[[modules]] layer="L7"  name="m32_conductor_dispatcher"     description="5-check pre-dispatch sequence; HABITAT-CONDUCTOR-only"             test_kind="integration" depends_on=["m31_selector","m9_watcher_namespace_guard"] loc_estimate=290
+[[modules]] layer="L7"  name="m33_verifier"                 description="4-agent verifier with 7-day TTL; verify <name> CLI"                test_kind="integration" depends_on=["m30_curated_bank"]              loc_estimate=200
+
+# Cluster H — L8
+[[modules]] layer="L8"  name="m40_nexusevent_emit"          description="SYNTHEX v2 NexusEvent emitter; Option A untyped JSON for MVP"      test_kind="async"    depends_on=["m32_conductor_dispatcher"]          loc_estimate=160
+[[modules]] layer="L8"  name="m41_lcm_rpc"                  description="LCM RPC router; lcm.loop.create (NOT lcm.deploy)"                  test_kind="async"    depends_on=["m32_conductor_dispatcher"]          loc_estimate=140
+[[modules]] layer="L8"  name="m42_stcortex_emit"            description="stcortex-only pathway emit; fitness_delta {+0.25/+0.15/-0.05/-0.10}; POVM DECOUPLED per 2026-05-17 ADR" test_kind="async" depends_on=["m32_conductor_dispatcher","m13_stcortex_writer"] loc_estimate=150
+
+# ───── AUTHORIZATION BLOCK ────────────────────────────────────────────────────
+
+[authorization]
+g9_signal       = "start coding workflow-trace"
+g9_fired        = false
+g9_fired_at     = ""
+g9_authoriser   = "Luke @ node 0.A"
+holdv2_active   = true
+zen_g7_verdict  = "PENDING"           # AUDIT-REQUEST v2 filed 2026-05-17T160500Z
+watcher_g1      = "NOT GREEN"
+luke_actions_remaining = 3            # B3, B4, handshake-c2-c3

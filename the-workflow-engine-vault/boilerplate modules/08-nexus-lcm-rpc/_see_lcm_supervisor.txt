@@ -1,0 +1,1 @@
+see ../01-cli-scaffolding/lcm_supervisor.rs (JSON-RPC envelope + dispatcher)

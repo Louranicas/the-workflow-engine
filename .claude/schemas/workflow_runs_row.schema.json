@@ -1,0 +1,102 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://workflow-trace.local/schemas/workflow_runs_row.json",
+  "title": "WorkflowRunsRow",
+  "description": "m7 central workflow_runs hub row. F9 zero-weight column: consumer_inputs JSONB carries per-consumer payload as a join surface, NOT internal struct sharing. CC-1 (Cascade-Cost Coupling) reads via SQL JOIN on this column. Per-row immutable on insert; updates via state-transition rows (m31 lifecycle).",
+  "type": "object",
+  "required": ["id", "kind", "source", "ts_ms", "consumer_inputs", "outcome"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "UUIDv4 workflow_id — used by all downstream clusters for correlation",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "kind": {
+      "type": "string",
+      "description": "Workflow kind. dispatcher_self guard refused at m32 (AP-V7-08)",
+      "enum": [
+        "observed",
+        "proposed",
+        "dispatched",
+        "verified",
+        "refused",
+        "sunset"
+      ]
+    },
+    "source": {
+      "type": "string",
+      "description": "Originating module or external substrate",
+      "enum": [
+        "m1_atuin_ingest",
+        "m2_stcortex_consumer",
+        "m3_injection_db",
+        "m4_cascade_correlator",
+        "m5_battern_record",
+        "m6_context_cost",
+        "m23_proposer",
+        "m30_bank",
+        "m32_dispatch",
+        "m33_verifier"
+      ]
+    },
+    "ts_ms": {
+      "type": "integer",
+      "description": "Unix epoch ms",
+      "minimum": 1700000000000
+    },
+    "session_id": {"type": ["string", "null"]},
+    "consumer_inputs": {
+      "type": "object",
+      "description": "F9 zero-weight JSONB column. Per-consumer payload joined via SQL (CC-1). Schema is intentionally loose — each consumer namespaces its own keys.",
+      "additionalProperties": true,
+      "properties": {
+        "pane_id": {"type": ["string", "null"]},
+        "cascade_correlation_key": {"type": ["string", "null"]},
+        "battern_step_count": {"type": ["integer", "null"]},
+        "context_cost_ema": {"type": ["number", "null"]},
+        "lift_value": {"type": ["number", "null"]},
+        "wilson_ci_lower": {"type": ["number", "null"]},
+        "wilson_ci_upper": {"type": ["number", "null"]},
+        "escape_surface_profile": {
+          "type": ["string", "null"],
+          "enum": [null, "Read", "IdempotentWrite", "Mutate", "Destructive", "Catastrophic"]
+        }
+      }
+    },
+    "outcome": {
+      "type": "string",
+      "description": "Workflow outcome state",
+      "enum": [
+        "Pending",
+        "Active",
+        "Converged",
+        "Refused",
+        "Blocked",
+        "Fail",
+        "Pass",
+        "PassVerified"
+      ]
+    },
+    "fitness_delta": {
+      "type": ["number", "null"],
+      "description": "Hebbian fitness delta to emit on CC-5 substrate-write. PassVerified=+0.25, Pass=+0.15, Blocked=-0.05, Fail=-0.10. Populated when outcome transitions to terminal state.",
+      "minimum": -1.0,
+      "maximum": 1.0
+    },
+    "verification_evidence_ref": {
+      "type": ["string", "null"],
+      "description": "Pointer to m33 4-agent verifier output (file path or stcortex memory id) — required when kind=verified"
+    },
+    "parent_workflow_id": {
+      "type": ["string", "null"],
+      "description": "If proposed as variant of an observed workflow, link via this field (lineage tracking)"
+    },
+    "decay_score": {
+      "type": ["number", "null"],
+      "description": "m11 lifecycle decay (frequency × fitness × recency compound). Sunset trigger at decay_score < floor.",
+      "minimum": 0.0,
+      "maximum": 1.0
+    }
+  }
+}

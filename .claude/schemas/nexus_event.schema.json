@@ -1,0 +1,67 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://workflow-trace.local/schemas/nexus_event.json",
+  "title": "NexusEvent",
+  "description": "m40 substrate-feedback envelope emitted from wf-crystallise to SYNTHEX v2 :8092 /v3/nexus/push. MVP per Cluster H spec uses Option A untyped payload; M1+ tightens. Outbox-first JSONL buffer + circuit breaker (2 consecutive peer failures) wraps the emit.",
+  "type": "object",
+  "required": ["event_id", "kind", "source", "ts_ms", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "description": "UUIDv4 — per-event idempotency key for outbox replay",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "kind": {
+      "type": "string",
+      "description": "Event kind. workflow_trace_* prefix enforced (AP30)",
+      "enum": [
+        "workflow_trace.workflow.observed",
+        "workflow_trace.workflow.proposed",
+        "workflow_trace.workflow.dispatched",
+        "workflow_trace.workflow.verified",
+        "workflow_trace.workflow.refused",
+        "workflow_trace.pressure.emitted",
+        "workflow_trace.lift.evidence",
+        "workflow_trace.bank.entry_added",
+        "workflow_trace.bank.entry_sunset"
+      ]
+    },
+    "source": {
+      "type": "string",
+      "description": "Originating binary",
+      "enum": ["wf-crystallise", "wf-dispatch"]
+    },
+    "ts_ms": {
+      "type": "integer",
+      "description": "Unix epoch ms; monotonic per-source",
+      "minimum": 1700000000000
+    },
+    "session_id": {
+      "type": ["string", "null"],
+      "description": "Session correlation key (links to atuin / stcortex consumer events)"
+    },
+    "workflow_id": {
+      "type": ["string", "null"],
+      "description": "Workflow correlation key (UUID; links via m7 hub)"
+    },
+    "escape_surface_profile": {
+      "type": ["string", "null"],
+      "enum": [null, "Read", "IdempotentWrite", "Mutate", "Destructive", "Catastrophic"],
+      "description": "Per CC-2 trust layer; required for dispatched/verified kinds"
+    },
+    "payload": {
+      "type": "object",
+      "description": "Untyped JSON payload (MVP Option A). M1+ swaps to per-kind typed shape via oneOf."
+    },
+    "outbox_seq": {
+      "type": ["integer", "null"],
+      "description": "Append-only sequence in ~/.local/share/workflow-trace/outbox.jsonl; populated by outbox writer before RPC attempt"
+    },
+    "breaker_state": {
+      "type": ["string", "null"],
+      "enum": [null, "closed", "open", "half-open"],
+      "description": "Circuit-breaker state at emit-time (m40 internal)"
+    }
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://workflow-trace.local/schemas/escape_surface_profile.json",
+  "title": "EscapeSurfaceProfile",
+  "description": "Unified destructiveness ordinal enum (cardinality 7 per Luke S1002127 directive `=7`; PrivilegeEscalation inserted at ordinal 30 per D-S1002127-02 ADR). Defined once in workflow_core, consumed by m9 (namespace guard refuses Destructive|Catastrophic for stcortex writes), m30 (bank — stores per workflow), m32 (dispatch — banner_line() displayed before each step). escape-surface-checker agent verifies cross-site stability. Numeric ordinals use steps of 10 to reserve gaps for future inserts.",
+  "type": "object",
+  "required": ["profile", "banner_line", "ordinal"],
+  "additionalProperties": false,
+  "properties": {
+    "profile": {
+      "type": "string",
+      "description": "Symbolic profile name (matches Rust enum variant). Order MATTERS — mirrors the ordinal hierarchy.",
+      "enum": [
+        "Sandboxed",
+        "SandboxEscape",
+        "ProcessMutate",
+        "PrivilegeEscalation",
+        "FileWrite",
+        "NetworkEgress",
+        "DataExfil"
+      ]
+    },
+    "ordinal": {
+      "type": "integer",
+      "description": "Stable ordinal with numeric gap reservation (steps of 10) — DO NOT REORDER existing entries (would break serde + DB row diffs). New variants must be inserted into reserved gaps with explicit numeric value.",
+      "enum": [0, 10, 20, 30, 40, 50, 60]
+    },
+    "banner_line": {
+      "type": "string",
+      "description": "Operator-facing banner displayed by m32 dispatcher before executing the step",
+      "enum": [
+        "SANDBOXED",
+        "SANDBOX-ESCAPE",
+        "PROCESS-MUTATE",
+        "PRIVILEGE-ESCALATION!",
+        "FILE-WRITE",
+        "NETWORK-EGRESS!",
+        "DATA-EXFIL!"
+      ]
+    }
+  },
+  "definitions": {
+    "ordinal_mapping": {
+      "description": "Canonical ordinal-to-symbolic-to-banner mapping (7-variant; D-S1002127-02). Drift between any site = CRITICAL.",
+      "type": "object",
+      "properties": {
+        "Sandboxed":           {"ordinal":  0, "banner": "SANDBOXED"},
+        "SandboxEscape":       {"ordinal": 10, "banner": "SANDBOX-ESCAPE"},
+        "ProcessMutate":       {"ordinal": 20, "banner": "PROCESS-MUTATE"},
+        "PrivilegeEscalation": {"ordinal": 30, "banner": "PRIVILEGE-ESCALATION!"},
+        "FileWrite":           {"ordinal": 40, "banner": "FILE-WRITE"},
+        "NetworkEgress":       {"ordinal": 50, "banner": "NETWORK-EGRESS!"},
+        "DataExfil":           {"ordinal": 60, "banner": "DATA-EXFIL!"}
+      }
+    },
+    "m9_refuse_threshold": {
+      "description": "m9 namespace guard refuses any stcortex write where profile.ordinal >= this threshold (i.e. PrivilegeEscalation and higher require explicit Conductor-routed dispatch with HumanAcceptanceSignature.privilege_escalation_acknowledged=true).",
+      "type": "integer",
+      "const": 30
+    }
+  }
+}

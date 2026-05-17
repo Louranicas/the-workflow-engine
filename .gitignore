@@ -1,0 +1,48 @@
+# Rust (post-G9 unlock)
+/target/
+**/*.rs.bk
+Cargo.lock
+*.pdb
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Bacon
+.bacon-locations
+
+# Logs
+*.log
+logs/
+
+# Local env
+.env
+.env.local
+
+# Claude Code local
+.claude/scheduled_tasks.lock
+.claude/status.json
+.claude/settings.local.json
+.claude/worktrees/
+
+# Scaffold-mastery artefacts
+/scaffold-gen.log
+
+# SQLite scratch
+*.db-wal
+*.db-shm
+
+# DO NOT IGNORE (explicit allowlist for spec-bearing dirs)
+!ai_specs/
+!ai_docs/
+!ultramap/
+!layers/
+!modules/
+!the-workflow-engine-vault/

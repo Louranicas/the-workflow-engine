@@ -1,0 +1,247 @@
+{
+  "main": {
+    "id": "e9dbe3d8c42f9a07",
+    "type": "split",
+    "children": [
+      {
+        "id": "599cd9839e7e9c82",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "228fd9993c7003ad",
+            "type": "leaf",
+            "state": {
+              "type": "empty",
+              "state": {},
+              "icon": "lucide-file",
+              "title": "New tab"
+            }
+          },
+          {
+            "id": "3f7e0061c3d7885b",
+            "type": "leaf",
+            "state": {
+              "type": "graph",
+              "state": {},
+              "icon": "lucide-git-fork",
+              "title": "Graph view"
+            }
+          },
+          {
+            "id": "4678342c2339a974",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "luke-scratchpad-the-work-flow-engine.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "luke-scratchpad-the-work-flow-engine"
+            }
+          }
+        ],
+        "currentTab": 2
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "1f7160352e5e8b26",
+    "type": "split",
+    "children": [
+      {
+        "id": "aee488992b74241b",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "5bb2962633a708cb",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false
+              },
+              "icon": "lucide-folder-closed",
+              "title": "Files"
+            }
+          },
+          {
+            "id": "5463a50b6d2bfbf2",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "Search"
+            }
+          },
+          {
+            "id": "2f92d49df363923f",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {},
+              "icon": "lucide-bookmark",
+              "title": "Bookmarks"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300
+  },
+  "right": {
+    "id": "cc1470c5c5a393e5",
+    "type": "split",
+    "children": [
+      {
+        "id": "f08165b1115aa40a",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "fe27dd3b39c26fdf",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "file": "luke-scratchpad-the-work-flow-engine.md",
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "Backlinks for luke-scratchpad-the-work-flow-engine"
+            }
+          },
+          {
+            "id": "2d1494b317e82c21",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "file": "luke-scratchpad-the-work-flow-engine.md",
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "Outgoing links from luke-scratchpad-the-work-flow-engine"
+            }
+          },
+          {
+            "id": "73b1f9d448c4c948",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "Tags"
+            }
+          },
+          {
+            "id": "d4c6d3bbf75345d4",
+            "type": "leaf",
+            "state": {
+              "type": "all-properties",
+              "state": {
+                "sortOrder": "frequency",
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-archive",
+              "title": "All properties"
+            }
+          },
+          {
+            "id": "6c8826a328ce1235",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "file": "luke-scratchpad-the-work-flow-engine.md",
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "Outline of luke-scratchpad-the-work-flow-engine"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:Open quick switcher": false,
+      "graph:Open graph view": false,
+      "canvas:Create new canvas": false,
+      "daily-notes:Open today's daily note": false,
+      "templates:Insert template": false,
+      "command-palette:Open command palette": false,
+      "bases:Create new base": false
+    }
+  },
+  "active": "4678342c2339a974",
+  "lastOpenFiles": [
+    "ai_specs/INDEX.md.tmp.2971387.d3c9d2c7dea4",
+    "ANTIPATTERNS.md.tmp.2971387.a292b9360f3c",
+    "CLAUDE.local.md.tmp.2971387.32aac9a96afa",
+    "ultramap/INVARIANT_MAP.md.tmp.2971387.40c039f7b540",
+    "CLAUDE.local.md.tmp.2971387.2f1968a67ee5",
+    "ai_specs/modules/cluster-G/m32_conductor_dispatcher.md.tmp.2971387.44062c6ff52d",
+    "the-workflow-engine-vault/Watcher Deployment Watch Journal S1001982.md.tmp.93745.924d32fbe7c0",
+    "pre-framework-consolidation/WATCHER_DEPLOYMENT_WATCH_JOURNAL_S1001982.md.tmp.93745.2fcbcac98c78",
+    "CLAUDE.local.md.tmp.2971387.eab84e4fc323",
+    "ai_specs/synergies/CC-5.md.tmp.2971387.088213f55e86",
+    "ai_specs/cross-cutting/persistence.md.tmp.2971387.5d1ee2f87c4c",
+    "ai_specs/cross-cutting/substrate-drift.md",
+    "ai_specs/cross-cutting/refusal-taxonomy.md",
+    "ai_docs/optimisation-v7/decisions/2026-05-17-escape-surface-cardinality-7-privilege-escalation.md",
+    "ai_specs/substrates/operator.md",
+    "ai_specs/substrates/watcher.md",
+    "ai_specs/substrates/conductor.md",
+    "ai_specs/substrates/lcm.md",
+    "ai_specs/substrates/synthex.md",
+    "ai_specs/substrates/injection_db.md",
+    "ai_specs/substrates/stcortex.md",
+    "ai_specs/substrates/atuin.md",
+    "ai_docs/optimisation-v7/decisions/2026-05-17-g8-stcortex-persistence-plan.md",
+    "ai_docs/NA_GAP_ANALYSIS_S1002127_SCAFFOLD.md",
+    "ai_specs/BENCHMARK_SPEC.md",
+    "ai_specs/TEST_STRATEGY.md",
+    "ai_specs/OBSERVABILITY_SPEC.md",
+    "ai_specs/ERROR_TAXONOMY.md",
+    "ai_specs/SECURITY_SPEC.md",
+    "ai_specs/CONSENT_SPEC.md",
+    "ai_specs/DESIGN_CONSTRAINTS.md",
+    "ai_specs/IPC_BUS_SPEC.md",
+    "ai_specs/WIRE_PROTOCOL_SPEC.md",
+    "ai_specs/EVENT_SYSTEM_SPEC.md",
+    "ai_specs/DATABASE_SPEC.md",
+    "ultramap/schematics/gap3-escape-surface-ordinal.md",
+    "Pasted image 20260517154304.png"
+  ]
+}

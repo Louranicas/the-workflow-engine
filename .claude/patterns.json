@@ -1,0 +1,290 @@
+[
+  {
+    "id": "P-ARCH-01",
+    "title": "ORAC single-crate, multi-binary",
+    "category": "architecture",
+    "when_to_use": "Single deployment target with shared library + multiple bin entry points. Use one Cargo crate, [[bin]] x N entries, lib lives in src/lib.rs. Avoids LCM workspace-of-crates overhead.",
+    "exemplar": "src/lib.rs declares workflow_core; src/bin/wf-crystallise/main.rs + src/bin/wf-dispatch/main.rs are the two binaries; Cargo.toml has [lib] + two [[bin]] sections.",
+    "source_url": "ai_docs/optimisation-v7/GENERATIONS/G2-consolidation.md"
+  },
+  {
+    "id": "P-ARCH-02",
+    "title": "Cluster D early-ship (trust before substrate)",
+    "category": "architecture",
+    "when_to_use": "When a cross-cutting aspect layer (build-prereqs, namespace invariants, CI gates, lifecycle decay) governs all downstream readers. Ship the aspect layer Day 1 before authoring the first reader.",
+    "exemplar": "Cluster D (m8 build-prereq + m9 namespace guard + m10 Ember CI gate + m11 lifecycle decay) authored before any Cluster A reader (m1/m2/m3).",
+    "source_url": "the-workflow-engine-vault/deployment%20framework/phase-1-genesis-day-0-3.md"
+  },
+  {
+    "id": "P-ARCH-03",
+    "title": "cargo:rustc-cfg=povm_calibrated env-only gate",
+    "category": "architecture",
+    "when_to_use": "When a build-time invariant must NOT be bypassable via Cargo --features. Use a build.rs that emits cargo:rustc-cfg=foo based on env probe; this cannot be overridden by feature flag.",
+    "exemplar": "m8 build script reads stcortex schema version; if mismatch, refuses to set cfg(stcortex_calibrated). Module code uses #[cfg(stcortex_calibrated)] guards.",
+    "source_url": "ai_specs/modules/cluster-D/m8.md"
+  },
+  {
+    "id": "P-ARCH-04",
+    "title": "plan.toml as machine-readable PASS/FAIL authority",
+    "category": "architecture",
+    "when_to_use": "When phase transitions must be driven by code-readable state (not prose). Top-of-file authoring block + per-phase status fields readable by scripts.",
+    "exemplar": "plan.toml has [authorization] with g9_fired = false; gate.sh refuses to advance until g9_fired = true. Prose declarations in markdown have no authority.",
+    "source_url": "plan.toml"
+  },
+  {
+    "id": "P-ARCH-05",
+    "title": "Feature gate matrix (api/intelligence/monitoring/evolution)",
+    "category": "architecture",
+    "when_to_use": "When you want per-cluster opt-in without the complexity of workspace crates. Use Cargo features keyed to clusters; Cluster D is NEVER feature-gated (aspect-layer invariant).",
+    "exemplar": "[features] in Cargo.toml: api = []; intelligence = []; monitoring = []; evolution = []; full = ['api','intelligence','monitoring','evolution']. m8/m9/m10/m11 have no #[cfg(feature=...)] gates.",
+    "source_url": "the-workflow-engine-vault/deployment%20framework/phase-1-genesis-day-0-3.md"
+  },
+  {
+    "id": "P-ARCH-06",
+    "title": "workflow_core shared lib INSIDE same crate",
+    "category": "architecture",
+    "when_to_use": "When binaries share types/schemas/constants. Put the shared code in src/lib.rs of the same crate as the binaries; no workspace member needed. Reduces gate-script complexity.",
+    "exemplar": "Cargo.toml: [lib] name = 'workflow_core'; [[bin]] name = 'wf-crystallise' + [[bin]] name = 'wf-dispatch'. Binaries do `use workflow_core::namespace::*;`",
+    "source_url": "ai_docs/optimisation-v7/GENERATIONS/G2-consolidation.md"
+  },
+  {
+    "id": "P-MEv2-01",
+    "title": "Layer docstring style (Layer/Deps/Tests/Features/Platform/Impl Notes/Related Docs)",
+    "category": "module-organisation",
+    "when_to_use": "Every module file. Lifted from ME v2 resources.rs convention.",
+    "exemplar": "//! Layer: L1 Substrate Ingest\n//! Deps: workflow_core::namespace, rusqlite\n//! Tests: 50+ unit, 8 integration\n//! Features: (none - Cluster A always-on)\n//! Platform: Linux/macOS\n//! Impl Notes: lazy cursor pagination on atuin.db\n//! Related Docs: ai_specs/modules/cluster-A/m1.md",
+    "source_url": "../the_maintenance_engine_v2/src/m1_foundation/resources.rs"
+  },
+  {
+    "id": "P-MEv2-02",
+    "title": "thiserror error-enum taxonomy + ? propagation",
+    "category": "error-handling",
+    "when_to_use": "Any fallible function. Every cluster A/C/D/G/H has a typed error enum; ? propagates through the call chain.",
+    "exemplar": "#[derive(thiserror::Error, Debug)] pub enum IngestError { #[error('atuin db unavailable: {0}')] DbUnavailable(#[from] rusqlite::Error), #[error('namespace violation: {0}')] Namespace(String) }",
+    "source_url": "../the_maintenance_engine_v2/src/m1_foundation/error.rs"
+  },
+  {
+    "id": "P-MEv2-03",
+    "title": "tracing-subscriber + structured emit",
+    "category": "logging",
+    "when_to_use": "All daemon/library output. No println!/eprintln! (SIGPIPE risk per ORAC BUG-018).",
+    "exemplar": "tracing::info!(module_id = %m_id, lift = %lift_value, n = %sample_n, 'lift evidence emitted');",
+    "source_url": "../the_maintenance_engine_v2/src/m1_foundation/logging.rs"
+  },
+  {
+    "id": "P-MEv2-04",
+    "title": "Counter / gauge / histogram + rolling window metrics",
+    "category": "metrics",
+    "when_to_use": "Cluster B/C/E/H. Per-module counters for emit volume, gauges for current cost, histograms for latency/lift distributions.",
+    "exemplar": "metrics::counter!('wt_workflow_runs_total', 1, 'cluster' => 'C', 'kind' => 'observed'); metrics::histogram!('wt_lift_value', lift_value);",
+    "source_url": "../the_maintenance_engine_v2/src/m1_foundation/metrics.rs"
+  },
+  {
+    "id": "P-MEv2-05",
+    "title": "Signal-observation pattern (passive Phase A)",
+    "category": "observability",
+    "when_to_use": "Cluster B/E/H. Observe substrate signals; do NOT mutate or dispatch from observer code.",
+    "exemplar": "fn observe(signal: &Signal) -> ObservationRecord { ObservationRecord { ts, signal_kind: signal.kind(), payload: signal.snapshot() } }",
+    "source_url": "../the_maintenance_engine_v2/src/m1_foundation/signals.rs"
+  },
+  {
+    "id": "P-MEv2-06",
+    "title": "Newtype discipline (SessionId, ConsumerId, ...)",
+    "category": "type-safety",
+    "when_to_use": "Cluster A and any cross-module identifier. Wrap primitives to prevent mixing types at compile time.",
+    "exemplar": "#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)] pub struct SessionId(String); impl SessionId { pub fn new(s: impl Into<String>) -> Self { Self(s.into()) } }",
+    "source_url": "../the_maintenance_engine_v2/src/m1_foundation/shared_types.rs"
+  },
+  {
+    "id": "P-MEv2-07",
+    "title": "Central state-table + transitions",
+    "category": "state-management",
+    "when_to_use": "Cluster C/D/G. State machines with explicit transitions enumerated; refuse-on-invalid-transition rather than silent panic.",
+    "exemplar": "match (current, event) { (Pending, Approved) => Active, (Active, Sunset) => Retired, (s, e) => return Err(StateError::InvalidTransition{from: s, on: e}) }",
+    "source_url": "../the_maintenance_engine_v2/src/m1_foundation/state.rs"
+  },
+  {
+    "id": "P-MEv2-08",
+    "title": "Feature flags + env override + TOML config",
+    "category": "configuration",
+    "when_to_use": "Cluster D (m8 build-script reads env + feature flags). Layered precedence: env > TOML > default.",
+    "exemplar": "let cal = std::env::var('WT_STCORTEX_CALIBRATED').unwrap_or(toml_cfg.calibrated.to_string());",
+    "source_url": "../the_maintenance_engine_v2/src/m1_foundation/config.rs"
+  },
+  {
+    "id": "P-MEv2-09",
+    "title": "12D tensor framing",
+    "category": "intelligence",
+    "when_to_use": "Cluster B (m6 cost bands) + Cluster F (per-edge confidence). 12 named dimensions normalised to [0,1].",
+    "exemplar": "pub struct Tensor12D { latency: f64, cost: f64, fitness: f64, density: f64, /* ... 8 more */ } - all in [0.0, 1.0].",
+    "source_url": "../the_maintenance_engine_v2/src/m4_intelligence/tensor_registry.rs"
+  },
+  {
+    "id": "P-MEv2-10",
+    "title": "Engine-knows-about-its-own-state (self-model)",
+    "category": "self-model",
+    "when_to_use": "Cluster G (m31 selection criteria). Engine exposes /self-model with state, elapsed, confidence, blockers.",
+    "exemplar": "GET /self-model -> {state: 'selecting', elapsed_ms: 1234, candidates_considered: 17, blocked_by: []}",
+    "source_url": "../the_maintenance_engine_v2/src/m7_orchestration/self_model.rs"
+  },
+  {
+    "id": "P-MEv2-11",
+    "title": "NAM substrate concepts (proposal-as-substrate-frame)",
+    "category": "language",
+    "when_to_use": "Cluster F. Use substrate-frame language ('observation', 'pathway', 'pressure') over command-frame ('execute', 'force', 'run').",
+    "exemplar": "fn propose_variant(observed: &CompositionalPattern) -> ProposalRecord { /* substrate-frame: 'this is what was observed; here is a variant for review' */ }",
+    "source_url": "../the_maintenance_engine_v2/src/m4_intelligence/nam.rs"
+  },
+  {
+    "id": "P-QG-01",
+    "title": "4-stage zero-tolerance quality gate",
+    "category": "quality",
+    "when_to_use": "Before every commit. Order matters; each stage aborts on first failure.",
+    "exemplar": "cargo check && cargo clippy -- -D warnings && cargo clippy -- -D warnings -W clippy::pedantic && cargo test --lib --release",
+    "source_url": "../CLAUDE.md"
+  },
+  {
+    "id": "P-QG-02",
+    "title": "PIPESTATUS[0] discipline in gate chains",
+    "category": "quality",
+    "when_to_use": "Any gate chain using `cargo ... | tail`. tail's exit overrides cargo's; use ${PIPESTATUS[0]} to inspect cargo.",
+    "exemplar": "cargo check 2>&1 | tail -20; [[ ${PIPESTATUS[0]} -ne 0 ]] && { echo 'check failed'; exit 2; }",
+    "source_url": "../../.claude/projects/-home-louranicas-claude-code-workspace/memory/feedback_pipestatus_for_gate_chains.md"
+  },
+  {
+    "id": "P-QG-03",
+    "title": "bacon on_success chaining (check -> clippy -> pedantic)",
+    "category": "quality",
+    "when_to_use": "Continuous feedback during development. on_success chains stages so you see pedantic warnings only when check + clippy are clean.",
+    "exemplar": "bacon.toml: [jobs.check] on_success = 'clippy'; [jobs.clippy] on_success = 'pedantic'; export locations to .bacon-locations for nvim integration.",
+    "source_url": "../../.claude/skills/bacon-mastery/SKILL.md"
+  },
+  {
+    "id": "P-QG-04",
+    "title": "50+ tests per module minimum",
+    "category": "quality",
+    "when_to_use": "Every module. KEYSTONE Cluster F gets 250+. Forces design questions that surface architecture issues.",
+    "exemplar": "#[cfg(test)] mod tests { /* 50+ #[test] functions covering happy + error + edge */ }",
+    "source_url": "ai_docs/optimisation-v7/STANDARDS/TEST_DISCIPLINE.md"
+  },
+  {
+    "id": "P-DATA-01",
+    "title": "Lazy cursor-based pagination (atuin SQLite)",
+    "category": "data-flow",
+    "when_to_use": "m1 reading 263k+ row atuin.db. Never SELECT * without LIMIT; use cursor (rowid > last) pagination.",
+    "exemplar": "PRAGMA busy_timeout = 5000; PRAGMA query_only = ON; SELECT rowid, command, timestamp FROM history WHERE rowid > ? ORDER BY rowid ASC LIMIT 500;",
+    "source_url": "ai_specs/modules/cluster-A/m1.md"
+  },
+  {
+    "id": "P-DATA-02",
+    "title": "Subprocess CLI fallback",
+    "category": "data-flow",
+    "when_to_use": "When SQLite path is unavailable. Wrap atuin CLI in tokio::process::Command with 5s timeout.",
+    "exemplar": "tokio::time::timeout(Duration::from_secs(5), Command::new('atuin').args(['search', '--format=json']).output()).await",
+    "source_url": "ai_specs/modules/cluster-A/m1.md"
+  },
+  {
+    "id": "P-DATA-03",
+    "title": "Reducer-callback dedup (stcortex consumer)",
+    "category": "data-flow",
+    "when_to_use": "m2 narrows scope to tool_call + consumption events. Dedup at consumer (not at writer) using (session_id, event_id) key.",
+    "exemplar": "let key = (event.session_id.clone(), event.event_id); if !seen.insert(key) { return Ok(()); }",
+    "source_url": "ai_specs/modules/cluster-A/m2.md"
+  },
+  {
+    "id": "P-DATA-04",
+    "title": "JSONL one-event-per-file (pressure register)",
+    "category": "data-flow",
+    "when_to_use": "m15 pressure register. Append-only, atomic emit, no shared lock.",
+    "exemplar": "use std::os::unix::fs::OpenOptionsExt; OpenOptions::new().append(true).create(true).custom_flags(libc::O_APPEND).open(path)?.write_all(line.as_bytes())?;",
+    "source_url": "ai_specs/modules/cluster-E/m15.md"
+  },
+  {
+    "id": "P-DATA-05",
+    "title": "JSONB consumer_inputs column (m7 hub)",
+    "category": "data-flow",
+    "when_to_use": "m7 workflow_runs hub. CC-1 contract uses JOIN on hub.consumer_inputs JSONB column rather than sharing internal structs.",
+    "exemplar": "CREATE TABLE workflow_runs (id TEXT PRIMARY KEY, consumer_inputs JSONB NOT NULL, ...); -- query: SELECT * FROM workflow_runs WHERE consumer_inputs->>'pane_id' = ?",
+    "source_url": "ai_specs/modules/cluster-C/m7.md"
+  },
+  {
+    "id": "P-DATA-06",
+    "title": "Wilson CI for lift / confidence (n<20 returns None)",
+    "category": "data-flow",
+    "when_to_use": "m14 lift metric + m22 confidence. Avoids point-estimate over-claim; returns None for n<20 (insufficient evidence).",
+    "exemplar": "fn wilson_ci(successes: u32, n: u32, z: f64) -> Option<(f64, f64)> { if n < 20 { return None; } /* Wilson formula */ }",
+    "source_url": "ai_specs/modules/cluster-E/m14.md"
+  },
+  {
+    "id": "P-DATA-07",
+    "title": "EMA over Converged-excluded window (m6 context cost)",
+    "category": "data-flow",
+    "when_to_use": "m6 20-session EMA. Explicitly excludes Converged outcomes to avoid feedback bias from successful workflows skewing cost baseline.",
+    "exemplar": "let samples: Vec<_> = sessions.iter().filter(|s| s.outcome != Outcome::Converged).take(20).collect(); ema(samples, alpha=0.2)",
+    "source_url": "ai_specs/modules/cluster-B/m6.md"
+  },
+  {
+    "id": "P-DATA-08",
+    "title": "Top-K-by-distance N=3 (m23 proposer)",
+    "category": "data-flow",
+    "when_to_use": "m23 workflow proposer. Normalised Levenshtein distance: <0.25 same / 0.25-0.60 near-miss / >0.60 distinct. Returns top 3 distinct.",
+    "exemplar": "candidates.sort_by(|a,b| dist(a, target).partial_cmp(&dist(b, target)).unwrap()); candidates.into_iter().filter(|c| dist(c, target) > 0.60).take(3).collect()",
+    "source_url": "ai_specs/modules/cluster-F/m23.md"
+  },
+  {
+    "id": "P-DATA-09",
+    "title": "3-band LTP/LTD gate (m13 stcortex writer)",
+    "category": "data-flow",
+    "when_to_use": "m13 stcortex writer. substrate_LTP_density < 0.15 -> deferred JSONL buffer (backpressure); 0.15-0.50 -> write at half rate; >0.50 -> write at full rate.",
+    "exemplar": "match substrate_LTP_density { d if d < 0.15 => buffer_jsonl(event), d if d < 0.50 => maybe_write_half(event), _ => write_full(event) }",
+    "source_url": "ai_specs/modules/cluster-C/m13.md"
+  },
+  {
+    "id": "P-DATA-10",
+    "title": "EscapeSurfaceProfile ordinal enum",
+    "category": "data-flow",
+    "when_to_use": "m30 bank + m32 dispatch + m9 namespace guard. Unified destructiveness schema; m32 displays before each step; m9 enforces at namespace level.",
+    "exemplar": "#[repr(u8)] pub enum EscapeSurfaceProfile { Read = 0, IdempotentWrite = 1, Mutate = 2, Destructive = 3, Catastrophic = 4 } - banner_line() returns 'READ' / 'WRITE' / 'MUTATE' / 'DESTRUCTIVE!' / 'CATASTROPHIC!'",
+    "source_url": "ai_specs/modules/cluster-G/m30.md"
+  },
+  {
+    "id": "P-SUB-01",
+    "title": "NexusEvent typed envelope (Cluster H)",
+    "category": "substrate-write",
+    "when_to_use": "m40 -> SYNTHEX v2 :8092 /v3/nexus/push. Typed schema; MVP per Cluster H spec uses Option A untyped JSON, M1+ tightens.",
+    "exemplar": "POST :8092/v3/nexus/push -d '{\"kind\":\"workflow.observed\",\"source\":\"wf-crystallise\",\"payload\":{...}}'",
+    "source_url": "ai_specs/modules/cluster-H/m40.md"
+  },
+  {
+    "id": "P-SUB-02",
+    "title": "LCM RPC lcm.loop.create (NOT lcm.deploy)",
+    "category": "substrate-write",
+    "when_to_use": "m41 -> LCM MCP stdio. Specifically: lcm.loop.create is correct; lcm.deploy is hypothetical/wrong (called out in vault).",
+    "exemplar": "{\"jsonrpc\":\"2.0\",\"method\":\"lcm.loop.create\",\"params\":{\"workflow_id\":\"...\",\"steps\":[...]}}",
+    "source_url": "ai_specs/modules/cluster-H/m41.md"
+  },
+  {
+    "id": "P-SUB-03",
+    "title": "stcortex pathway emit (Hebbian fitness_delta)",
+    "category": "substrate-write",
+    "when_to_use": "m42 -> stcortex pathway write. fitness_delta: PassVerified=+0.25, Pass=+0.15, Blocked=-0.05, Fail=-0.10. Namespace workflow_trace_*.",
+    "exemplar": "stcortex call write_pathway 'workflow_<id>_observed' 'workflow_<id>_verified' 'workflow_trace_pathways' 0.25 '<session>' null",
+    "source_url": "ai_specs/modules/cluster-H/m42.md"
+  },
+  {
+    "id": "P-SUB-04",
+    "title": "Outbox-first JSONL buffer (Cluster H resilience)",
+    "category": "substrate-write",
+    "when_to_use": "m40/m41/m42. Write to outbox file first, then RPC. Survives substrate outage; replay drains outbox once RPC recovers.",
+    "exemplar": "append_jsonl('~/.local/share/workflow-trace/outbox.jsonl', event); spawn(rpc_emit_then_clear(event.id))",
+    "source_url": "ai_specs/modules/cluster-H/m40.md"
+  },
+  {
+    "id": "P-SUB-05",
+    "title": "Circuit breaker on 2 consecutive peer failures",
+    "category": "substrate-write",
+    "when_to_use": "m40/m41/m42. After 2 consecutive failures, open breaker; fall back to outbox-only; log Watcher Class-I notice.",
+    "exemplar": "if consecutive_fail >= 2 { breaker.open(); watcher_notify('Class-I', format!('peer {} unhealthy', peer)); }",
+    "source_url": "ai_specs/modules/cluster-H/m40.md"
+  }
+]

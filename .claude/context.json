@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "workflow-trace project context for Claude Code. Planning-only / HOLD-v2 active / 0 LOC code.",
+  "project_name": "workflow-trace",
+  "version": "0.0.0-spec.0",
+  "status": "planning-only",
+  "hold_v2_active": true,
+  "g9_signal": "start coding workflow-trace",
+  "binding_spec": "ai_docs/GENESIS_PROMPT_V1_3.md",
+  "canonical_ultramap": "ai_docs/optimisation-v7/ULTRAMAP.md",
+  "vault_path": "the-workflow-engine-vault/",
+  "ai_docs_path": "ai_docs/",
+  "ai_specs_path": "ai_specs/",
+  "module_count": 26,
+  "cluster_count": 8,
+  "binary_count": 2,
+  "binaries": ["wf-crystallise", "wf-dispatch"],
+  "shared_lib": "workflow_core",
+  "cargo_pattern": "orac-single-crate",
+  "target_loc": 5200,
+  "target_tests": 1599,
+  "min_tests_per_module": 50,
+  "keystone_cluster": "F",
+  "keystone_min_tests": 250,
+  "clusters": {
+    "A": {"name": "Substrate Ingest", "modules": ["m1", "m2", "m3"], "loc": 230, "role": "atuin / stcortex narrowed-scope consumer / injection.db"},
+    "B": {"name": "Habitat Observers", "modules": ["m4", "m5", "m6"], "loc": 460, "role": "cascade correlator (opaque IDs) / battern step record / context cost (F10 EMA)"},
+    "C": {"name": "Correlation + Output", "modules": ["m7", "m12", "m13"], "loc": 370, "role": "central workflow_runs table (F9 zero-weight) / CLI reports / stcortex writer"},
+    "D": {"name": "Trust (cross-cutting)", "modules": ["m8", "m9", "m10", "m11"], "loc": 300, "role": "POVM build-prereq / namespace guard / Ember CI gate / fitness-weighted decay"},
+    "E": {"name": "Evidence + Pressure", "modules": ["m14", "m15"], "loc": 200, "role": "lift metric (Wilson CI) / pressure register (JSONL events)"},
+    "F": {"name": "Iteration (KEYSTONE)", "modules": ["m20", "m21", "m22", "m23"], "loc": 850, "role": "PrefixSpan iterators + gradient-preservation workflow proposer"},
+    "G": {"name": "Bank + Select + Dispatch + Verify", "modules": ["m30", "m31", "m32", "m33"], "loc": 950, "role": "curated bank + diversity-enforced selector + Conductor dispatcher + 4-agent verifier"},
+    "H": {"name": "Substrate Feedback", "modules": ["m40", "m41", "m42"], "loc": 450, "role": "NexusEvent -> SYNTHEX / LCM RPC / stcortex Hebbian reinforce"}
+  },
+  "binary_owners": {
+    "wf-crystallise": ["m1","m2","m3","m4","m5","m6","m7","m12","m13","m14","m15","m20","m21","m22","m23","m40","m41","m42"],
+    "wf-dispatch": ["m30","m31","m32","m33"]
+  },
+  "cross_cluster_synergies": {
+    "CC-1": "Cascade-Cost Coupling (B internal via m7 join)",
+    "CC-2": "Trust Layer Woven (D -> all)",
+    "CC-3": "Evidence-Driven Iteration (E -> F)",
+    "CC-4": "Proposal -> Bank -> Dispatch Pipeline (F -> G -> Conductor)",
+    "CC-5": "Substrate Learning Loop (G -> H -> back to F via stcortex pathways)",
+    "CC-6": "Verification-Gated Dispatch (G internal: m33 -> m32)",
+    "CC-7": "Pressure-Driven Evolution (E -> spec interviews)"
+  },
+  "gates": {
+    "G1": {"description": "Watcher close-notice (Path A ratification)", "state": "NOT_GREEN", "owner": "Watcher"},
+    "G2": {"description": "Directory rename the-workflow-engine -> workflow-trace", "state": "NOT_GREEN", "owner": "Luke"},
+    "G3": {"description": "POVM :8125 redeploy verify", "state": "DROPPED", "owner": null, "note": "m42 stcortex-only pivot decoupled per 2026-05-17 ADR"},
+    "G4": {"description": "Watcher Ember Held-semantics amendment (rubric §5.1)", "state": "PENDING", "owner": "Watcher"},
+    "G5": {"description": "Interview / F2 (Genesis Prompt v1.x interview round)", "state": "NOT_GREEN", "owner": "Command"},
+    "G6": {"description": "Dual-frame gap (Conventional + NA gap analysis)", "state": "NOT_GREEN", "owner": "Command"},
+    "G7": {"description": "Zen spec audit on v1.3 patch + cluster specs", "state": "PENDING_VERDICT", "owner": "Zen"},
+    "G8": {"description": "Persistence (4-surface plan crystallisation)", "state": "NOT_GREEN", "owner": "Command"},
+    "G9": {"description": "Luke explicit 'start coding workflow-trace' signal", "state": "BLOCKED", "owner": "Luke", "note": "Zen URGENT block on out-of-sequence; HOLD-v2 envelope active"}
+  },
+  "blockers": {
+    "B1": {"description": "G7 Zen URGENT block on G9 out-of-sequence", "state": "ACTIVE", "owner": "Luke"},
+    "B2": {"description": "v1.3 patch authoring", "state": "ACTIVE", "owner": "Luke (green-light)"},
+    "B3": {"description": "Conductor Waves 1B/1C/2/3 auto_start=false", "state": "ACTIVE", "owner": "Luke"},
+    "B4": {"description": "Ember rubric §5.1 Held-semantics amendment", "state": "ACTIVE", "owner": "Luke/Watcher"},
+    "B5": {"description": "POVM :8125 redeploy verify", "state": "DROPPED", "owner": null},
+    "B6": {"description": "Power-structure ambiguity (Luke override vs Zen G7 audit precedence)", "state": "RESOLVED", "owner": null}
+  },
+  "luke_actions_remaining": 3,
+  "luke_actions": [
+    "Conductor: devenv start weaver/zen/enforcer (D-B3)",
+    "Wake Tab-1 C-2 + C-3 panes (D-Handshake)",
+    "Approve hybrid CI-FAIL+allowlist OR file own Ember §5.1 direction (D-B4)"
+  ],
+  "substrate_condition": {
+    "ralph_fitness": 0.6987,
+    "ralph_gen": 7622,
+    "ltp_ltd_ratio": 0.043,
+    "substrate_ltp_density": 0.018,
+    "substrate_ltp_density_phase1_target": 0.015,
+    "substrate_ltp_density_phase1_pass": true,
+    "services_up": "12/13",
+    "watcher_eligible": true,
+    "watcher_observations": 48723
+  },
+  "team": {
+    "Command": "Tab 1 Orchestrator top-left",
+    "Command-2": "Tab 1 Orchestrator bottom-left",
+    "Command-3": "Tab 1 Orchestrator bottom-right",
+    "Watcher": "synthex-v2 :8092 substrate observer",
+    "Zen": "Tab 10 Pi GPT-5.5 audit lane",
+    "Luke": "node 0.A decisional authority"
+  },
+  "stcortex_namespace_prefix": "workflow_trace_",
+  "stcortex_canonical_substrate": true,
+  "povm_decoupled": true,
+  "povm_decoupling_adr": "ai_docs/optimisation-v7/decisions/2026-05-17-m42-stcortex-only-pivot.md",
+  "comms_channels": {
+    "agent_cross_talk": "~/projects/shared-context/agent-cross-talk/",
+    "watcher_notices": "~/projects/shared-context/watcher-notices/",
+    "session_checkpoints": "~/projects/shared-context/sessions/"
+  },
+  "claude_code_assets": {
+    "agents_subdir": ".claude/agents/",
+    "commands_subdir": ".claude/commands/",
+    "hooks_subdir": ".claude/hooks/",
+    "skills_subdir": ".claude/skills/",
+    "schemas_subdir": ".claude/schemas/",
+    "queries_subdir": ".claude/queries/",
+    "settings_file": ".claude/settings.json",
+    "anti_patterns_file": ".claude/anti_patterns.json",
+    "patterns_file": ".claude/patterns.json",
+    "context_file": ".claude/context.json",
+    "status_file": ".claude/status.json",
+    "alignment_verification_file": ".claude/ALIGNMENT_VERIFICATION.md"
+  },
+  "current_phase": "scaffold-wave-2-in-progress: .claude JSON optimisation + ai_docs + ai_specs (per S1002127 PRIME_DIRECTIVE_WAIVER)"
+}

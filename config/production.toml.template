@@ -1,0 +1,52 @@
+# config/production.toml.template — TEMPLATE (NOT a live config)
+#
+# Back to: ../README.md · ../CLAUDE.md · ../CLAUDE.local.md
+#
+# Production overrides for workflow-trace. Loaded AFTER default.toml; any field
+# set here wins. Real `production.toml` lands post-G9, drops the `.template`
+# suffix, and is referenced from ../config/devenv-service.toml at deploy time.
+#
+# Production posture: stricter logging, sampled tracing, narrower CORS allowlist,
+# higher health-probe granularity, and all feature gates ON.
+
+# --- Logging (tighten) -------------------------------------------------------
+[log]
+level           = "warn"               # warn-and-above only in production
+trace_sampling  = 0.01                 # 1% trace sample for hot paths
+
+# --- Health + metrics endpoints (production observability) -------------------
+[observability]
+metrics_endpoint    = "/metrics"       # Prometheus scrape (text/plain; 0.0.4)
+metrics_bind        = "127.0.0.1"      # NOT public — scraped via local Prometheus
+metrics_port        = 8191             # TBD; reserve adjacent to server.port
+deep_health_path    = "/health/deep"   # heavier check: m7 SQLite read, stcortex ping, Conductor probe
+
+# --- CORS allowlist (per workspace SSRF discipline) --------------------------
+[cors]
+allow_origins   = []                   # default empty; widen explicitly via env workflow_trace_CORS_ALLOW
+
+# --- Cluster F production caps (don't starve substrate) ----------------------
+[iteration]
+prefixspan_max_runtime_ms   = 30000    # 30s cap; pre-empt if exceeded
+proposer_max_queue_depth    = 256      # operator review queue cap
+
+# --- Cluster H delivery semantics (production at-least-once) -----------------
+[feedback]
+delivery        = "at_least_once"      # default at-most-once; production requires at-least-once via outbox-first
+outbox_path     = "/var/log/workflow-trace/outbox.jsonl"
+outbox_flush_ms = 250
+
+# --- Circuit breakers --------------------------------------------------------
+[breakers]
+synthex_failure_threshold   = 5
+synthex_open_duration_s     = 60
+lcm_failure_threshold       = 5
+lcm_open_duration_s         = 60
+stcortex_failure_threshold  = 5
+stcortex_open_duration_s    = 60
+
+# --- All features on ---------------------------------------------------------
+[features]
+enabled = ["default", "api", "intelligence", "monitoring", "evolution"]
+
+# --- end of template ---------------------------------------------------------

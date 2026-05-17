@@ -1,0 +1,81 @@
+# config/devenv-service.toml.template — TEMPLATE (NOT a live config)
+#
+# Back to: ../README.md · ../CLAUDE.md · ../CLAUDE.local.md
+#
+# DevEnv fragment to add at G9 to register workflow-trace as a 15th active
+# service in `~/.config/devenv/devenv.toml`. This `.template` file is
+# planning surface only — the real registration happens by COPY-PASTING this
+# block into the workspace devenv.toml at G9 time (with port-conflict check
+# + batch ordering verification per workspace ULTRAPLATE Services table).
+#
+# Final port assignment locks at G5/G7. 8190 + 8191 are draft placeholders
+# (chosen to be adjacent to ME v2 :8180 in the 8180-8199 range; verify no
+# collision with running services at deploy time).
+
+# ============================================================================
+# Paste-into-devenv-fragment (workflow-trace as Batch 3 sibling of orac-sidecar)
+# ============================================================================
+
+[[services]]
+id              = "workflow-trace"          # final ID TBD at G2 (working name)
+name            = "workflow-trace"
+batch           = 3                          # depends on orac-sidecar (Batch 3) being healthy
+auto_start      = false                      # start manually until M0_VERIFIED soak completes
+
+# --- Binary deployment -------------------------------------------------------
+binary_path     = "~/.local/bin/wf-crystallise"
+binary_args     = ["--config", "~/claude-code-workspace/the-workflow-engine/config/production.toml"]
+working_dir     = "~/claude-code-workspace/the-workflow-engine"
+
+# --- Health + lifecycle -------------------------------------------------------
+health_url      = "http://localhost:8190/health"
+health_timeout_s = 5
+restart_policy  = "on-failure"
+restart_max     = 3
+restart_window_s = 300
+
+# --- Environment -------------------------------------------------------------
+[services.env]
+RUST_LOG                     = "warn,workflow_trace=info"
+RUST_BACKTRACE               = "1"
+WORKFLOW_TRACE_CONFIG        = "~/claude-code-workspace/the-workflow-engine/config/production.toml"
+WORKFLOW_TRACE_M7_DB         = "~/.local/share/workflow-trace/workflow_runs.db"
+WORKFLOW_TRACE_STCORTEX_URL  = "127.0.0.1:3000"
+WORKFLOW_TRACE_SYNTHEX_URL   = "127.0.0.1:8092"
+
+# --- Resource limits (per workspace ULTRAPLATE convention) -------------------
+[services.limits]
+mem_max_mb      = 512                        # crystallise is read-heavy; bump if SQLite WAL grows
+cpu_max_pct     = 50                         # not a hot-path service
+open_files_max  = 4096                       # m7 SQLite + atuin tail + stcortex WS subscriptions
+
+# --- Dependencies ------------------------------------------------------------
+# Batch 3 depends on Batch 2 (pane-vortex :8132, vortex-memory-system :8120,
+# synthex :8090 RETIRED, maintenance-engine-v2 :8180) being healthy.
+# Cluster G dispatch ALSO depends on HABITAT-CONDUCTOR Waves 1B/1C/2/3 being LIVE.
+depends_on      = ["pane-vortex", "stcortex"]
+
+# ============================================================================
+# Companion: wf-dispatch as separate registration (Batch 3 sibling)
+# ============================================================================
+
+[[services]]
+id              = "workflow-trace-dispatch"
+name            = "workflow-trace-dispatch"
+batch           = 3
+auto_start      = false
+binary_path     = "~/.local/bin/wf-dispatch"
+binary_args     = ["--config", "~/claude-code-workspace/the-workflow-engine/config/production.toml"]
+working_dir     = "~/claude-code-workspace/the-workflow-engine"
+health_url      = "http://localhost:8192/health"
+health_timeout_s = 5
+restart_policy  = "on-failure"
+
+[services.env]
+RUST_LOG                     = "warn,wf_dispatch=info"
+WORKFLOW_TRACE_CONFIG        = "~/claude-code-workspace/the-workflow-engine/config/production.toml"
+WORKFLOW_TRACE_CONDUCTOR_URL = "127.0.0.1:8141"
+
+depends_on = ["workflow-trace", "weaver"]   # weaver = HABITAT-CONDUCTOR
+
+# --- end of template ---------------------------------------------------------

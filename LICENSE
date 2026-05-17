@@ -1,0 +1,11 @@
+# LICENSE — workflow-trace (PLACEHOLDER)
+
+> **Back to:** [`README.md`](README.md) · [`CLAUDE.md`](CLAUDE.md) · [`CLAUDE.local.md`](CLAUDE.local.md) · [`PRIME_DIRECTIVE_WAIVER.md`](PRIME_DIRECTIVE_WAIVER.md)
+
+**Status:** TBD. License decision pending Luke @ node 0.A.
+
+This file is a placeholder under the S1002127 scaffold waiver ([`PRIME_DIRECTIVE_WAIVER.md`](PRIME_DIRECTIVE_WAIVER.md)). The workspace charter at `~/claude-code-workspace/CLAUDE.md` does NOT carry an explicit license file at workspace root, so workflow-trace cannot transitively inherit a license — Luke must make an explicit choice before any executable commit on `main` lands (i.e. before or at G9-fire).
+
+Pending Luke's license decision; TBD before first commit on `main` branch with executable code (post-G9). Candidate licenses for discussion include MIT, Apache-2.0, BSD-3-Clause, AGPL-3.0, or workspace-default-when-declared. Until then no license rights are granted or implied; treat this codebase as `All Rights Reserved` by Luke @ node 0.A for planning-pilot purposes only. Cross-pane peers (Command, Command-2, Command-3, Watcher, Zen) and habitat tooling have read access by construction (file-drop comms convention) but do not constitute publication.
+
+> **Back to:** [`README.md`](README.md) · [`CLAUDE.md`](CLAUDE.md) · [`CLAUDE.local.md`](CLAUDE.local.md) · [`PRIME_DIRECTIVE_WAIVER.md`](PRIME_DIRECTIVE_WAIVER.md)

@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings",
+  "$comment": "workflow-trace project Claude Code settings. Pre-G9 (HOLD-v2). Deep customisation in Wave 2.",
+  "project": {
+    "name": "workflow-trace",
+    "version": "0.0.0-spec.0",
+    "status": "planning-only",
+    "hold_v2_active": true,
+    "g9_signal": "start coding workflow-trace",
+    "binding_spec": "ai_docs/GENESIS_PROMPT_V1_3.md",
+    "canonical_ultramap": "ai_docs/optimisation-v7/ULTRAMAP.md",
+    "vault": "the-workflow-engine-vault/",
+    "ai_docs": "ai_docs/",
+    "ai_specs": "ai_specs/",
+    "module_count": 26,
+    "cluster_count": 8,
+    "binary_count": 2,
+    "binaries": ["wf-crystallise", "wf-dispatch"],
+    "shared_lib": "workflow_core",
+    "cargo_pattern": "orac-single-crate"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(curl -s -o /dev/null -w * http://localhost:*)",
+      "Bash(curl -s http://localhost:*)",
+      "Bash(sqlite3 *:* .schema *)",
+      "Bash(sqlite3 *:* SELECT *)",
+      "Bash(git status)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git ls-files*)",
+      "Bash(git cat-file *)",
+      "Bash(ls *)",
+      "Bash(find *)",
+      "Bash(fd *)",
+      "Bash(rg *)",
+      "Bash(atuin scripts run *)",
+      "Bash(atuin kv get *)",
+      "Bash(~/.local/bin/watcher *)"
+    ],
+    "deny": [
+      "Bash(cargo init*)",
+      "Bash(cargo new*)",
+      "Bash(cargo build*)",
+      "Bash(cargo run*)",
+      "Bash(cargo install*)",
+      "Bash(docker prune*)",
+      "Bash(docker container prune*)",
+      "Bash(rm -rf *)",
+      "Bash(git push --force*)",
+      "Bash(git push -f *)",
+      "Bash(git stash pop*)",
+      "Bash(setsid *)",
+      "Bash(nohup *)"
+    ],
+    "_comment_deny": "Cargo build commands DENIED pre-G9. Blanket-destructive commands DENIED (CLAUDE.md Habitat Operations). git stash pop DENIED (must use git stash list first per CLAUDE.md Git Conventions). cargo init/new/build/run release WHEN Luke types 'start coding workflow-trace' and PRIME_DIRECTIVE_WAIVER is updated."
+  },
+  "hooks": {
+    "_comment": "Hook configurations deferred to Wave 2 (.claude/hooks/ deep authoring). Planned: PostToolUse rust-postedit, Stop rust-gate, PreToolUse no-cargo-pre-g9, PreToolUse no-rs-files-pre-g9, PreToolUse namespace-guard."
+  },
+  "agents_subdir": ".claude/agents/",
+  "commands_subdir": ".claude/commands/",
+  "hooks_subdir": ".claude/hooks/",
+  "skills_subdir": ".claude/skills/",
+  "schemas_subdir": ".claude/schemas/",
+  "queries_subdir": ".claude/queries/",
+  "worktrees_subdir": ".claude/worktrees/",
+  "obsidian_vault": "the-workflow-engine-vault/",
+  "anti_patterns_file": ".claude/anti_patterns.json",
+  "patterns_file": ".claude/patterns.json",
+  "status_file": ".claude/status.json",
+  "context_file": ".claude/context.json"
+}

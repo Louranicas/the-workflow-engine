@@ -40,6 +40,7 @@ pub mod m12_cli_reports;
 pub mod m13_stcortex_writer;
 pub mod m14_lift;
 pub mod m15_pressure;
+pub mod m20_prefixspan;
 pub mod m8_povm_build_prereq;
 
 pub use m4_cascade::{
@@ -77,6 +78,10 @@ pub use m14_lift::{
 pub use m15_pressure::{
     classify_excerpt, truncate_excerpt, CharterSection, ForbiddenCategory, PressureEvent,
     PressureRegister, PressureRegisterConfig, PressureRegisterError, PressureSource,
+};
+pub use m20_prefixspan::{
+    mine_sequences, MaxGap, MinSupport, MinerError, Pattern, StepToken, DEFAULT_MAX_GAP,
+    DEFAULT_MAX_LENGTH, MIN_SUPPORT_FLOOR,
 };
 pub mod m9_watcher_namespace_guard;
 pub mod m10_ember_ci_gate;

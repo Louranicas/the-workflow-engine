@@ -33,11 +33,16 @@ pub mod m1_atuin_consumer;
 pub mod m2_stcortex_consumer;
 pub mod m3_injection_db_consumer;
 pub mod m4_cascade;
+pub mod m5_battern;
 pub mod m8_povm_build_prereq;
 
 pub use m4_cascade::{
     assign_cluster_id, fnv1a_64, AtuinStep, CascadeCluster, CascadeClusterId, CascadeCorrelator,
     CascadeCorrelatorConfig, CascadeError, DispatchRecord,
+};
+pub use m5_battern::{
+    derive_battern_id, BatternError, BatternId, BatternRecord, BatternStepLabel,
+    BatternStepObservation, BatternStepRecord, BatternStepRecordConfig,
 };
 pub mod m9_watcher_namespace_guard;
 pub mod m10_ember_ci_gate;

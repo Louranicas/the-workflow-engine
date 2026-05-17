@@ -33,6 +33,8 @@ time = { version = "0.3", features = ["parsing", "formatting", "macros"] }
 # m1 atuin consumer + m3 injection.db consumer — read-only SQLite WAL.
 # `bundled` ships libsqlite3 source so we don't depend on the host's lib.
 rusqlite = { version = "0.33", features = ["bundled"] }
+# m5 battern_step_record — regex heuristics for soft-schema step labelling.
+regex = "1"
 # m2 stcortex narrowed consumer — local path dep matching the stcortex
 # rust-subscriber Cargo.toml. module_bindings are vendored under
 # `src/m2_stcortex_consumer/module_bindings/` (canonical SpacetimeDB

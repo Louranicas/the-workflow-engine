@@ -35,6 +35,7 @@ pub mod m3_injection_db_consumer;
 pub mod m4_cascade;
 pub mod m5_battern;
 pub mod m6_cost;
+pub mod m7_workflow_runs;
 pub mod m8_povm_build_prereq;
 
 pub use m4_cascade::{
@@ -48,6 +49,12 @@ pub use m5_battern::{
 pub use m6_cost::{
     ContextCostError, ContextCostRecord, ContextCostRecordConfig, CostBand, ExplorationBaseline,
     SessionCostRecord, WorkflowOutcome,
+};
+pub use m7_workflow_runs::{
+    close_run, find_by_id, find_by_outcome, find_open, insert_run, merge_observation,
+    open_database as open_workflow_runs_database, open_memory as open_workflow_runs_memory,
+    update_cost_tokens, ClusterBObservation, Outcome, StepOutcome, WorkflowError,
+    WorkflowRunRow,
 };
 pub mod m9_watcher_namespace_guard;
 pub mod m10_ember_ci_gate;

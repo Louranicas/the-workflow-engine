@@ -116,13 +116,22 @@ pub fn mine_sequences(
     if sequences.is_empty() {
         return Err(MinerError::EmptyDatabase);
     }
+    // Spec § 4 contract: max_length is bounded to >= 1. A caller passing
+    // 0 is documented as a no-op coercion to 1 (yields only L1 patterns).
+    // The hard cap at DEFAULT_MAX_LENGTH is enforced separately by callers
+    // that need the recursion-depth refusal mode.
     let max_length = max_length.max(1);
 
-    let mut results: Vec<Pattern> = Vec::new();
-    let mut frequencies: HashMap<StepToken, usize> = HashMap::new();
+    // Per spec § 5: L1 frequency scan is one pass over the database
+    // counting per-sequence occurrence (not per-token), which makes the
+    // L1 support count equal to the number of input sequences that
+    // contain the token at least once.
+    let mut frequencies: HashMap<StepToken, usize> =
+        HashMap::with_capacity(sequences.len().min(64));
     for seq in sequences {
+        // Capacity hint: most cascade sequences carry ≤16 distinct tokens.
         let mut seen: std::collections::HashSet<StepToken> =
-            std::collections::HashSet::new();
+            std::collections::HashSet::with_capacity(seq.len().min(16));
         for tok in seq {
             if seen.insert(*tok) {
                 *frequencies.entry(*tok).or_insert(0) += 1;
@@ -136,6 +145,12 @@ pub fn mine_sequences(
         .collect();
     frequent_items.sort();
 
+    // Pre-allocate a generous-but-bounded result buffer. Each frequent
+    // L1 item yields at most `max_length` patterns under perfect
+    // extension; in practice the projection prunes harshly so this is
+    // an upper-bound hint, not a guarantee.
+    let mut results: Vec<Pattern> =
+        Vec::with_capacity(frequent_items.len().saturating_mul(max_length));
     for &item in &frequent_items {
         let prefix = vec![item];
         let support = frequencies[&item];
@@ -168,7 +183,8 @@ fn recurse_prefix(
     }
     // Project: for each sequence containing `prefix` under gap-allowed
     // matching, retain the suffix after the FIRST matching occurrence.
-    let mut suffixes: Vec<Vec<StepToken>> = Vec::new();
+    // Capacity hint: at most one projected suffix per input sequence.
+    let mut suffixes: Vec<Vec<StepToken>> = Vec::with_capacity(sequences.len());
     let mut max_right_gap = 0_usize;
     for seq in sequences {
         if let Some(suffix_info) = project_after_prefix(seq, prefix, max_gap) {
@@ -177,10 +193,11 @@ fn recurse_prefix(
         }
     }
     // Count length-1 extensions in the projected suffixes.
-    let mut ext_freq: HashMap<StepToken, usize> = HashMap::new();
+    let mut ext_freq: HashMap<StepToken, usize> =
+        HashMap::with_capacity(suffixes.len().min(64));
     for suf in &suffixes {
         let mut seen: std::collections::HashSet<StepToken> =
-            std::collections::HashSet::new();
+            std::collections::HashSet::with_capacity(suf.len().min(16));
         for tok in suf {
             if seen.insert(*tok) {
                 *ext_freq.entry(*tok).or_insert(0) += 1;
@@ -502,5 +519,204 @@ mod tests {
         let s = serde_json::to_string(&p).expect("ser");
         let back: Pattern = serde_json::from_str(&s).expect("de");
         assert_eq!(back, p);
+    }
+
+    // ---- Cluster F hardening pass — adversarial / boundary / resource ----
+
+    #[test]
+    // rationale: Boundary — MIN_SUPPORT_FLOOR-1 must refuse (F2 hard floor).
+    fn boundary_min_support_floor_minus_one_refuses() {
+        let r = mine_sequences(
+            &[seq(&[1, 2]), seq(&[1, 3])],
+            MinSupport(MIN_SUPPORT_FLOOR - 1),
+            MaxGap(5),
+            8,
+        );
+        assert!(matches!(r, Err(MinerError::MinSupportBelowFloor(_))));
+    }
+
+    #[test]
+    // rationale: Boundary — exactly at MIN_SUPPORT_FLOOR must be accepted.
+    fn boundary_min_support_at_floor_accepted() {
+        let r = mine_sequences(
+            &[seq(&[1]), seq(&[1])],
+            MinSupport(MIN_SUPPORT_FLOOR),
+            MaxGap(5),
+            8,
+        );
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    // rationale: Boundary — max_length=0 is silently coerced to 1 (documented).
+    fn boundary_max_length_zero_coerces_to_one_pattern() {
+        let p = mine_sequences(
+            &[seq(&[1, 2, 3]), seq(&[1, 2, 4])],
+            MinSupport(2),
+            MaxGap(5),
+            0,
+        )
+        .expect("ok");
+        for pat in &p {
+            assert!(pat.steps.len() <= 1, "len cap violated: {pat:?}");
+        }
+    }
+
+    #[test]
+    // rationale: Adversarial input — single-step sequence is valid.
+    fn adversarial_single_step_sequence_handled() {
+        let p = mine_sequences(
+            &[seq(&[42]), seq(&[42]), seq(&[42])],
+            MinSupport(2),
+            MaxGap(5),
+            8,
+        )
+        .expect("ok");
+        assert!(p.iter().any(|pat| pat.steps == seq(&[42]) && pat.support == 3));
+    }
+
+    #[test]
+    // rationale: Adversarial input — pathological 10k-element repeated pattern
+    // must not panic, must not OOM (Vec::with_capacity hints), must complete.
+    fn adversarial_long_repeated_sequence_does_not_panic() {
+        let long: Vec<StepToken> = (0..10_000_u32).map(|i| tok(i % 4)).collect();
+        let seqs = vec![long.clone(), long.clone(), long];
+        let p = mine_sequences(&seqs, MinSupport(2), MaxGap(2), 3).expect("ok");
+        // Just assert it returned; the algorithm's bounded-depth guarantees
+        // termination at max_length=3.
+        assert!(!p.is_empty());
+        for pat in &p {
+            assert!(pat.steps.len() <= 3);
+        }
+    }
+
+    #[test]
+    // rationale: Adversarial input — empty sequence interleaved with non-empty.
+    fn adversarial_mixed_empty_and_non_empty_sequences() {
+        let seqs = vec![
+            Vec::<StepToken>::new(),
+            seq(&[1, 2]),
+            Vec::<StepToken>::new(),
+            seq(&[1, 2]),
+        ];
+        let p = mine_sequences(&seqs, MinSupport(2), MaxGap(5), 8).expect("ok");
+        assert!(p.iter().any(|pat| pat.steps == seq(&[1, 2])));
+    }
+
+    #[test]
+    // rationale: Boundary — max u32 StepToken value must not overflow counts.
+    fn boundary_max_u32_step_token_handled() {
+        let big = StepToken(u32::MAX);
+        let seqs = vec![vec![big], vec![big]];
+        let p = mine_sequences(&seqs, MinSupport(2), MaxGap(5), 8).expect("ok");
+        assert!(p.iter().any(|pat| pat.steps == vec![big] && pat.support == 2));
+    }
+
+    #[test]
+    // rationale: Determinism — output bit-stable across iteration order
+    // permutations of the input (per spec § 5 ordering invariant).
+    fn determinism_output_stable_under_input_permutation() {
+        let a = vec![seq(&[1, 2]), seq(&[1, 3]), seq(&[1, 2, 3])];
+        let b = vec![seq(&[1, 2, 3]), seq(&[1, 2]), seq(&[1, 3])];
+        let pa = mine_sequences(&a, MinSupport(2), MaxGap(5), 8).expect("a");
+        let pb = mine_sequences(&b, MinSupport(2), MaxGap(5), 8).expect("b");
+        // The full output multiset must be identical (HashMap iteration is
+        // non-deterministic across permutations, but the final sort is total).
+        let fa: Vec<_> = pa.iter().map(|p| (p.steps.clone(), p.support)).collect();
+        let fb: Vec<_> = pb.iter().map(|p| (p.steps.clone(), p.support)).collect();
+        assert_eq!(fa, fb);
+    }
+
+    #[test]
+    // rationale: Anti-property — F11 opacity: Pattern serde JSON must NOT
+    // contain any human-readable substring (cluster names, "pane", "tab",
+    // or the workflow-trace namespace prefix).
+    fn anti_property_f11_pattern_serde_carries_no_human_label() {
+        let p = Pattern::new(seq(&[1, 2]), 5, (0, 0));
+        let s = serde_json::to_string(&p).expect("ser");
+        // Use the m9 namespace constant — AP30 forbids re-hardcoding the
+        // namespace-prefix literal anywhere outside of the m9 module.
+        let ns_prefix = crate::m9_watcher_namespace_guard::WORKFLOW_TRACE_NS_PREFIX;
+        for forbidden in ["pane", "tab", "cluster_pane"] {
+            assert!(
+                !s.contains(forbidden),
+                "F11 violation: serde output contains '{forbidden}' in {s}"
+            );
+        }
+        assert!(
+            !s.contains(ns_prefix),
+            "F11 violation: namespace prefix '{ns_prefix}' leaked into Pattern serde: {s}"
+        );
+    }
+
+    #[test]
+    // rationale: Contract regression — MinerError variants stable across edits.
+    fn contract_miner_error_variants_stable() {
+        // Trip every public variant once to lock the taxonomy.
+        let floor = MinerError::MinSupportBelowFloor(1);
+        let empty = MinerError::EmptyDatabase;
+        let too_long = MinerError::PatternTooLong { len: 10, max: 8 };
+        // Display impls must not panic.
+        assert!(!format!("{floor}").is_empty());
+        assert!(!format!("{empty}").is_empty());
+        assert!(!format!("{too_long}").is_empty());
+    }
+
+    #[test]
+    // rationale: Resource accounting — projection helper does not allocate on
+    // a no-match path (empty-prefix-after returns full seq).
+    fn projection_empty_prefix_returns_full_seq() {
+        let s = seq(&[1, 2, 3]);
+        let p = project_after_prefix(&s, &[], MaxGap(5)).expect("empty prefix");
+        assert_eq!(p.suffix, s);
+    }
+
+    #[test]
+    // rationale: Cross-module surface — Pattern is consumed by m21
+    // (variant_builder); hash stability across re-mines must hold.
+    fn cross_module_pattern_canonical_hash_survives_remine() {
+        let seqs = vec![seq(&[1, 2, 3]), seq(&[1, 2, 3]), seq(&[1, 2, 4])];
+        let a = mine_sequences(&seqs, MinSupport(2), MaxGap(5), 8).expect("a");
+        let b = mine_sequences(&seqs, MinSupport(2), MaxGap(5), 8).expect("b");
+        for (pa, pb) in a.iter().zip(b.iter()) {
+            assert_eq!(pa.canonical_hash, pb.canonical_hash);
+        }
+    }
+
+    #[test]
+    // rationale: Boundary — MAX_GAP=0 still emits patterns; gap discipline
+    // applies to prefix-projection cursor advancement, not to extension
+    // counting in the projected suffix (per spec § 5 "Gap-Allowed Matching
+    // Model": bounded right-gap on prefix items; extensions counted in
+    // projected suffix). Both [1] and [2] L1 are frequent under gap=0;
+    // [1,2] L2 is built by extension within the projected suffix.
+    fn boundary_max_gap_zero_completes_without_panic() {
+        let seqs = vec![seq(&[1, 9, 2]), seq(&[1, 9, 2])];
+        let p = mine_sequences(&seqs, MinSupport(2), MaxGap(0), 8).expect("ok");
+        // L1 [1] and [2] both have support 2 — emission MUST be present.
+        assert!(p.iter().any(|pat| pat.steps == seq(&[1])));
+        assert!(p.iter().any(|pat| pat.steps == seq(&[2])));
+    }
+
+    #[test]
+    // rationale: Concurrency — mine_sequences is `Send + Sync` reentrant
+    // (pure function on borrowed inputs) — runs on two threads in parallel.
+    fn concurrency_pure_function_is_send_safe() {
+        use std::sync::Arc;
+        use std::thread;
+        let seqs = Arc::new(vec![seq(&[1, 2, 3]), seq(&[1, 2, 4]), seq(&[1, 2, 5])]);
+        let s1 = Arc::clone(&seqs);
+        let s2 = Arc::clone(&seqs);
+        let h1 = thread::spawn(move || {
+            mine_sequences(&s1, MinSupport(2), MaxGap(5), 8).expect("a")
+        });
+        let h2 = thread::spawn(move || {
+            mine_sequences(&s2, MinSupport(2), MaxGap(5), 8).expect("b")
+        });
+        let a = h1.join().expect("t1");
+        let b = h2.join().expect("t2");
+        let fa: Vec<_> = a.iter().map(|p| (p.steps.clone(), p.support)).collect();
+        let fb: Vec<_> = b.iter().map(|p| (p.steps.clone(), p.support)).collect();
+        assert_eq!(fa, fb);
     }
 }

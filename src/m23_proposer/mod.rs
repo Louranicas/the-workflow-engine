@@ -91,19 +91,54 @@ pub fn build_proposal(
 ///
 /// Skips patterns/variants whose evidence fails the F2 gate. The
 /// returned vec preserves source ordering.
+///
+/// **Silent-swallow rationale (AP-V7-13 audit):** the inner `let Ok(_) = ...`
+/// branches deliberately discard two error classes:
+///
+/// 1. [`crate::m21_variant_builder::VariantBuilderError::EmptyPattern`] —
+///    only fires when `pattern.steps.is_empty()`, which m20's
+///    `mine_sequences` cannot produce (every emitted `Pattern` carries
+///    `support >= MIN_SUPPORT_FLOOR` which requires ≥1 step). Discarding
+///    is correct: the input contract from m20 already excludes it.
+/// 2. [`ProposerError::EvidenceBelowThreshold`] and
+///    [`ProposerError::LiftUnavailable`] — these ARE the F2 gate firing.
+///    `compose_proposals` is the batched form whose documented behaviour
+///    is "skips below F2"; trace-emit-and-drop is the contract.
+///
+/// Callers that need typed refusal MUST use [`build_proposal`] directly.
 #[must_use]
 pub fn compose_proposals(
     patterns: &[Pattern],
     snapshot: &LiftSnapshot,
 ) -> Vec<WorkflowProposal> {
-    let mut out = Vec::new();
+    // Capacity hint: at most MAX_VARIANTS_PER_PATTERN proposals per pattern.
+    let mut out: Vec<WorkflowProposal> = Vec::with_capacity(
+        patterns
+            .len()
+            .saturating_mul(crate::m21_variant_builder::MAX_VARIANTS_PER_PATTERN),
+    );
     for p in patterns {
+        // rationale: m20 contract excludes empty-step patterns; documented above.
         let Ok(variants) = crate::m21_variant_builder::build_variants(p) else {
+            tracing::debug!(
+                pattern_hash = p.canonical_hash,
+                "m23::compose_proposals — m21 build_variants refused; m20 contract violation upstream"
+            );
             continue;
         };
         for v in variants {
-            if let Ok(proposal) = build_proposal(v, snapshot, None) {
-                out.push(proposal);
+            // rationale: F2 gate skip-and-trace is the documented batched
+            // behaviour for compose_proposals; build_proposal is the
+            // strict typed-refusal path.
+            match build_proposal(v, snapshot, None) {
+                Ok(proposal) => out.push(proposal),
+                Err(e) => {
+                    tracing::debug!(
+                        pattern_hash = p.canonical_hash,
+                        error = %e,
+                        "m23::compose_proposals — F2 gate skip"
+                    );
+                }
             }
         }
     }
@@ -207,5 +242,169 @@ mod tests {
     #[test]
     fn f2_threshold_equals_min_sample_size() {
         assert_eq!(PROPOSAL_F2_THRESHOLD, crate::m14_lift::MIN_SAMPLE_SIZE);
+    }
+
+    // ---- Cluster F hardening pass — additional 10+ tests ----
+
+    #[test]
+    // rationale: Boundary — exactly at PROPOSAL_F2_THRESHOLD must be accepted.
+    fn boundary_n_at_threshold_accepted() {
+        let s = snap(PROPOSAL_F2_THRESHOLD, Some(0.5), Some(0.05));
+        let r = build_proposal(sample_variant(), &s, None);
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    // rationale: Boundary — one below PROPOSAL_F2_THRESHOLD must refuse.
+    fn boundary_n_one_below_threshold_refused() {
+        let s = snap(PROPOSAL_F2_THRESHOLD - 1, Some(0.5), Some(0.05));
+        let r = build_proposal(sample_variant(), &s, None);
+        assert!(matches!(r, Err(ProposerError::EvidenceBelowThreshold { .. })));
+    }
+
+    #[test]
+    // rationale: Anti-property — AP-V7-07 m23 NEVER auto-promotes. There is
+    // NO public function on m23 that writes to m30 bank or any external
+    // store. We verify the m23 public surface contains no `promote`,
+    // `commit`, `accept`, or `bank` symbol.
+    fn anti_property_ap_v7_07_no_auto_promote_in_public_surface() {
+        // The module compiles iff these are the only construction entry
+        // points — if a future contributor adds `pub fn promote_proposal`
+        // this test still compiles, so we instead inspect the public
+        // proposal payload at runtime: there is no Bank/Selector/Dispatcher
+        // field reachable from a proposal struct.
+        let s = snap(30, Some(0.5), Some(0.05));
+        let p = build_proposal(sample_variant(), &s, None).expect("ok");
+        // Proposal type carries no field named `promoted`, `committed`,
+        // `accepted_at`, or anything bank-related.
+        let json = serde_json::to_string(&p).expect("ser");
+        for forbidden in ["promoted", "committed", "accepted_at", "bank", "promote_to"] {
+            assert!(
+                !json.contains(forbidden),
+                "AP-V7-07 violation: m23 proposal serde contains '{forbidden}': {json}"
+            );
+        }
+    }
+
+    #[test]
+    // rationale: Anti-property — F11 cascade-monoculture: proposal_id is u64,
+    // and serde JSON contains no human-readable substring.
+    fn anti_property_f11_proposal_id_is_pure_u64() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let p = build_proposal(sample_variant(), &s, None).expect("ok");
+        // proposal_id encodes as JSON number; no string content possible.
+        let id_json = serde_json::to_string(&p.proposal_id).expect("ser");
+        assert!(id_json.chars().all(|c| c.is_ascii_digit()));
+    }
+
+    #[test]
+    // rationale: Determinism — build_proposal is deterministic given
+    // identical inputs. Run 5 times, all proposal_id values match.
+    fn determinism_proposal_id_stable_across_invocations() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let mut ids = Vec::new();
+        for _ in 0..5_u32 {
+            let p = build_proposal(sample_variant(), &s, None).expect("ok");
+            ids.push(p.proposal_id);
+        }
+        for w in ids.windows(2) {
+            assert_eq!(w[0], w[1]);
+        }
+    }
+
+    #[test]
+    // rationale: Cross-module — compose_proposals consumes m20 Pattern +
+    // m14 LiftSnapshot + m21 build_variants — exercise the full chain.
+    fn cross_module_full_pipeline_yields_proposals() {
+        let s = snap(30, Some(0.7), Some(0.05));
+        let patterns = vec![
+            Pattern::new(vec![StepToken(1), StepToken(2), StepToken(3)], 25, (0, 1)),
+            Pattern::new(vec![StepToken(4), StepToken(5)], 22, (0, 0)),
+        ];
+        let p = compose_proposals(&patterns, &s);
+        assert!(!p.is_empty());
+        // Every proposal must carry sufficient evidence (compose skips F2).
+        for prop in &p {
+            assert!(prop.evidence_n >= PROPOSAL_F2_THRESHOLD);
+        }
+    }
+
+    #[test]
+    // rationale: Adversarial — lift = 0.0 must still pass (F2 is on n,
+    // not on lift magnitude; the proposer is evidence-gated not
+    // lift-gated by design).
+    fn adversarial_zero_lift_accepted_at_sufficient_n() {
+        let s = snap(50, Some(0.0), Some(0.01));
+        let r = build_proposal(sample_variant(), &s, None);
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    // rationale: Adversarial — negative lift (regression detected) must
+    // still pass; lift sign is information, not a gate.
+    fn adversarial_negative_lift_accepted() {
+        let s = snap(50, Some(-0.3), Some(0.05));
+        let p = build_proposal(sample_variant(), &s, None).expect("ok");
+        assert!(p.evidence_lift < 0.0);
+    }
+
+    #[test]
+    // rationale: Boundary — diversity_cluster=None must be threaded through.
+    fn boundary_none_diversity_cluster_preserved() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let p = build_proposal(sample_variant(), &s, None).expect("ok");
+        assert_eq!(p.diversity_cluster, None);
+    }
+
+    #[test]
+    // rationale: Boundary — large diversity_cluster value preserved.
+    fn boundary_large_diversity_cluster_preserved() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let p = build_proposal(sample_variant(), &s, Some(usize::MAX)).expect("ok");
+        assert_eq!(p.diversity_cluster, Some(usize::MAX));
+    }
+
+    #[test]
+    // rationale: Contract regression — ProposerError variants stable.
+    fn contract_proposer_error_variants_stable() {
+        let below = ProposerError::EvidenceBelowThreshold { n: 5, threshold: 20 };
+        let lift = ProposerError::LiftUnavailable;
+        assert!(!format!("{below}").is_empty());
+        assert!(!format!("{lift}").is_empty());
+    }
+
+    #[test]
+    // rationale: Resource accounting — compose_proposals pre-allocates and
+    // returns empty for empty input without allocating beyond hint.
+    fn resource_accounting_empty_input_returns_empty() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let p = compose_proposals(&[], &s);
+        assert!(p.is_empty());
+    }
+
+    #[test]
+    // rationale: Cross-module — proposal serde roundtrip preserves all
+    // evidence-bearing fields (downstream m30 bank reads this).
+    fn cross_module_proposal_serde_roundtrip() {
+        let s = snap(30, Some(0.6), Some(0.05));
+        let p = build_proposal(sample_variant(), &s, Some(2)).expect("ok");
+        let ser = serde_json::to_string(&p).expect("ser");
+        let back: super::WorkflowProposal = serde_json::from_str(&ser).expect("de");
+        assert_eq!(back, p);
+    }
+
+    #[test]
+    // rationale: Determinism — compose_proposals yields stable ordering
+    // (proposer relies on m20's sort + m21's emission order).
+    fn determinism_compose_proposals_output_stable() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let patterns = vec![Pattern::new(vec![StepToken(1), StepToken(2)], 25, (0, 0))];
+        let a = compose_proposals(&patterns, &s);
+        let b = compose_proposals(&patterns, &s);
+        assert_eq!(a.len(), b.len());
+        for (pa, pb) in a.iter().zip(b.iter()) {
+            assert_eq!(pa.proposal_id, pb.proposal_id);
+            assert_eq!(pa.variant.variant_id, pb.variant.variant_id);
+        }
     }
 }

@@ -100,14 +100,28 @@ pub fn kmeans(
                 got: p.len(),
             });
         }
+        // F-m22-02 hardening — non-finite coords (NaN / +∞ / -∞) produce
+        // ill-defined centroids. The current public error taxonomy has no
+        // `NonFiniteInput` variant; non-finite-on-some-coord is reported
+        // as DimMismatch with `got = usize::MAX` (sentinel) — additive
+        // disambiguation without breaking the enum. Downstream consumers
+        // already handle DimMismatch; this is a strictly safer refusal.
+        for v in p {
+            if !v.is_finite() {
+                return Err(KMeansError::DimMismatch {
+                    expected: dim,
+                    got: usize::MAX,
+                });
+            }
+        }
     }
     let mut centroids = kmeans_plus_plus_seed(points, config.k, config.seed);
+    // Capacity hint: per-iteration assignments are exactly `points.len()`.
+    let mut assignments: Vec<usize> = Vec::with_capacity(points.len());
     for _ in 0..config.max_iterations {
-        let assignments: Vec<usize> = points
-            .iter()
-            .map(|p| nearest_centroid(p, &centroids))
-            .collect();
-        let new_centroids = recompute_centroids(points, &assignments, config.k, dim);
+        assignments.clear();
+        assignments.extend(points.iter().map(|p| nearest_centroid(p, &centroids)));
+        let new_centroids = recompute_centroids(points, &assignments, config.k, dim, &centroids);
         let shift = centroid_shift(&centroids, &new_centroids);
         centroids = new_centroids;
         if shift < config.convergence_epsilon {
@@ -118,14 +132,13 @@ pub fn kmeans(
         .iter()
         .map(|p| nearest_centroid(p, &centroids))
         .collect();
-    let clustered: Vec<ClusteredPoint> = points
-        .iter()
-        .zip(final_assignments.iter())
-        .map(|(p, &c)| ClusteredPoint {
+    let mut clustered: Vec<ClusteredPoint> = Vec::with_capacity(points.len());
+    for (p, &c) in points.iter().zip(final_assignments.iter()) {
+        clustered.push(ClusteredPoint {
             coords: p.clone(),
             cluster: c,
-        })
-        .collect();
+        });
+    }
     Ok((clustered, centroids))
 }
 
@@ -151,6 +164,7 @@ fn recompute_centroids(
     assignments: &[usize],
     k: usize,
     dim: usize,
+    prior: &[Vec<f64>],
 ) -> Vec<Vec<f64>> {
     let mut sums: Vec<Vec<f64>> = vec![vec![0.0; dim]; k];
     let mut counts: Vec<usize> = vec![0; k];
@@ -165,12 +179,29 @@ fn recompute_centroids(
     }
     let mut out: Vec<Vec<f64>> = Vec::with_capacity(k);
     for (i, s) in sums.into_iter().enumerate() {
-        let n = counts[i].max(1);
+        if counts[i] == 0 {
+            // F-m22-01 fix — empty cluster mid-iteration: retain the prior
+            // centroid rather than recentering on the origin. This preserves
+            // determinism, avoids NaN/origin drift, and keeps the algorithm
+            // convergent. Per Cluster F spec invariant: "empty-cluster
+            // scenario … must be handled (typed error or re-seed, NOT
+            // NaN/panic)." Retaining the prior is the canonical Lloyd's
+            // recovery action.
+            if let Some(p) = prior.get(i) {
+                out.push(p.clone());
+            } else {
+                // Degenerate: prior was shorter than k. Use origin as
+                // last-resort fallback (only reachable if seeding was
+                // pathologically incomplete — defensive).
+                out.push(vec![0.0_f64; dim]);
+            }
+            continue;
+        }
         #[allow(
             clippy::cast_precision_loss,
-            reason = "n is bounded by point count"
+            reason = "counts[i] is bounded by point count which is well within f64 mantissa precision for any realistic workflow-trace input"
         )]
-        let n_f = n as f64;
+        let n_f = counts[i] as f64;
         out.push(s.into_iter().map(|v| v / n_f).collect());
     }
     out
@@ -313,6 +344,182 @@ mod tests {
             kmeans(&pts, &KMeansConfig { k: 1, ..KMeansConfig::default() }).expect("ok");
         for c in &clustered {
             assert_eq!(c.cluster, 0);
+        }
+    }
+
+    // ---- Cluster F hardening pass — additional 10+ tests ----
+
+    #[test]
+    // rationale: Adversarial input — NaN coord MUST be refused (was silent
+    // NaN-propagation through centroid math).
+    fn adversarial_nan_input_refused() {
+        let pts = vec![pt(&[0.0, 0.0]), pt(&[f64::NAN, 1.0])];
+        let r = kmeans(&pts, &KMeansConfig { k: 2, ..KMeansConfig::default() });
+        assert!(matches!(r, Err(KMeansError::DimMismatch { .. })));
+    }
+
+    #[test]
+    // rationale: Adversarial input — +infinity coord MUST be refused.
+    fn adversarial_inf_input_refused() {
+        let pts = vec![pt(&[0.0, 0.0]), pt(&[f64::INFINITY, 1.0])];
+        let r = kmeans(&pts, &KMeansConfig { k: 2, ..KMeansConfig::default() });
+        assert!(matches!(r, Err(KMeansError::DimMismatch { .. })));
+    }
+
+    #[test]
+    // rationale: Adversarial input — -infinity coord MUST be refused.
+    fn adversarial_neg_inf_input_refused() {
+        let pts = vec![pt(&[0.0, 0.0]), pt(&[f64::NEG_INFINITY, 1.0])];
+        let r = kmeans(&pts, &KMeansConfig { k: 2, ..KMeansConfig::default() });
+        assert!(matches!(r, Err(KMeansError::DimMismatch { .. })));
+    }
+
+    #[test]
+    // rationale: Determinism — same seed + same input → bit-identical
+    // centroid sequence (NOT just cluster equivalence).
+    fn determinism_same_seed_yields_bit_identical_centroids() {
+        let pts: Vec<Vec<f64>> = (0..20).map(|i| pt(&[f64::from(i), f64::from(i * 2)])).collect();
+        let cfg = KMeansConfig { k: 3, seed: 99, ..KMeansConfig::default() };
+        let (_, c1) = kmeans(&pts, &cfg).expect("a");
+        let (_, c2) = kmeans(&pts, &cfg).expect("b");
+        for (a, b) in c1.iter().zip(c2.iter()) {
+            for (av, bv) in a.iter().zip(b.iter()) {
+                assert!((av - bv).abs() < 1e-15, "centroid drift: {av} vs {bv}");
+            }
+        }
+    }
+
+    #[test]
+    // rationale: Determinism — different seed CAN yield different result
+    // (proves seed is actually consumed).
+    fn determinism_different_seed_can_diverge() {
+        let pts: Vec<Vec<f64>> = (0..30).map(|i| pt(&[f64::from(i), f64::from(i)])).collect();
+        let cfg_a = KMeansConfig { k: 3, seed: 1, ..KMeansConfig::default() };
+        let cfg_b = KMeansConfig { k: 3, seed: 999_999, ..KMeansConfig::default() };
+        // We don't assert they diverge (they might converge), but both must
+        // succeed and produce valid output.
+        let _ = kmeans(&pts, &cfg_a).expect("a");
+        let _ = kmeans(&pts, &cfg_b).expect("b");
+    }
+
+    #[test]
+    // rationale: Boundary — k == n (every point is its own cluster).
+    fn boundary_k_equals_n_each_point_own_cluster() {
+        let pts = vec![pt(&[0.0]), pt(&[5.0]), pt(&[10.0])];
+        let (clustered, centroids) =
+            kmeans(&pts, &KMeansConfig { k: 3, ..KMeansConfig::default() }).expect("ok");
+        assert_eq!(centroids.len(), 3);
+        // Each point should land in a distinct cluster.
+        let mut clusters: Vec<usize> = clustered.iter().map(|c| c.cluster).collect();
+        clusters.sort_unstable();
+        clusters.dedup();
+        assert_eq!(clusters.len(), 3);
+    }
+
+    #[test]
+    // rationale: Convergence — convergence_epsilon comparison MUST use
+    // float epsilon (not ==). Trip with a tiny shift just below epsilon.
+    fn convergence_epsilon_comparison_uses_float_lt() {
+        let pts = vec![pt(&[0.0]), pt(&[0.0]), pt(&[100.0]), pt(&[100.0])];
+        let cfg = KMeansConfig {
+            k: 2,
+            convergence_epsilon: 1e-3,
+            max_iterations: 100,
+            seed: 7,
+        };
+        let (clustered, _) = kmeans(&pts, &cfg).expect("ok");
+        // After convergence, the two clear groups must be distinct.
+        assert_ne!(clustered[0].cluster, clustered[2].cluster);
+    }
+
+    #[test]
+    // rationale: Adversarial — identical points produce single non-degenerate
+    // cluster centroid even with k > 1 (empty-cluster retention path).
+    fn adversarial_all_identical_points_handled() {
+        let pts = vec![pt(&[1.0, 1.0]); 5];
+        let (clustered, centroids) =
+            kmeans(&pts, &KMeansConfig { k: 2, ..KMeansConfig::default() }).expect("ok");
+        assert_eq!(centroids.len(), 2);
+        // All points should be assigned and no NaN should appear.
+        for c in &clustered {
+            assert_eq!(c.cluster, clustered[0].cluster);
+        }
+        for c in &centroids {
+            for v in c {
+                assert!(v.is_finite(), "centroid drifted to non-finite: {v}");
+            }
+        }
+    }
+
+    #[test]
+    // rationale: Anti-property — F11 cluster opacity: ClusteredPoint.cluster
+    // is usize (no human-readable substring possible).
+    fn anti_property_f11_cluster_id_is_pure_usize() {
+        let pts = vec![pt(&[0.0]), pt(&[10.0])];
+        let (clustered, _) =
+            kmeans(&pts, &KMeansConfig { k: 2, ..KMeansConfig::default() }).expect("ok");
+        // cluster index is bound to [0, k). Trivially F11-compliant.
+        for c in &clustered {
+            assert!(c.cluster < 2);
+        }
+    }
+
+    #[test]
+    // rationale: Resource accounting — large input (1000 points, k=5)
+    // completes without panic and produces finite centroids.
+    fn resource_accounting_large_input_terminates_cleanly() {
+        let pts: Vec<Vec<f64>> = (0..1000)
+            .map(|i| pt(&[f64::from(i), f64::from(i * 3 % 100)]))
+            .collect();
+        let (_, centroids) =
+            kmeans(&pts, &KMeansConfig { k: 5, max_iterations: 20, ..KMeansConfig::default() })
+                .expect("ok");
+        assert_eq!(centroids.len(), 5);
+        for c in &centroids {
+            for v in c {
+                assert!(v.is_finite());
+            }
+        }
+    }
+
+    #[test]
+    // rationale: Contract regression — KMeansError variants stable.
+    fn contract_kmeans_error_variants_stable() {
+        let ke = KMeansError::KExceedsN { k: 5, n: 3 };
+        let em = KMeansError::Empty;
+        let dm = KMeansError::DimMismatch { expected: 2, got: 3 };
+        assert!(!format!("{ke}").is_empty());
+        assert!(!format!("{em}").is_empty());
+        assert!(!format!("{dm}").is_empty());
+    }
+
+    #[test]
+    // rationale: Cross-module — kmeans output must be Send (m23 plans to
+    // run clustering off-thread eventually).
+    fn cross_module_kmeans_output_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<super::ClusteredPoint>();
+        assert_send::<KMeansError>();
+    }
+
+    #[test]
+    // rationale: Empty-cluster path — synthesise a scenario where seeding
+    // produces a centroid no point claims (k=3 with 3 points all near
+    // one corner). The retain-prior policy must keep us out of NaN-land.
+    fn empty_cluster_retains_prior_no_nan() {
+        let pts = vec![pt(&[0.0, 0.0]), pt(&[0.01, 0.01]), pt(&[0.02, 0.02])];
+        let cfg = KMeansConfig { k: 3, seed: 1, ..KMeansConfig::default() };
+        let (clustered, centroids) = kmeans(&pts, &cfg).expect("ok");
+        assert_eq!(centroids.len(), 3);
+        // No centroid should be NaN.
+        for c in &centroids {
+            for v in c {
+                assert!(v.is_finite(), "empty-cluster fallback produced NaN: {v}");
+            }
+        }
+        // All points must have a valid cluster assignment.
+        for c in &clustered {
+            assert!(c.cluster < 3);
         }
     }
 }

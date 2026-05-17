@@ -1,8 +1,11 @@
 # Rust (post-G9 unlock)
 /target/
 **/*.rs.bk
-Cargo.lock
 *.pdb
+# Cargo.lock: COMMITTED (workflow-trace ships binaries — reproducible builds
+# require lockfile; per Rust convention bin crates commit Cargo.lock, lib
+# crates don't). Was excluded pre-G9; uncomment to revert if workflow-trace
+# becomes a pure library (it won't — see Genesis Prompt v1.3 § 1).
 
 # Editor
 .vscode/

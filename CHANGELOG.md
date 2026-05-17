@@ -8,6 +8,44 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ## [Unreleased]
 
+### [v0.1.0-cluster-d-day-1-m8] — 2026-05-17 (S1002209) — first code-bearing release
+
+🔥 **G9 fired. HOLD-v2 envelope LIFTED. m8 LIVE.**
+
+#### Added — Cargo workspace + m8 (Cluster D Day-1, ship-first floor of trust regime)
+
+- **`Cargo.toml`** — workflow-trace v0.1.0 single-crate 2-binary ORAC pattern: lib `workflow_core` + bin `wf-crystallise` (m1-m23 + m40-m42) + bin `wf-dispatch` (m30-m33). Deps: thiserror 2, reqwest 0.12 blocking+rustls, serde+serde_json 1, tracing 0.1. dev-deps: tracing-subscriber 0.3. Features: default=full + 4 capability features + opt-in `substrate-load`. `[lints.rust]` `check-cfg(cfg(povm_calibrated))` per build.rs gate.
+- **`build.rs`** — emits `cargo:rustc-cfg=povm_calibrated` when `POVM_CR2_DEPLOYED=1` env var set; otherwise emits 3 `cargo:warning=` precursor signals naming commit SHA `e2a8ed3` + env var + reference doc. `rerun-if-env-changed` on both `POVM_CR2_DEPLOYED` and `POVM_HEALTH_URL`. NOT a Cargo feature (F7/AP-V7-09 defense).
+- **`src/lib.rs`** — `workflow_core` crate root. `#![forbid(unsafe_code)]` · `#![warn(missing_docs)]` · `#![warn(clippy::pedantic)]` · 2 habitat-conventional allows (`module_name_repetitions` + `doc_markdown`).
+- **`src/m8_povm_build_prereq/mod.rs`** — public re-exports + 3 cross-module sanity tests.
+- **`src/m8_povm_build_prereq/cfg.rs`** — single-source-of-truth band thresholds: `POVM_LH_BAND_LOW=0.05`, `POVM_LH_BAND_HIGH=0.15`, `POVM_LH_EDGE_TOLERANCE=0.01`. `BandClassification` enum (BelowFloor/InBand/AboveCeiling/Nan) with `ordinal()` + `banner()` + `is_healthy()` + `is_band_edge()`. `classify(value: f64) -> BandClassification` is the shared classifier. **34 inline tests** (27 F-Unit + 5 F-Property + 2 F-Regression).
+- **`src/m8_povm_build_prereq/error.rs`** — `BuildPrereqError` (Cr2MarkerAbsent / OutOfBand / ProbeFailed) + `RuntimeBandError` (StartupRefused). Every error message names commit `e2a8ed3` + env `POVM_CR2_DEPLOYED=1` + ref doc per m8 spec § 4 operator-recovery discipline. **9 inline tests** including F-Contract checks for commit-SHA / env-var / reference-doc literal presence.
+- **`src/m8_povm_build_prereq/health.rs`** — runtime mirror probe: `HealthClient` (reqwest::blocking) + `probe_band` free function + `resolve_health_url` env-aware default. 2s default timeout. `tracing::info!` emission per m8 § 9 Observability. **18 inline tests** including F-Integration tests against a TCP one-shot mock server (no external mock-server dep).
+- **`src/bin/wf_crystallise.rs`** + **`src/bin/wf_dispatch.rs`** — minimal stub binaries pending Day-2+ module landing.
+- **`tests/m8_integration.rs`** — 6 integration tests (1 `#[ignore = "requires live POVM"]` for nightly + post-G9 acceptance; 5 always-run including build-runtime mirror agreement, features-full-does-not-enable-povm_calibrated regression, sub-second timeout fast-fail).
+
+#### Quality gate — 4-stage all GREEN (S1002209)
+
+- `cargo check` — clean (5.67s cold build)
+- `cargo clippy --all-targets -- -D warnings` — clean
+- `cargo clippy --all-targets -- -D warnings -W clippy::pedantic` — clean
+- `cargo test` — **69/69 passing** (64 lib + 5 integration; 1 `#[ignore]` live POVM)
+
+#### m8 specs vs implementation (god-tier discipline)
+
+| Spec § | Requirement | Implementation |
+|---|---|---|
+| § 1 Purpose | `build.rs` emits `cargo:rustc-cfg=povm_calibrated` when env marker set | `build.rs:18` |
+| § 2 Contracts | CC-2 Trust Layer Woven; rustc-cfg NOT [features] | Cargo.toml has no `povm_calibrated` feature; build.rs emits rustc-cfg |
+| § 3 Public Surface | `BandClassification` + `HealthClient` + `probe_band` | All three in `src/m8_povm_build_prereq/mod.rs` re-exports |
+| § 4 Errors | `BuildPrereqError` + `RuntimeBandError` with commit SHA + env + ref doc text | F-Contract tests verify literal text presence |
+| § 5 Implementation sketch | build.rs ~30 LOC env-var-only; runtime mirror reqwest blocking 2s | build.rs 39 LOC; health.rs 117 LOC with reqwest blocking 2s default |
+| § 6 Test plan | 50 tests across F-Unit/Property/Integration/Contract/Regression | 69 tests delivered (138% of budget) |
+| § 7 Boilerplate lift | 70% pattern from synthex-v2/loop-engine-v2 build.rs idioms | Achieved (env-check + rerun-if-env-changed + warning emit) |
+| § 8 Failure modes | W2 / F7 / F3 / AP-V7-01 / AP-V7-13 / AP-Drift-11 / AP-Hab-14 | F7 regression test in cfg.rs (band-edge precision); AP-Drift-11 covered by runtime probe; AP-Hab-14 enforced by clippy pedantic gate green |
+| § 9 Observability | `tracing::info!` at `m8.health.probe` | `health.rs:probe_band` emits the structured event |
+| § 10 Pre/Post | Env-var-only per spec; ProcessExit 78 deferred to caller | env-var-only honoured; exit code is caller responsibility |
+
 ### S1002209 — Luke task-cascade 1-6 (2026-05-17T09:38Z)
 
 **Authorisation:** Luke S1002209 directive _"continue plan for and then complete each task 1. 2. 3. 4. 5. 6. in logical order to the highest level of excellence and impact proceed seamlessly"_

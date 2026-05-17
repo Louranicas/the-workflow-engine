@@ -91,7 +91,7 @@ POVM v2 has no native bidi-pathway primitive (different paradigm); the 14 bidi p
 - HOLD-v2 envelope INTACT (`0 .rs` files in active scope; `0 Cargo.toml`)
 - G9 NOT fired — Luke types `start coding workflow-trace` to unlock; first wave will be Cluster D Day 1 (m8 build-cfg → m9 namespace guard → m10 Ember CI → m11 decay) per non-negotiable phase-1 framework
 - Zen G7 AMEND-loop: AUDIT-REQUEST v2 filed (2026-05-17T160500Z); v3 owed for D-S1002127-02 cardinality bump
-- 3 Luke physical actions standing: B1 G7 verdict · B2 v1.3 patch green-light · B3 Conductor `auto_start=false` → `devenv start weaver/zen/enforcer`
+- 3 Luke physical actions standing: B1 G7 verdict · B2 v1.3 patch green-light · B3 Conductor `auto_start=false` → `devenv -c ~/.config/devenv/devenv.toml start --services weaver,zen,enforcer`
 - Workspace-root `~/claude-code-workspace/CLAUDE.local.md` "The Workflow Engine" row stale (project charter forbids Command from amending; Luke action required OR explicit waiver to authorise Command)
 
 **One-line resume for a fresh Claude context window:**
@@ -168,7 +168,7 @@ cd /home/louranicas/claude-code-workspace/the-workflow-engine && \
 - Task 1 (file Zen v3 AUDIT-REQUEST) — Command lane; EXECUTED
 - Task 2 (Luke clears B1 verdict) — Luke directive = drive-G1-G8-sequence path elected (NOT per-gate waiver — preserves Zen audit authority); GATE_STATE updated
 - Task 3 (B2 green-light → Command authors v1.3 patch) — green-lit; v1.3 binding at `ai_docs/GENESIS_PROMPT_V1_3.md` (46K, Appendix A amendment record) already authored; v3 AUDIT-REQUEST covers full amendment scope; DELIVERED
-- Task 4 (Luke runs `devenv start weaver/zen/enforcer`) — Luke @ terminal action; project rule forbids agent service-start; STANDING-LUKE
+- Task 4 (Luke runs `devenv -c ~/.config/devenv/devenv.toml start --services weaver,zen,enforcer`) — Luke @ terminal action; project rule forbids agent service-start; STANDING-LUKE
 - Task 5 (workspace-root CLAUDE.local.md row) — Luke directive = "complete each task" = Command-amend waiver for this row only; EXECUTED at `~/claude-code-workspace/CLAUDE.local.md` § "The Workflow Engine"
 - Task 6 (G1-G8 green → Luke types `start coding workflow-trace` → G9 fires → Cluster D Day 1) — G9 fire requires literal phrase; not in Luke's S1002209 message; STAGED (Cluster D Day-1 specs verified 4/4 present + boilerplate clones available); STANDING-LUKE phrase
 
@@ -179,9 +179,9 @@ cd /home/louranicas/claude-code-workspace/the-workflow-engine && \
 | 1 | File Zen v3 AUDIT-REQUEST | Command | ✅ EXECUTED | [`2026-05-17T093800Z_command_g7_audit_request_v3_cardinality_7_plus_wave4b_amendment.md`](../../projects/shared-context/agent-cross-talk/2026-05-17T093800Z_command_g7_audit_request_v3_cardinality_7_plus_wave4b_amendment.md) |
 | 2 | B1 path-elected (drive G1-G8 sequence) | Luke directive → Command | ✅ EXECUTED | [`GATE_STATE.md`](GATE_STATE.md) B1 row + S1002209 directive header |
 | 3 | B2 green-light + v1.3 delivery confirmation | Luke directive → Command | ✅ DELIVERED | [`ai_docs/GENESIS_PROMPT_V1_3.md`](ai_docs/GENESIS_PROMPT_V1_3.md) (binding) + v3 AUDIT-REQUEST (amendment scope) + [`GATE_STATE.md`](GATE_STATE.md) B2 row |
-| 4 | Conductor `devenv start weaver/zen/enforcer` | Luke @ terminal | ⏳ STANDING-LUKE | Non-blocking pre-G9; binaries already in `~/.local/bin/` |
+| 4 | Conductor `devenv -c ~/.config/devenv/devenv.toml start --services weaver,zen,enforcer` | Luke @ terminal | ⏳ STANDING-LUKE | Non-blocking pre-G9; binaries already in `~/.local/bin/` |
 | 5 | Workspace-root CLAUDE.local.md "Workflow Engine" row | Luke directive → Command | ✅ EXECUTED | `~/claude-code-workspace/CLAUDE.local.md` § "The Workflow Engine" amended; project-charter forbidance carved out for this row only |
-| 6 | G9 fire / Cluster D Day 1 | Luke phrase | ⏳ STANDING-LUKE | Cluster D 4/4 specs present: `m8_povm_build_prereq.md` · `m9_watcher_namespace_guard.md` · `m10_ember_ci_gate.md` · `m11_fitness_weighted_decay.md`. Boilerplate clones ready: `05-decay-ttl-ltd` (m11) · `09-trap-verify-escape-skills` (m10) · `10-foundation-direct-clones` (m8). Gated on G7 → G5 → G6 → G8 sequence. Luke types exactly: `start coding workflow-trace` |
+| 6 | G9 fire / Cluster D Day-1 m8 | Luke phrase ✓ → Command | 🔥 **G9 FIRED + m8 LIVE** | Luke typed `start coding workflow-trace` S1002209. HOLD-v2 envelope LIFTED. m8 module IMPLEMENTED + tests GREEN: Cargo.toml + build.rs + src/lib.rs + src/m8_povm_build_prereq/{mod,cfg,error,health}.rs + src/bin/{wf_crystallise,wf_dispatch}.rs + tests/m8_integration.rs. **69 tests pass** (64 lib + 5 integration; 1 `#[ignore]` live POVM probe). 4-stage gate GREEN: cargo check ✓ · clippy -D warnings ✓ · clippy pedantic -D warnings ✓ · cargo test ✓. Next: m9 namespace guard, m10 Ember CI, m11 compound decay per Cluster D Day-1 build order |
 
 **v3 AUDIT-REQUEST scope (filed 2026-05-17T093800Z):** Group A (v2 absorbed: m42 stcortex-only pivot) + Group B (D-S1002127-02 EscapeSurfaceProfile cardinality 6→7 `PrivilegeEscalation` @ ord 30; ~12 file amendments) + Group C (D-S1002127-03 substrate-as-actor v0.2.0 deferrals NA-GAP-07/08/10) + Group D (Wave 4.B substrate-as-actor remediation; 8/11 NA gaps closed; 4 sub-groups: substrate-couplings/ · refusal taxonomy · m42 § 5.1 outbox · BENCHMARK_SPEC substrate-side). Drift flags carried: test-budget 1,562/1,594/**1,599** (Command recommends 1,599 per G6 latest); 12 substrate-confirmable receipts catalogued as cross-habitat ADR work-items.
 
@@ -297,7 +297,7 @@ m42 module pivoted from POVM-dual-path to stcortex-only routing for substrate-fe
 
 Filed at [`~/projects/shared-context/agent-cross-talk/2026-05-17T160300Z_command_luke_action_needed_v2.md`](file:///home/louranicas/projects/shared-context/agent-cross-talk/2026-05-17T160300Z_command_luke_action_needed_v2.md):
 
-1. Conductor `devenv start weaver/zen/enforcer` (D-B3 — unblocks Phase 3 Track 2)
+1. Conductor `devenv -c ~/.config/devenv/devenv.toml start --services weaver,zen,enforcer` (D-B3 — unblocks Phase 3 Track 2)
 2. Wake Tab-1 C-2 + C-3 panes (D-Handshake — 4 handshakes silent now)
 3. Approve hybrid CI-FAIL+allowlist OR file own Ember §5.1 direction (D-B4 — Watcher amends per AP27)
 

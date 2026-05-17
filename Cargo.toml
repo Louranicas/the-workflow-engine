@@ -1,0 +1,70 @@
+[package]
+name = "workflow-trace"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["Luke @ node 0.A", "Command @ habitat"]
+license = "MIT OR Apache-2.0"
+description = "Cascading-command + Battern-protocol + context-window observation engine for the Zellij habitat"
+readme = "README.md"
+publish = false
+
+[lib]
+name = "workflow_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wf-crystallise"
+path = "src/bin/wf_crystallise.rs"
+
+[[bin]]
+name = "wf-dispatch"
+path = "src/bin/wf_dispatch.rs"
+
+[dependencies]
+thiserror = "2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+
+[build-dependencies]
+# Build script is intentionally minimal (env-var-only per m8 spec § 10);
+# no HTTP deps needed at build time. cfg.rs is shared via `include!` so it
+# must be self-contained (no `use` statements above the constants).
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
+
+[features]
+default = ["full"]
+full = ["api", "intelligence", "monitoring", "evolution"]
+api = []
+intelligence = []
+monitoring = []
+evolution = []
+# Opt-in substrate-side benchmarks per BENCHMARK_SPEC.md § Substrate-side
+# load benchmarks (Wave 4.B NA-GAP-04 closure). Off by default for
+# production safety (substrate co-tenant traffic risk).
+substrate-load = []
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.test]
+opt-level = 0
+debug = true
+
+# Declare custom cfg flags so `rustc` 1.80+ does not warn on the `cfg(povm_calibrated)`
+# emitted by `build.rs` (m8 compile-time gate). Per m8 spec § 5: NOT a `[features]`
+# flag — it is intentionally a `rustc-cfg` so `--features full` / `--all-features`
+# cannot activate it (F7 / AP-V7-09 defense).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(povm_calibrated)'] }

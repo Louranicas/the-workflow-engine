@@ -117,16 +117,27 @@ impl InjectionDbConsumer {
     /// - [`InjectionDbError::RowParseFailed`] / [`InjectionDbError::UnknownChainType`]
     ///   / [`InjectionDbError::UnknownConsent`] on parse failure.
     pub fn read_unresolved(&self) -> Result<Vec<CausalChainRow>, InjectionDbError> {
-        let limit = i64::try_from(self.config.effective_max_unresolved()).unwrap_or(i64::MAX);
+        let effective_limit = self.config.effective_max_unresolved();
+        // rationale: `effective_*` is config-clamped to `[LIMIT_MIN,
+        // LIMIT_MAX]` (≤ 5_000) so the `i64` conversion never loses
+        // precision on any supported target. The fallback is a
+        // defense-in-depth saturation.
+        let limit = i64::try_from(effective_limit)
+            .unwrap_or_else(|_| i64::try_from(LIMIT_MAX).unwrap_or(i64::MAX));
         let sql = format!(
             "{SELECT_COLUMNS} FROM causal_chain \
              WHERE resolved_session IS NULL AND consent != 'Forget' \
              ORDER BY reinforcement_count DESC LIMIT ?1"
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt
-            .query_and_then(rusqlite::params![limit], parse_causal_chain_row)?
-            .collect::<Result<Vec<_>, InjectionDbError>>()?;
+        let iter = stmt.query_and_then(rusqlite::params![limit], parse_causal_chain_row)?;
+        // rationale: pre-allocate to the SQL LIMIT to avoid the
+        // geometric realloc chain on large unresolved counts
+        // (resource-accounting discipline).
+        let mut rows: Vec<CausalChainRow> = Vec::with_capacity(effective_limit);
+        for r in iter {
+            rows.push(r?);
+        }
         tracing::info!(
             target: "m3.read_unresolved",
             count = rows.len(),
@@ -150,8 +161,9 @@ impl InjectionDbConsumer {
             |r| r.get(0),
         )?;
         let cutoff = max_resolved.saturating_sub(i64::from(self.config.resolved_recency_sessions));
-        let limit =
-            i64::try_from(self.config.effective_max_recently_resolved()).unwrap_or(i64::MAX);
+        let effective_limit = self.config.effective_max_recently_resolved();
+        let limit = i64::try_from(effective_limit)
+            .unwrap_or_else(|_| i64::try_from(LIMIT_MAX).unwrap_or(i64::MAX));
         let sql = format!(
             "{SELECT_COLUMNS} FROM causal_chain \
              WHERE resolved_session IS NOT NULL \
@@ -160,9 +172,12 @@ impl InjectionDbConsumer {
              ORDER BY resolved_session DESC LIMIT ?2"
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt
-            .query_and_then(rusqlite::params![cutoff, limit], parse_causal_chain_row)?
-            .collect::<Result<Vec<_>, InjectionDbError>>()?;
+        let iter =
+            stmt.query_and_then(rusqlite::params![cutoff, limit], parse_causal_chain_row)?;
+        let mut rows: Vec<CausalChainRow> = Vec::with_capacity(effective_limit);
+        for r in iter {
+            rows.push(r?);
+        }
         tracing::info!(
             target: "m3.read_recently_resolved",
             count = rows.len(),
@@ -179,14 +194,23 @@ impl InjectionDbConsumer {
     ///
     /// # Errors
     ///
-    /// [`InjectionDbError::QueryFailed`] on SELECT failure.
+    /// - [`InjectionDbError::QueryFailed`] on SELECT failure.
+    /// - [`InjectionDbError::RowParseFailed`] if SQLite returns a
+    ///   negative row count (cannot happen with current SQLite versions,
+    ///   but the explicit refusal beats silent zero-coercion).
     pub fn count_unresolved(&self) -> Result<u64, InjectionDbError> {
         let n: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM causal_chain WHERE resolved_session IS NULL",
             [],
             |r| r.get(0),
         )?;
-        Ok(u64::try_from(n).unwrap_or(0))
+        // rationale: COUNT(*) is documented non-negative; surface any
+        // anomaly as a typed parse failure instead of silently coercing
+        // to zero (was: `.unwrap_or(0)` — debugger Phase 1 m3-F1).
+        u64::try_from(n).map_err(|_| InjectionDbError::RowParseFailed {
+            row_id: -1,
+            reason: format!("COUNT(*) returned negative value {n}"),
+        })
     }
 }
 

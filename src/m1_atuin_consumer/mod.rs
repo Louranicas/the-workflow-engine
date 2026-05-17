@@ -171,11 +171,16 @@ impl AtuinConsumer {
                  FROM history WHERE id > ?1 ORDER BY id ASC LIMIT ?2",
             )
             .map_err(|e| AtuinConsumerError::QueryFailed(format!("prepare: {e}")))?;
+        // rationale: page_size is config-clamped to `[PAGE_SIZE_MIN,
+        // PAGE_SIZE_MAX]` (≤ 10_000) and `row_cap` (≤ usize::MAX); the
+        // i64 conversion cannot lose precision on any target. `try_from`
+        // beats `as` (AP-Hab arithmetic discipline) and saturating to
+        // PAGE_SIZE_MAX as a defensive fallback prevents the original
+        // silent `i64::MAX` from masking a spec-invariant violation.
+        let page_size_i64: i64 = i64::try_from(page_size)
+            .unwrap_or_else(|_| i64::try_from(PAGE_SIZE_MAX).unwrap_or(i64::MAX));
         let mapped = stmt.query_and_then(
-            rusqlite::params![
-                self.state.last_id.as_str(),
-                i64::try_from(page_size).unwrap_or(i64::MAX)
-            ],
+            rusqlite::params![self.state.last_id.as_str(), page_size_i64],
             parse_row,
         )?;
         let rows: Vec<AtuinHistoryRow> = mapped.collect::<Result<Vec<_>, AtuinConsumerError>>()?;
@@ -214,7 +219,15 @@ impl AtuinConsumer {
     ///
     /// Propagates any [`AtuinConsumerError`] from [`Self::next_page`].
     pub fn collect_all(mut self) -> Result<Vec<AtuinHistoryRow>, AtuinConsumerError> {
-        let mut out = Vec::new();
+        // rationale: pre-allocate to `row_cap` if set, else one effective
+        // page-worth — avoids the geometric realloc series on small /
+        // medium tables (resource-accounting discipline).
+        let hint = self
+            .state
+            .config
+            .row_cap
+            .unwrap_or_else(|| self.state.config.effective_page_size());
+        let mut out = Vec::with_capacity(hint);
         while let Some(page) = self.next_page()? {
             out.extend(page.rows);
         }
@@ -264,14 +277,19 @@ pub fn expand_tilde(path: &str) -> PathBuf {
 pub fn fallback_subprocess_ingest(
     config: &AtuinConsumerConfig,
 ) -> Result<Vec<AtuinHistoryRow>, AtuinConsumerError> {
-    let _ = config;
+    // rationale: `config` is intentionally unused in the Day-1 stub.
+    // We surface its `subprocess_timeout_ms` in the error message so a
+    // caller can verify wiring (anti-silent-failure discipline) and so
+    // the unused-binding doesn't decay into a regression when the real
+    // subprocess path lands.
+    let timeout_ms = config.subprocess_timeout_ms;
     // Day-1 stub — the real subprocess fallback wires into the atuin CLI
     // when the SQLite reader is unreachable. Per m1 spec § 13 step 6 the
     // primary read path is the rusqlite reader; subprocess fallback is
     // tracked in the implementation order but is non-critical for Day-1.
-    Err(AtuinConsumerError::SubprocessFailed(
-        "subprocess fallback not implemented in Day-1; use open_readonly()".into(),
-    ))
+    Err(AtuinConsumerError::SubprocessFailed(format!(
+        "subprocess fallback not implemented in Day-1 (configured timeout_ms={timeout_ms}); use open_readonly()"
+    )))
 }
 
 /// True iff the configured DB path exists on disk.

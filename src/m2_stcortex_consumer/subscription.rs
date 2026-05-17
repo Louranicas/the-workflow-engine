@@ -15,7 +15,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::error::StcortexConsumerError;
@@ -32,9 +32,23 @@ pub const STCORTEX_DB: &str = "stcortex";
 pub const DEFAULT_SUBSCRIPTION_TIMEOUT_MS: u64 = 5_000;
 
 /// Build the narrowed `tool_call` subscription SQL.
+///
+/// The `namespace` argument is expected to be the
+/// [`WORKFLOW_TRACE_PREFIX`](super::identity::WORKFLOW_TRACE_PREFIX) (or
+/// a `workflow_trace_*` namespace already validated via
+/// [`crate::m9_watcher_namespace_guard::assert_workflow_trace_namespace`]).
+/// As a defense-in-depth measure against accidental call-site drift, any
+/// single-quote character in `namespace` is stripped — single-quote is
+/// the only SpacetimeDB SQL string delimiter, so removing it neutralises
+/// quote-injection while preserving every legal `workflow_trace_*` rune.
 #[must_use]
 pub fn tool_call_query(namespace: &str) -> String {
-    format!("SELECT * FROM tool_call WHERE namespace LIKE '{namespace}_%'")
+    // rationale: Adversarial-input discipline. `namespace` is `&str` so
+    // a hypothetical caller could supply `"x' OR 1=1; --"` and we'd
+    // emit broken SQL. Strip the only delimiter that matters; the m9
+    // validator does the structural work upstream.
+    let sanitised: String = namespace.chars().filter(|c| *c != '\'').collect();
+    format!("SELECT * FROM tool_call WHERE namespace LIKE '{sanitised}_%'")
 }
 
 /// Build the narrowed `consumption_event` subscription SQL.
@@ -113,9 +127,16 @@ pub fn register_narrowed_consumer(
     use spacetimedb_sdk::DbContext;
 
     let (tx, rx) = mpsc::channel::<()>();
-    let tx = std::sync::Mutex::new(Some(tx));
+    let tx = Mutex::new(Some(tx));
     let applied_flag = Arc::new(AtomicBool::new(false));
     let applied_for_callback = Arc::clone(&applied_flag);
+    // rationale: capture any `register_consumer` reducer error so the
+    // outer call surfaces it as `RegisterFailed` rather than letting
+    // `on_applied` silently flip `is_fresh = true` for a consumer the
+    // server has refused (was: silent failure swallowed by tracing::error
+    // alone — see debugger Phase 1 finding m2-F2).
+    let register_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let register_error_for_callback = Arc::clone(&register_error);
 
     let identity_for_callback = identity.clone();
     let consumer_name = identity.name.as_str().to_owned();
@@ -133,17 +154,21 @@ pub fn register_narrowed_consumer(
                 namespace.clone(),
                 transport.clone(),
             ) {
+                let reason = e.to_string();
                 tracing::error!(
                     target: "m2.register_consumer",
-                    error = %e,
+                    error = %reason,
                     "register_consumer reducer call failed"
                 );
+                if let Ok(mut slot) = register_error_for_callback.lock() {
+                    *slot = Some(reason);
+                }
             }
             // 2) Subscribe to the two narrowed queries.
             let q_tool_call = tool_call_query(&namespace_for_query);
             let q_consumption = consumption_event_query();
             let applied_inner = Arc::clone(&applied_for_callback);
-            let tx_inner = std::sync::Mutex::new(tx.lock().ok().and_then(|mut g| g.take()));
+            let tx_inner = Mutex::new(tx.lock().ok().and_then(|mut g| g.take()));
             ctx.subscription_builder()
                 .on_applied(move |_ctx| {
                     applied_inner.store(true, Ordering::Release);
@@ -200,12 +225,23 @@ pub fn register_narrowed_consumer(
     conn.run_threaded();
 
     match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
-        Ok(()) => Ok(RegistrationHandle {
-            identity,
-            registered_at: Instant::now(),
-            applied_flag,
-            _conn: conn,
-        }),
+        Ok(()) => {
+            // rationale: even if `on_applied` fired, the
+            // `register_consumer` reducer may have refused the request.
+            // Surface that as a typed RegisterFailed *before* returning a
+            // misleading "fresh" handle. Anti-silent-failure discipline.
+            if let Ok(slot) = register_error.lock() {
+                if let Some(reason) = slot.as_ref() {
+                    return Err(StcortexConsumerError::RegisterFailed(reason.clone()));
+                }
+            }
+            Ok(RegistrationHandle {
+                identity,
+                registered_at: Instant::now(),
+                applied_flag,
+                _conn: conn,
+            })
+        }
         Err(_) => Err(StcortexConsumerError::SubscriptionTimeout { timeout_ms }),
     }
 }

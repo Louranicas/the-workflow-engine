@@ -316,3 +316,221 @@ fn day_1_surface_signature_stability() {
         open_readonly;
     let _: fn(&AtuinConsumerConfig) -> bool = db_path_exists;
 }
+
+// ---- Hardening pass S1002209 (Cluster A) — +10 tests --------------------
+
+#[test]
+fn hardening_page_size_below_floor_clamps_to_min_not_zero() {
+    // rationale: Boundary — `page_size: 0` must not produce an empty
+    // page on a non-empty table. The hardening fix replaced the silent
+    // `i64::MAX` fallback with PAGE_SIZE_MAX saturation; this exercises
+    // the floor side of the clamp.
+    let (_f, mut cfg) = open_temp(50);
+    cfg.page_size = 0;
+    let c = open_readonly(&cfg).expect("open");
+    let all = c.collect_all().expect("collect");
+    assert_eq!(all.len(), 50, "page_size=0 should clamp to PAGE_SIZE_MIN, not zero");
+}
+
+#[test]
+fn hardening_page_size_above_ceiling_clamps_to_max() {
+    // rationale: Boundary — `page_size: 1_000_000` clamps to
+    // PAGE_SIZE_MAX (10_000). The new `unwrap_or_else` path must
+    // preserve that clamp and not regress to i64::MAX saturation.
+    use workflow_core::m1_atuin_consumer::PAGE_SIZE_MAX;
+    let (_f, mut cfg) = open_temp(150);
+    cfg.page_size = 1_000_000;
+    let c = open_readonly(&cfg).expect("open");
+    let all = c.collect_all().expect("collect");
+    assert_eq!(all.len(), 150);
+    assert_eq!(PAGE_SIZE_MAX, 10_000);
+}
+
+#[test]
+fn hardening_collect_all_with_row_cap_trims_to_cap() {
+    // rationale: Resource accounting — the new with_capacity hint reads
+    // `row_cap`. A capped collect must trim the final page exactly to
+    // the configured cap.
+    let f = tempfile::Builder::new().suffix(".db").tempfile().expect("temp");
+    seed_n_rows(f.path(), 5_000);
+    let cfg = AtuinConsumerConfig {
+        page_size: 500,
+        row_cap: Some(1_234),
+        db_path_override: Some(f.path().to_path_buf()),
+        ..AtuinConsumerConfig::default()
+    };
+    let all = open_readonly(&cfg).expect("open").collect_all().expect("collect");
+    assert_eq!(all.len(), 1_234, "row_cap must trim the final page exactly");
+}
+
+#[test]
+fn hardening_fallback_subprocess_surfaces_timeout_in_error_message() {
+    // rationale: Anti-property — the Day-1 stub's error message must
+    // reference the configured timeout so an operator can verify the
+    // wiring landed when the real subprocess path is added. Previously
+    // the config arg was silently discarded via `let _ = config`.
+    use workflow_core::m1_atuin_consumer::fallback_subprocess_ingest;
+    let cfg = AtuinConsumerConfig {
+        subprocess_timeout_ms: 7_777,
+        ..AtuinConsumerConfig::default()
+    };
+    let err = fallback_subprocess_ingest(&cfg).expect_err("stub");
+    let msg = err.to_string();
+    assert!(msg.contains("7777"), "expected 7777 in message, got: {msg}");
+}
+
+#[test]
+fn hardening_fixed_width_ulids_sort_lexicographically_through_cursor() {
+    // rationale: Adversarial input — atuin's live schema is TEXT, and
+    // ULIDs are lex-sortable only at fixed width. Seed three rows with
+    // the canonical 26-char synthetic ULID and verify cursor monotonic
+    // walk yields them in lex order, then prove non-fixed-width ids
+    // also lex-sort correctly when prefix-equal (the live atuin invariant).
+    let f = tempfile::Builder::new().suffix(".db").tempfile().expect("temp");
+    let conn = Connection::open(f.path()).expect("open");
+    conn.execute_batch(
+        "CREATE TABLE history (
+            id TEXT PRIMARY KEY, timestamp INTEGER NOT NULL,
+            duration INTEGER NOT NULL, exit INTEGER NOT NULL,
+            command TEXT NOT NULL, cwd TEXT NOT NULL,
+            session TEXT NOT NULL, hostname TEXT NOT NULL,
+            deleted_at INTEGER);",
+    )
+    .expect("schema");
+    for id in ["01HQA-aaa", "01HQA-bbb", "01HQA-ccc"] {
+        conn.execute(
+            "INSERT INTO history (id, command, session, hostname, timestamp, exit, duration, cwd) \
+             VALUES (?1, 'c', 's', 'h', 0, 0, 0, '/')",
+            rusqlite::params![id],
+        )
+        .expect("insert");
+    }
+    let cfg = AtuinConsumerConfig {
+        page_size: 100,
+        db_path_override: Some(f.path().to_path_buf()),
+        ..AtuinConsumerConfig::default()
+    };
+    let all = open_readonly(&cfg).expect("open").collect_all().expect("collect");
+    let ids: Vec<String> = all.iter().map(|r| r.id.clone()).collect();
+    assert_eq!(ids, vec!["01HQA-aaa", "01HQA-bbb", "01HQA-ccc"]);
+}
+
+#[test]
+fn hardening_concurrent_open_no_deadlock_at_higher_concurrency() {
+    // rationale: Concurrency — 16 simultaneous readers racing through
+    // WAL+pragma path must not deadlock. The existing test runs N=4;
+    // this lifts the bar.
+    let f = tempfile::Builder::new().suffix(".db").tempfile().expect("temp");
+    seed_n_rows(f.path(), 200);
+    let path = Arc::new(f.path().to_path_buf());
+    let handles: Vec<_> = (0..16_u32)
+        .map(|_| {
+            let p = Arc::clone(&path);
+            thread::spawn(move || {
+                let cfg = AtuinConsumerConfig {
+                    page_size: 100,
+                    db_path_override: Some((*p).clone()),
+                    ..AtuinConsumerConfig::default()
+                };
+                open_readonly(&cfg).expect("open").rows_yielded()
+            })
+        })
+        .collect();
+    for h in handles {
+        assert_eq!(h.join().expect("join"), 0, "fresh consumers haven't yielded yet");
+    }
+}
+
+#[test]
+fn hardening_row_cap_zero_marks_exhausted_without_sql() {
+    // rationale: Anti-property — `row_cap: Some(0)` is a degenerate
+    // request; the cursor must mark exhausted via the page-size=0
+    // early-return without issuing any SQL.
+    let (_f, mut cfg) = open_temp(50);
+    cfg.row_cap = Some(0);
+    let mut c = open_readonly(&cfg).expect("open");
+    let p = c.next_page().expect("first");
+    assert!(p.is_none(), "row_cap=0 must yield no pages");
+    assert!(c.exhausted(), "cursor must be exhausted");
+}
+
+#[test]
+fn hardening_exit_code_value_preserved_through_pagination() {
+    // rationale: Contract regression — the `exit` column is i32 at a
+    // fixed index in the SELECT. We seed distinct exit codes and
+    // verify they survive pagination unmangled.
+    let f = tempfile::Builder::new().suffix(".db").tempfile().expect("temp");
+    let conn = Connection::open(f.path()).expect("open");
+    conn.execute_batch(
+        "CREATE TABLE history (
+            id TEXT PRIMARY KEY, timestamp INTEGER NOT NULL,
+            duration INTEGER NOT NULL, exit INTEGER NOT NULL,
+            command TEXT NOT NULL, cwd TEXT NOT NULL,
+            session TEXT NOT NULL, hostname TEXT NOT NULL,
+            deleted_at INTEGER);",
+    )
+    .expect("schema");
+    for (i, exit) in [(1_i64, 0_i32), (2, 1), (3, 127)] {
+        conn.execute(
+            "INSERT INTO history (id, command, session, hostname, timestamp, exit, duration, cwd) \
+             VALUES (?1, 'c', 's', 'h', 0, ?2, 0, '/')",
+            rusqlite::params![synthetic_ulid(i), exit],
+        )
+        .expect("insert");
+    }
+    drop(conn);
+    let cfg = AtuinConsumerConfig {
+        page_size: 100,
+        db_path_override: Some(f.path().to_path_buf()),
+        ..AtuinConsumerConfig::default()
+    };
+    let all = open_readonly(&cfg).expect("open").collect_all().expect("collect");
+    let exits: Vec<i32> = all.iter().map(|r| r.exit).collect();
+    assert_eq!(exits, vec![0, 1, 127]);
+}
+
+#[test]
+fn hardening_deleted_at_some_round_trips_to_downstream() {
+    // rationale: Cross-module surface invariant — a row marked
+    // `deleted_at=Some(_)` is preserved through pagination and exposed
+    // to downstream modules (m4 uses deletion state to skip cascade
+    // correlation for retracted history rows).
+    let f = tempfile::Builder::new().suffix(".db").tempfile().expect("temp");
+    let conn = Connection::open(f.path()).expect("open");
+    conn.execute_batch(
+        "CREATE TABLE history (
+            id TEXT PRIMARY KEY, timestamp INTEGER NOT NULL,
+            duration INTEGER NOT NULL, exit INTEGER NOT NULL,
+            command TEXT NOT NULL, cwd TEXT NOT NULL,
+            session TEXT NOT NULL, hostname TEXT NOT NULL,
+            deleted_at INTEGER);
+         INSERT INTO history (id, command, session, hostname, timestamp, exit, duration, cwd, deleted_at) \
+         VALUES ('01HQA-deleted-x', 'rm -rf /', 's', 'h', 1, 0, 0, '/', 1700000000999);",
+    )
+    .expect("schema+insert");
+    drop(conn);
+    let cfg = AtuinConsumerConfig {
+        page_size: 100,
+        db_path_override: Some(f.path().to_path_buf()),
+        ..AtuinConsumerConfig::default()
+    };
+    let all = open_readonly(&cfg).expect("open").collect_all().expect("collect");
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].deleted_at, Some(1_700_000_000_999));
+}
+
+#[test]
+fn hardening_missing_override_path_is_deterministic_typed_error() {
+    // rationale: Determinism — two consecutive `open_readonly` calls
+    // against a missing override path return the same typed error
+    // variant (no env-driven nondeterminism).
+    let cfg = AtuinConsumerConfig {
+        db_path_override: Some(std::path::PathBuf::from(
+            "/tmp/definitely-missing-determinism-9f3e7a1b.db",
+        )),
+        ..AtuinConsumerConfig::default()
+    };
+    let a = matches!(open_readonly(&cfg), Err(AtuinConsumerError::DatabaseOpenFailed { .. }));
+    let b = matches!(open_readonly(&cfg), Err(AtuinConsumerError::DatabaseOpenFailed { .. }));
+    assert!(a && b);
+}

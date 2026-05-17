@@ -56,6 +56,16 @@ pub struct SunsetStats {
     pub workflows_pruned: usize,
     /// Number of workflows transitioned to SunsetExpired this cycle.
     pub workflows_auto_sunset: usize,
+    /// Number of workflows transitioned to PrunePending (soft floor) this
+    /// cycle. Recoverable on fitness rise — the recovery edge
+    /// (PrunePending → Active) is owned by the bank consumer (m30), not by
+    /// m11, so no symmetric counter lives in this struct.
+    pub workflows_prune_pending: usize,
+    /// Number of workflows whose `last_run_ms` was future-dated relative to
+    /// `now_ms` (clock-skew) and therefore SKIPPED this cycle. Surfacing
+    /// this prevents the F-POVM-07 silent-zero-timestamp pattern from
+    /// inflating recency credit on phantom future times.
+    pub workflows_clock_skew_skipped: usize,
     /// Mean of the per-workflow [`super::formula::DecayFactor`] applied
     /// this cycle; `0.0` if `workflows_decayed == 0`.
     pub mean_decay_factor: f64,
@@ -72,6 +82,8 @@ impl Default for SunsetStats {
             workflows_decayed: 0,
             workflows_pruned: 0,
             workflows_auto_sunset: 0,
+            workflows_prune_pending: 0,
+            workflows_clock_skew_skipped: 0,
             mean_decay_factor: 0.0,
             min_decay_factor: f64::INFINITY,
             max_decay_factor: f64::NEG_INFINITY,

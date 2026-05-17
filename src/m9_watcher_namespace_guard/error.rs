@@ -7,6 +7,7 @@
 //! - [`NamespaceViolation::Empty`]             = `E3102`
 //! - [`NamespaceViolation::Whitespace`]        = `E3103`
 //! - [`NamespaceViolation::ScratchForbidden`]  = `E3104`
+//! - [`NamespaceViolation::ControlChar`]       = `E3105`
 //!
 //! Every variant Display text names the violated invariant and (where
 //! applicable) the offending input and the expected prefix so operators can
@@ -65,6 +66,23 @@ pub enum NamespaceViolation {
          (use workflow_trace_scratch or a domain prefix)"
     )]
     ScratchForbidden,
+
+    /// The input namespace contained a control character (`\0`, ASCII
+    /// `< 0x20` not already whitespace, or a Unicode BOM `\u{FEFF}`).
+    /// These would silently corrupt downstream slug logging / SQL bindings
+    /// without firing the whitespace check (which only catches
+    /// `char::is_whitespace`).
+    #[error(
+        "stcortex write blocked: namespace contains non-printable / control \
+         character (U+{codepoint:04X} at byte offset {byte_offset}) — \
+         likely encoding contamination or BOM slip"
+    )]
+    ControlChar {
+        /// Unicode code point of the offending character.
+        codepoint: u32,
+        /// Byte offset within the input string.
+        byte_offset: usize,
+    },
 }
 
 #[cfg(test)]
@@ -180,16 +198,28 @@ mod tests {
     fn day_1_variant_set_is_exhaustively_matched() {
         // Per m9 spec § 2 capability table the EscapeSurfaceProfile-aware
         // variants (PrivilegeEscalation / DataExfil acknowledgement) land
-        // with m30 (HumanAcceptanceSignature). For Day-1 the variant set is
-        // exactly the four below. This match enforces it at compile time:
-        // adding a new variant breaks this test, prompting an explicit
-        // spec amendment.
+        // with m30 (HumanAcceptanceSignature). The Day-1 variant set is the
+        // five below — adding a new variant breaks this test, prompting an
+        // explicit spec amendment.
         let err = NamespaceViolation::Empty;
         match err {
             NamespaceViolation::Empty
             | NamespaceViolation::WrongPrefix { .. }
             | NamespaceViolation::Whitespace { .. }
-            | NamespaceViolation::ScratchForbidden => {}
+            | NamespaceViolation::ScratchForbidden
+            | NamespaceViolation::ControlChar { .. } => {}
         }
+    }
+
+    #[test]
+    fn control_char_display_names_codepoint_and_offset() {
+        let err = NamespaceViolation::ControlChar {
+            codepoint: 0,
+            byte_offset: 7,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("U+0000"), "missing codepoint hex: {msg}");
+        assert!(msg.contains("offset 7"), "missing byte offset: {msg}");
+        assert!(msg.contains("BOM") || msg.contains("control"), "missing diagnostic: {msg}");
     }
 }

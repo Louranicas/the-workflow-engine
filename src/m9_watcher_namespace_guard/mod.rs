@@ -35,8 +35,8 @@
 //! - [`assert_workflow_trace_namespace`] — validator + munge + typed refusal.
 //! - [`munge_hyphen_slug`] — hyphen → underscore helper (idempotent).
 //! - [`ValidatedNamespace`] — newtype evidence consumed by m13 / m42 writers.
-//! - [`NamespaceViolation`] — 4-variant error enum (`WrongPrefix` / `Empty`
-//!   / `Whitespace` / `ScratchForbidden`).
+//! - [`NamespaceViolation`] — 5-variant error enum (`WrongPrefix` / `Empty`
+//!   / `Whitespace` / `ScratchForbidden` / `ControlChar`).
 
 pub mod error;
 pub mod evidence;

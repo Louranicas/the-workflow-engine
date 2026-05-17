@@ -266,15 +266,17 @@ fn day_1_validator_signature_unchanged() {
 }
 
 #[test]
-fn day_1_error_variant_set_is_exactly_four() {
-    // F-Regression contract: the four base variants are the entire
-    // Day-1 surface. Adding a new variant requires a coordinated
-    // spec amendment + Zen audit.
+fn day_1_error_variant_set_is_exactly_five() {
+    // F-Regression contract: the five base variants are the entire
+    // Day-1 surface. Adding a new variant requires a coordinated spec
+    // amendment + Zen audit. `ControlChar` was added 2026-05-18 to close
+    // the NUL/BOM/control-char silent bypass.
     let err = NamespaceViolation::Empty;
     match err {
         NamespaceViolation::Empty
         | NamespaceViolation::WrongPrefix { .. }
         | NamespaceViolation::Whitespace { .. }
-        | NamespaceViolation::ScratchForbidden => {}
+        | NamespaceViolation::ScratchForbidden
+        | NamespaceViolation::ControlChar { .. } => {}
     }
 }

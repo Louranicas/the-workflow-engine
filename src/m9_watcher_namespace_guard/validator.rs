@@ -29,13 +29,14 @@ pub const WORKFLOW_TRACE_NS_PREFIX: &str = "workflow_trace";
 /// Validate that `namespace` is a legal workflow-trace stcortex namespace
 /// and return [`ValidatedNamespace`] evidence on success.
 ///
-/// Order of checks (per m9 spec § 5):
+/// Order of checks (per m9 spec § 5, extended for non-printable rejection):
 ///
 /// 1. empty → [`NamespaceViolation::Empty`]
 /// 2. any whitespace char → [`NamespaceViolation::Whitespace`]
-/// 3. exactly `"scratch"` → [`NamespaceViolation::ScratchForbidden`]
-/// 4. munge hyphens → underscores
-/// 5. munged-form `starts_with` [`WORKFLOW_TRACE_NS_PREFIX`] → ok, else
+/// 3. any control char or BOM → [`NamespaceViolation::ControlChar`]
+/// 4. exactly `"scratch"` → [`NamespaceViolation::ScratchForbidden`]
+/// 5. munge hyphens → underscores
+/// 6. munged-form `starts_with` [`WORKFLOW_TRACE_NS_PREFIX`] → ok, else
 ///    [`NamespaceViolation::WrongPrefix`]
 ///
 /// The hyphen munge (AP-Hab-11 / S1001757 mitigation) happens exactly once
@@ -46,6 +47,8 @@ pub const WORKFLOW_TRACE_NS_PREFIX: &str = "workflow_trace";
 /// - [`NamespaceViolation::Empty`] if `namespace` is the empty string.
 /// - [`NamespaceViolation::Whitespace`] if `namespace` contains any
 ///   whitespace character.
+/// - [`NamespaceViolation::ControlChar`] if `namespace` contains a control
+///   character (`is_control() && !is_whitespace()`) or a BOM (U+FEFF).
 /// - [`NamespaceViolation::ScratchForbidden`] if `namespace == "scratch"`.
 /// - [`NamespaceViolation::WrongPrefix`] if the munged form does not start
 ///   with [`WORKFLOW_TRACE_NS_PREFIX`].
@@ -87,6 +90,29 @@ pub fn assert_workflow_trace_namespace(
         );
         return Err(NamespaceViolation::Whitespace {
             namespace: namespace.to_owned(),
+        });
+    }
+    // Reject any control character or U+FEFF (BOM) that slipped past the
+    // whitespace check. `char::is_whitespace` does NOT cover NUL (`\0`),
+    // non-whitespace ASCII control bytes (`\x01`-`\x1F` except whitespace),
+    // DEL (`\x7F`), or the Unicode BOM. Without this gate, a stcortex slug
+    // can carry an invisible control byte all the way to substrate
+    // logging / SQL — silent contamination.
+    // (Fix: silent-failure-hunter LIKELY finding — NUL/BOM bypass.)
+    if let Some((byte_offset, c)) = namespace
+        .char_indices()
+        .find(|&(_, c)| c == '\u{FEFF}' || (c.is_control() && !c.is_whitespace()))
+    {
+        tracing::error!(
+            target: "m9.validator",
+            namespace = %namespace.escape_debug().to_string(),
+            codepoint = c as u32,
+            byte_offset,
+            "stcortex write blocked: namespace contains control character"
+        );
+        return Err(NamespaceViolation::ControlChar {
+            codepoint: c as u32,
+            byte_offset,
         });
     }
     if namespace == "scratch" {
@@ -496,5 +522,149 @@ mod tests {
         // Calling the validator again on the munged form must be a no-op.
         let v2 = assert_workflow_trace_namespace(v.as_str()).expect("re-validate");
         assert_eq!(v, v2);
+    }
+
+    // ====================================================================
+    // Hardening pass (S1002388) — +10 tests for the m9 namespace guard.
+    // Closes the NUL/BOM/control-char silent bypass + raises adversarial
+    // coverage on the validator boundary.
+    // ====================================================================
+
+    // rationale: Anti-property — NUL byte slipped past `is_whitespace`
+    // pre-fix; the new ControlChar check rejects it loudly.
+    #[test]
+    fn rejects_embedded_nul_byte() {
+        let err = assert_workflow_trace_namespace("workflow_trace\0x").unwrap_err();
+        let NamespaceViolation::ControlChar { codepoint, byte_offset } = err else {
+            panic!("expected ControlChar, got {err:?}");
+        };
+        assert_eq!(codepoint, 0, "expected U+0000 (NUL)");
+        assert_eq!(byte_offset, 14, "NUL is at byte offset 14 in input");
+    }
+
+    // rationale: Anti-property — Unicode BOM (U+FEFF) at the start of a
+    // namespace is invisible in most terminals and would silently
+    // contaminate the slug downstream. m9 rejects it now.
+    #[test]
+    fn rejects_leading_bom() {
+        let err = assert_workflow_trace_namespace("\u{FEFF}workflow_trace_x").unwrap_err();
+        let NamespaceViolation::ControlChar { codepoint, byte_offset } = err else {
+            panic!("expected ControlChar, got {err:?}");
+        };
+        assert_eq!(codepoint, 0xFEFF, "expected U+FEFF (BOM)");
+        assert_eq!(byte_offset, 0);
+    }
+
+    // rationale: Boundary — DEL character (U+007F) is control but not
+    // whitespace; must be rejected by ControlChar.
+    #[test]
+    fn rejects_embedded_del_character() {
+        let err = assert_workflow_trace_namespace("workflow_trace_\x7Fx").unwrap_err();
+        assert!(matches!(err, NamespaceViolation::ControlChar { codepoint: 0x7F, .. }));
+    }
+
+    // rationale: Adversarial input — Bell (U+0007) and other low-ASCII
+    // controls must all surface ControlChar with the right codepoint.
+    #[test]
+    fn rejects_all_low_ascii_control_chars_individually() {
+        for cp in 0_u32..0x20 {
+            // Skip whitespace control chars — they're caught by the
+            // earlier Whitespace check.
+            let c = char::from_u32(cp).expect("ascii cp");
+            if c.is_whitespace() {
+                continue;
+            }
+            let input = format!("workflow_trace_{c}x");
+            let err = assert_workflow_trace_namespace(&input).unwrap_err();
+            assert!(
+                matches!(err, NamespaceViolation::ControlChar { codepoint, .. }
+                    if codepoint == cp),
+                "expected ControlChar(cp={cp:#04X}), got {err:?} for input {input:?}"
+            );
+        }
+    }
+
+    // rationale: Anti-property — printable Unicode (e.g. CJK, accented
+    // chars, emoji) does NOT trigger ControlChar; the prefix check (or
+    // its absence) governs the verdict.
+    #[test]
+    fn printable_unicode_does_not_trigger_control_char_check() {
+        // Non-prefix Unicode → WrongPrefix, not ControlChar.
+        for input in ["héllo", "测试_namespace", "wf_\u{1F600}"] {
+            let err = assert_workflow_trace_namespace(input).unwrap_err();
+            assert!(
+                !matches!(err, NamespaceViolation::ControlChar { .. }),
+                "printable unicode {input:?} wrongly triggered ControlChar: {err:?}"
+            );
+        }
+    }
+
+    // rationale: Contract regression — ordering invariant. Empty wins over
+    // whitespace wins over control-char wins over scratch wins over
+    // prefix. Test the WHITESPACE / CONTROL-CHAR boundary (most likely
+    // to drift on refactor).
+    #[test]
+    fn whitespace_wins_over_control_char_when_both_present() {
+        // String contains a space AND a NUL. Whitespace check fires first.
+        let err = assert_workflow_trace_namespace("workflow_trace \0x").unwrap_err();
+        assert!(matches!(err, NamespaceViolation::Whitespace { .. }),
+            "whitespace check must precede control-char check");
+    }
+
+    // rationale: Determinism — validator returns identical Err shapes for
+    // identical bad inputs across repeated calls.
+    #[test]
+    fn validator_error_is_deterministic_for_control_char() {
+        let first = assert_workflow_trace_namespace("workflow_trace\0x").unwrap_err();
+        for _ in 0..100_u32 {
+            let again = assert_workflow_trace_namespace("workflow_trace\0x").unwrap_err();
+            assert_eq!(first, again);
+        }
+    }
+
+    // rationale: Resource accounting — munge_hyphen_slug does NOT
+    // allocate on the no-hyphen happy path (the common case for already-
+    // canonicalised namespaces). Tested observationally via the fact
+    // that munge of a string identical to its munged form returns a
+    // String equal to the input.
+    //
+    // (We can't directly test no-alloc, but we can verify functional
+    // equivalence + idempotence on the hot path.)
+    #[test]
+    fn munge_hot_path_no_hyphens_preserves_input_exactly() {
+        let input = "workflow_trace_some_long_canonical_form_no_hyphens";
+        let out = munge_hyphen_slug(input);
+        assert_eq!(out, input);
+        // Idempotence: a second pass through munge is a no-op.
+        assert_eq!(munge_hyphen_slug(&out), input);
+    }
+
+    // rationale: Boundary — the workflow_trace_ prefix with a trailing
+    // underscore is the canonical "well-formed" namespace shape; verify
+    // the validator accepts BOTH bare prefix and prefix-with-underscore
+    // (per spec § 13 Q1 open question — current behaviour: both ok).
+    #[test]
+    fn accepts_prefix_with_explicit_trailing_underscore() {
+        let v = assert_workflow_trace_namespace("workflow_trace_").expect("trailing _");
+        assert_eq!(v.as_str(), "workflow_trace_");
+    }
+
+    // rationale: Cross-module surface invariant — a control-char rejection
+    // must include the byte offset to help operators locate the bad
+    // codepoint in their input. The offset MUST be the START of the
+    // multi-byte sequence (UTF-8 boundary), not a midpoint.
+    #[test]
+    fn control_char_byte_offset_is_utf8_boundary() {
+        // Put BOM after a 3-byte CJK char (测=3 bytes UTF-8).
+        let input = "workflow_trace测\u{FEFF}";
+        let err = assert_workflow_trace_namespace(input).unwrap_err();
+        let NamespaceViolation::ControlChar { byte_offset, codepoint } = err else {
+            panic!("expected ControlChar");
+        };
+        assert_eq!(codepoint, 0xFEFF);
+        // The byte offset must be precisely where the U+FEFF starts in
+        // the UTF-8-encoded input — NOT at a midpoint inside the CJK char.
+        assert_eq!(byte_offset, "workflow_trace测".len(),
+            "byte_offset must land on a UTF-8 boundary, got {byte_offset}");
     }
 }

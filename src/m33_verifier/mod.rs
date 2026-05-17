@@ -4,16 +4,30 @@
 //! Four named verifiers (security / consistency / cost / ember) are
 //! collected; a workflow proceeds only when **all four** agree. Any
 //! single REFUSE/AMEND blocks dispatch.
+//!
+//! # Aggregation determinism
+//!
+//! Outcomes are sorted by [`VerifierKind::ordinal`] before being returned to
+//! the operator, so a Blocked verdict's `per_verifier` list is the same
+//! regardless of caller slice ordering. This is the m33 spec § 5
+//! "human-comparable refusal log" invariant.
+//!
+//! # AP-V7-08 pairing
+//!
+//! Per m33 spec § 6, m33 must refuse to verify a workflow whose steps
+//! target m32 itself. This is operationalised by composing the m33
+//! verifier set with [`crate::m32_dispatcher::self_dispatch_guard`] in the
+//! caller; m33 itself does not own the m32 step-kind taxonomy.
 
 use thiserror::Error;
 
 use crate::m30_bank::AcceptedWorkflow;
 
 /// Verifier identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VerifierKind {
-    /// Security: AP30 / EscapeSurfaceProfile checks.
+    /// Security: AP30 / `EscapeSurfaceProfile` checks.
     Security,
     /// Consistency: workflow vs prior bank entries.
     Consistency,
@@ -24,7 +38,26 @@ pub enum VerifierKind {
 }
 
 impl VerifierKind {
-    /// Stable identifier.
+    /// Canonical enumeration, in ordinal-ascending order. Used for the
+    /// compile-time cardinality assertion below and for deterministic
+    /// aggregation in [`aggregate`].
+    pub const VARIANTS: [Self; 4] =
+        [Self::Security, Self::Consistency, Self::Cost, Self::Ember];
+
+    /// Stable ordinal projection for metrics, snapshot stability, and the
+    /// aggregator's deterministic sort. `Security = 0`, `Consistency = 1`,
+    /// `Cost = 2`, `Ember = 3`.
+    #[must_use]
+    pub const fn ordinal(self) -> u8 {
+        match self {
+            Self::Security => 0,
+            Self::Consistency => 1,
+            Self::Cost => 2,
+            Self::Ember => 3,
+        }
+    }
+
+    /// Stable identifier for log lines and metric labels.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -35,6 +68,15 @@ impl VerifierKind {
         }
     }
 }
+
+// Compile-time cardinality enforcement: m33 contract is exactly 4
+// verifiers. Adding or removing a kind fails `cargo check`.
+const _: () = {
+    assert!(
+        VerifierKind::VARIANTS.len() == 4,
+        "VerifierKind cardinality drift — m33 contract is 4 verifiers"
+    );
+};
 
 /// One verifier's verdict.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -54,6 +96,14 @@ pub enum VerifierVerdict {
     },
 }
 
+impl VerifierVerdict {
+    /// `true` if this verdict blocks dispatch (Refuse or Amend).
+    #[must_use]
+    pub const fn is_blocking(&self) -> bool {
+        !matches!(self, Self::Approve)
+    }
+}
+
 /// Aggregated verification result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AggregateVerdict {
@@ -61,17 +111,21 @@ pub enum AggregateVerdict {
     AllApprove,
     /// At least one refused or requested amendment.
     Blocked {
-        /// Per-verifier outcomes for the operator.
+        /// Per-verifier outcomes for the operator, sorted by
+        /// [`VerifierKind::ordinal`].
         per_verifier: Vec<(VerifierKind, VerifierVerdict)>,
     },
 }
 
 /// Verifier errors.
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum VerifierError {
     /// A required verifier was missing from the input.
     #[error("missing verifier {:?}", .0)]
     MissingVerifier(VerifierKind),
+    /// A verifier kind appeared more than once in the input.
+    #[error("duplicate verifier {:?}", .0)]
+    DuplicateVerifier(VerifierKind),
 }
 
 /// Trait implemented by each individual verifier.
@@ -84,33 +138,39 @@ pub trait Verifier: Send + Sync {
 
 /// Run all four verifiers and aggregate.
 ///
-/// `verifiers` MUST include exactly one of each `VerifierKind`.
+/// `verifiers` MUST include exactly one of each [`VerifierKind`].
+///
+/// Output ordering: `per_verifier` is sorted by [`VerifierKind::ordinal`] so
+/// that the refusal log is deterministic regardless of caller slice order.
 ///
 /// # Errors
 ///
-/// [`VerifierError::MissingVerifier`] when a required kind is absent.
+/// - [`VerifierError::MissingVerifier`] when a required kind is absent.
+/// - [`VerifierError::DuplicateVerifier`] when a kind appears more than once.
 pub fn aggregate(
     verifiers: &[&dyn Verifier],
     workflow: &AcceptedWorkflow,
 ) -> Result<AggregateVerdict, VerifierError> {
-    let required = [
-        VerifierKind::Security,
-        VerifierKind::Consistency,
-        VerifierKind::Cost,
-        VerifierKind::Ember,
-    ];
-    for kind in required {
-        if !verifiers.iter().any(|v| v.kind() == kind) {
-            return Err(VerifierError::MissingVerifier(kind));
+    // Check for duplicates FIRST so a duplicate-of-the-only-supplied-kind
+    // doesn't accidentally read as "all required present".
+    for &required in &VerifierKind::VARIANTS {
+        let count = verifiers.iter().filter(|v| v.kind() == required).count();
+        if count > 1 {
+            return Err(VerifierError::DuplicateVerifier(required));
         }
     }
-    let outcomes: Vec<(VerifierKind, VerifierVerdict)> = verifiers
+    for &required in &VerifierKind::VARIANTS {
+        if !verifiers.iter().any(|v| v.kind() == required) {
+            return Err(VerifierError::MissingVerifier(required));
+        }
+    }
+    let mut outcomes: Vec<(VerifierKind, VerifierVerdict)> = verifiers
         .iter()
         .map(|v| (v.kind(), v.verify(workflow)))
         .collect();
-    let any_block = outcomes
-        .iter()
-        .any(|(_, v)| !matches!(v, VerifierVerdict::Approve));
+    // Deterministic sort by kind ordinal — anti-caller-slice-order.
+    outcomes.sort_by_key(|(k, _)| k.ordinal());
+    let any_block = outcomes.iter().any(|(_, v)| v.is_blocking());
     if any_block {
         Ok(AggregateVerdict::Blocked {
             per_verifier: outcomes,
@@ -180,6 +240,20 @@ mod tests {
         }
     }
 
+    struct AmendOne {
+        kind: VerifierKind,
+    }
+    impl Verifier for AmendOne {
+        fn kind(&self) -> VerifierKind {
+            self.kind
+        }
+        fn verify(&self, _: &AcceptedWorkflow) -> VerifierVerdict {
+            VerifierVerdict::Amend {
+                request: "please specify".into(),
+            }
+        }
+    }
+
     fn approve_quad() -> [Box<dyn Verifier>; 4] {
         [
             Box::new(ApproveAll {
@@ -197,8 +271,11 @@ mod tests {
         ]
     }
 
+    // --- Pre-existing tests preserved verbatim ---
+
     #[test]
     fn all_approve_yields_all_approve_verdict() {
+        // rationale: Contract regression
         let verifiers = approve_quad();
         let refs: Vec<&dyn Verifier> = verifiers.iter().map(std::convert::AsRef::as_ref).collect();
         let r = aggregate(&refs, &sample()).expect("ok");
@@ -207,6 +284,7 @@ mod tests {
 
     #[test]
     fn one_refusal_blocks() {
+        // rationale: Contract regression
         let v: [Box<dyn Verifier>; 4] = [
             Box::new(RefuseOne {
                 kind: VerifierKind::Security,
@@ -228,6 +306,7 @@ mod tests {
 
     #[test]
     fn missing_verifier_yields_error() {
+        // rationale: Contract regression
         let v: Vec<Box<dyn Verifier>> = vec![
             Box::new(ApproveAll {
                 kind: VerifierKind::Security,
@@ -242,12 +321,313 @@ mod tests {
         ];
         let refs: Vec<&dyn Verifier> = v.iter().map(std::convert::AsRef::as_ref).collect();
         let r = aggregate(&refs, &sample());
-        assert!(matches!(r, Err(VerifierError::MissingVerifier(VerifierKind::Ember))));
+        assert!(matches!(
+            r,
+            Err(VerifierError::MissingVerifier(VerifierKind::Ember))
+        ));
     }
 
     #[test]
     fn verifier_kind_as_str_stability() {
+        // rationale: Contract regression — log-label stability
         assert_eq!(VerifierKind::Security.as_str(), "security");
         assert_eq!(VerifierKind::Ember.as_str(), "ember");
+    }
+
+    // --- New hardening tests (Cluster G god-tier pass) ---
+
+    #[test]
+    fn variants_array_cardinality_four() {
+        // rationale: Contract regression — m33 4-verifier contract
+        assert_eq!(VerifierKind::VARIANTS.len(), 4);
+    }
+
+    #[test]
+    fn variants_ordered_by_ascending_ordinal() {
+        // rationale: Contract regression
+        let ords: Vec<u8> = VerifierKind::VARIANTS
+            .iter()
+            .map(|k| k.ordinal())
+            .collect();
+        assert_eq!(ords, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn one_amend_blocks_as_well_as_refuse() {
+        // rationale: Anti-property — Amend is also a block
+        let v: [Box<dyn Verifier>; 4] = [
+            Box::new(ApproveAll {
+                kind: VerifierKind::Security,
+            }),
+            Box::new(AmendOne {
+                kind: VerifierKind::Consistency,
+            }),
+            Box::new(ApproveAll {
+                kind: VerifierKind::Cost,
+            }),
+            Box::new(ApproveAll {
+                kind: VerifierKind::Ember,
+            }),
+        ];
+        let refs: Vec<&dyn Verifier> = v.iter().map(std::convert::AsRef::as_ref).collect();
+        let r = aggregate(&refs, &sample()).expect("ok");
+        match r {
+            AggregateVerdict::Blocked { per_verifier } => {
+                assert!(per_verifier
+                    .iter()
+                    .any(|(_, v)| matches!(v, VerifierVerdict::Amend { .. })));
+            }
+            AggregateVerdict::AllApprove => panic!("expected Blocked, got AllApprove"),
+        }
+    }
+
+    #[test]
+    fn all_refuse_blocks_and_carries_each_refusal() {
+        // rationale: Adversarial input — all-verifiers-refuse
+        let v: [Box<dyn Verifier>; 4] = [
+            Box::new(RefuseOne {
+                kind: VerifierKind::Security,
+            }),
+            Box::new(RefuseOne {
+                kind: VerifierKind::Consistency,
+            }),
+            Box::new(RefuseOne {
+                kind: VerifierKind::Cost,
+            }),
+            Box::new(RefuseOne {
+                kind: VerifierKind::Ember,
+            }),
+        ];
+        let refs: Vec<&dyn Verifier> = v.iter().map(std::convert::AsRef::as_ref).collect();
+        let r = aggregate(&refs, &sample()).expect("ok");
+        match r {
+            AggregateVerdict::Blocked { per_verifier } => {
+                assert_eq!(per_verifier.len(), 4);
+                for (_, v) in &per_verifier {
+                    assert!(matches!(v, VerifierVerdict::Refuse { .. }));
+                }
+            }
+            AggregateVerdict::AllApprove => panic!("expected Blocked, got AllApprove"),
+        }
+    }
+
+    #[test]
+    fn duplicate_verifier_kind_yields_typed_error() {
+        // rationale: Adversarial input — duplicate kinds rejected
+        let v: Vec<Box<dyn Verifier>> = vec![
+            Box::new(ApproveAll {
+                kind: VerifierKind::Security,
+            }),
+            Box::new(ApproveAll {
+                kind: VerifierKind::Security,
+            }), // duplicate
+            Box::new(ApproveAll {
+                kind: VerifierKind::Consistency,
+            }),
+            Box::new(ApproveAll {
+                kind: VerifierKind::Cost,
+            }),
+            Box::new(ApproveAll {
+                kind: VerifierKind::Ember,
+            }),
+        ];
+        let refs: Vec<&dyn Verifier> = v.iter().map(std::convert::AsRef::as_ref).collect();
+        let r = aggregate(&refs, &sample());
+        assert!(matches!(
+            r,
+            Err(VerifierError::DuplicateVerifier(VerifierKind::Security))
+        ));
+    }
+
+    #[test]
+    fn missing_each_kind_individually_yields_correct_error() {
+        // rationale: Contract regression — each missing-kind path
+        for &missing in &VerifierKind::VARIANTS {
+            let v: Vec<Box<dyn Verifier>> = VerifierKind::VARIANTS
+                .iter()
+                .filter(|k| **k != missing)
+                .map(|k| Box::new(ApproveAll { kind: *k }) as Box<dyn Verifier>)
+                .collect();
+            let refs: Vec<&dyn Verifier> =
+                v.iter().map(std::convert::AsRef::as_ref).collect();
+            let r = aggregate(&refs, &sample());
+            assert!(
+                matches!(r, Err(VerifierError::MissingVerifier(k)) if k == missing),
+                "missing kind {missing:?} not detected"
+            );
+        }
+    }
+
+    #[test]
+    fn blocked_outcomes_deterministically_ordered_by_kind_ordinal() {
+        // rationale: Determinism — anti-caller-slice-order
+        let v: Vec<Box<dyn Verifier>> = vec![
+            Box::new(RefuseOne {
+                kind: VerifierKind::Ember,
+            }),
+            Box::new(RefuseOne {
+                kind: VerifierKind::Cost,
+            }),
+            Box::new(RefuseOne {
+                kind: VerifierKind::Consistency,
+            }),
+            Box::new(RefuseOne {
+                kind: VerifierKind::Security,
+            }),
+        ];
+        let refs: Vec<&dyn Verifier> = v.iter().map(std::convert::AsRef::as_ref).collect();
+        let r = aggregate(&refs, &sample()).expect("ok");
+        match r {
+            AggregateVerdict::Blocked { per_verifier } => {
+                let kinds: Vec<VerifierKind> =
+                    per_verifier.iter().map(|(k, _)| *k).collect();
+                assert_eq!(
+                    kinds,
+                    vec![
+                        VerifierKind::Security,
+                        VerifierKind::Consistency,
+                        VerifierKind::Cost,
+                        VerifierKind::Ember,
+                    ]
+                );
+            }
+            AggregateVerdict::AllApprove => panic!("expected Blocked, got AllApprove"),
+        }
+    }
+
+    #[test]
+    fn aggregation_parity_across_input_permutations() {
+        // rationale: Determinism — permutations produce identical Blocked log
+        let baseline_v: Vec<Box<dyn Verifier>> = vec![
+            Box::new(RefuseOne {
+                kind: VerifierKind::Security,
+            }),
+            Box::new(RefuseOne {
+                kind: VerifierKind::Consistency,
+            }),
+            Box::new(ApproveAll {
+                kind: VerifierKind::Cost,
+            }),
+            Box::new(ApproveAll {
+                kind: VerifierKind::Ember,
+            }),
+        ];
+        let refs: Vec<&dyn Verifier> =
+            baseline_v.iter().map(std::convert::AsRef::as_ref).collect();
+        let baseline = aggregate(&refs, &sample()).expect("ok");
+
+        let permuted_v: Vec<Box<dyn Verifier>> = vec![
+            Box::new(ApproveAll {
+                kind: VerifierKind::Ember,
+            }),
+            Box::new(ApproveAll {
+                kind: VerifierKind::Cost,
+            }),
+            Box::new(RefuseOne {
+                kind: VerifierKind::Consistency,
+            }),
+            Box::new(RefuseOne {
+                kind: VerifierKind::Security,
+            }),
+        ];
+        let refs: Vec<&dyn Verifier> =
+            permuted_v.iter().map(std::convert::AsRef::as_ref).collect();
+        let permuted = aggregate(&refs, &sample()).expect("ok");
+        assert_eq!(baseline, permuted);
+    }
+
+    #[test]
+    fn verifier_verdict_is_blocking_for_refuse_and_amend_only() {
+        // rationale: Anti-property — `is_blocking` predicate locked
+        assert!(!VerifierVerdict::Approve.is_blocking());
+        assert!(VerifierVerdict::Refuse {
+            reason: "x".into()
+        }
+        .is_blocking());
+        assert!(VerifierVerdict::Amend {
+            request: "y".into()
+        }
+        .is_blocking());
+    }
+
+    #[test]
+    fn verifier_kind_serde_round_trip() {
+        // rationale: Contract regression — wire-format stability
+        for &k in &VerifierKind::VARIANTS {
+            let j = serde_json::to_string(&k).expect("ser");
+            let back: VerifierKind = serde_json::from_str(&j).expect("de");
+            assert_eq!(back, k);
+        }
+    }
+
+    #[test]
+    fn verifier_verdict_serde_round_trip() {
+        // rationale: Contract regression — wire-format stability
+        let vs = [
+            VerifierVerdict::Approve,
+            VerifierVerdict::Refuse {
+                reason: "r".into(),
+            },
+            VerifierVerdict::Amend {
+                request: "a".into(),
+            },
+        ];
+        for v in &vs {
+            let j = serde_json::to_string(v).expect("ser");
+            let back: VerifierVerdict = serde_json::from_str(&j).expect("de");
+            assert_eq!(back, *v);
+        }
+    }
+
+    #[test]
+    fn empty_verifiers_yields_missing_security_first() {
+        // rationale: Boundary — empty slice
+        let refs: Vec<&dyn Verifier> = Vec::new();
+        let r = aggregate(&refs, &sample());
+        assert!(matches!(
+            r,
+            Err(VerifierError::MissingVerifier(VerifierKind::Security))
+        ));
+    }
+
+    #[test]
+    fn approve_then_refuse_aggregates_to_blocked_with_full_log() {
+        // rationale: Cross-module — Cluster G → m32 dispatch gate
+        let v: [Box<dyn Verifier>; 4] = [
+            Box::new(ApproveAll {
+                kind: VerifierKind::Security,
+            }),
+            Box::new(ApproveAll {
+                kind: VerifierKind::Consistency,
+            }),
+            Box::new(RefuseOne {
+                kind: VerifierKind::Cost,
+            }),
+            Box::new(ApproveAll {
+                kind: VerifierKind::Ember,
+            }),
+        ];
+        let refs: Vec<&dyn Verifier> =
+            v.iter().map(std::convert::AsRef::as_ref).collect();
+        let r = aggregate(&refs, &sample()).expect("ok");
+        match r {
+            AggregateVerdict::Blocked { per_verifier } => {
+                // All 4 outcomes recorded even when only one blocks.
+                assert_eq!(per_verifier.len(), 4);
+                let approves =
+                    per_verifier.iter().filter(|(_, v)| !v.is_blocking()).count();
+                assert_eq!(approves, 3);
+            }
+            AggregateVerdict::AllApprove => panic!("expected Blocked, got AllApprove"),
+        }
+    }
+
+    #[test]
+    fn verifier_error_is_eq_and_displayable() {
+        // rationale: Contract regression
+        let e = VerifierError::MissingVerifier(VerifierKind::Ember);
+        assert_eq!(e, VerifierError::MissingVerifier(VerifierKind::Ember));
+        let s = format!("{e}");
+        assert!(s.contains("Ember"));
     }
 }

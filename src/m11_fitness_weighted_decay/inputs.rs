@@ -1,0 +1,145 @@
+//! Signal normalisations for the Gap 2 compound decay formula.
+//!
+//! Per m11 spec § 5.2: three independently-tracked signals are each
+//! normalised to the unit interval `[0, 1]` before composition in
+//! [`super::formula::compute_decay_factor`]:
+//!
+//! - [`recency_factor`] — `exp(-lambda × days_since_last_run)`, half-life
+//!   parameterised. Read from m7 `last_run_at`.
+//! - [`frequency_factor`] — `run_count / cohort_max` clamped. Read from m14
+//!   `evidence_aggregator`.
+//! - [`fitness_factor`] — defensive clamp of stcortex `pathway.weight` which
+//!   is already in `[0, 1]` by stcortex invariant. Read via m42 substrate
+//!   route (post-2026-05-17 ADR).
+
+/// Exponential recency factor: `exp(-lambda × days_since_last_run)`
+/// where `lambda = ln(2) / half_life_days`.
+///
+/// At `days_since_last_run = 0` returns `1.0`; at
+/// `days_since_last_run = half_life_days` returns `0.5`; at large `days`
+/// asymptotes to `0.0`. Output clamped to `[0.0, 1.0]`.
+///
+/// `half_life_days = +inf` is the degenerate case → recency always `1.0`
+/// (no time decay). `half_life_days <= 0.0` is treated the same as `+inf`
+/// to avoid `lambda = inf` cascading into NaN.
+#[must_use]
+pub fn recency_factor(days_since_last_run: f64, half_life_days: f64) -> f64 {
+    if !days_since_last_run.is_finite() || days_since_last_run <= 0.0 {
+        return 1.0;
+    }
+    if !half_life_days.is_finite() || half_life_days <= 0.0 {
+        return 1.0;
+    }
+    let lambda = std::f64::consts::LN_2 / half_life_days;
+    let raw = (-lambda * days_since_last_run).exp();
+    raw.clamp(0.0, 1.0)
+}
+
+/// Cohort-normalised frequency factor.
+///
+/// `run_count / cohort_max` clamped to `[0.0, 1.0]`. `cohort_max == 0`
+/// returns `0.0` (no dispatches yet → no frequency signal).
+#[must_use]
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "u64 → f64 cast is safe for workflow run counts < 2^53; \
+              precision irrelevant for ratio normalisation"
+)]
+pub fn frequency_factor(run_count: u64, cohort_max: u64) -> f64 {
+    if cohort_max == 0 {
+        return 0.0;
+    }
+    (run_count as f64 / cohort_max as f64).clamp(0.0, 1.0)
+}
+
+/// Defensive clamp of stcortex pathway weight to `[0.0, 1.0]`.
+///
+/// stcortex `pathway.weight` is in `[0, 1]` by substrate invariant; this
+/// clamp is defense-in-depth against substrate-side drift or NaN.
+#[must_use]
+pub fn fitness_factor(pathway_weight: f64) -> f64 {
+    if !pathway_weight.is_finite() {
+        return 0.0;
+    }
+    pathway_weight.clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{fitness_factor, frequency_factor, recency_factor};
+
+    // ---- recency_factor (5) ---------------------------------------------
+
+    #[test]
+    fn recency_zero_days_is_one() {
+        let r = recency_factor(0.0, 30.0);
+        assert!((r - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn recency_one_half_life_is_one_half() {
+        let r = recency_factor(30.0, 30.0);
+        assert!((r - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn recency_six_half_lives_is_about_two_to_neg_six() {
+        // 180d @ half-life 30d = 6 half-lives → 2^-6 ≈ 0.015625
+        let r = recency_factor(180.0, 30.0);
+        assert!((r - 0.015_625).abs() < 1e-6);
+    }
+
+    #[test]
+    fn recency_infinite_half_life_returns_one() {
+        assert!((recency_factor(100.0, f64::INFINITY) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn recency_non_finite_or_negative_days_returns_one() {
+        assert!((recency_factor(f64::NAN, 30.0) - 1.0).abs() < 1e-12);
+        assert!((recency_factor(-1.0, 30.0) - 1.0).abs() < 1e-12);
+        assert!((recency_factor(-1000.0, 30.0) - 1.0).abs() < 1e-12);
+    }
+
+    // ---- frequency_factor (4) -------------------------------------------
+
+    #[test]
+    fn frequency_cohort_zero_returns_zero() {
+        assert!(frequency_factor(5, 0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn frequency_at_cohort_max_is_one() {
+        assert!((frequency_factor(100, 100) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn frequency_half_cohort_max_is_one_half() {
+        assert!((frequency_factor(50, 100) - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn frequency_zero_run_count_is_zero() {
+        assert!(frequency_factor(0, 100).abs() < 1e-12);
+    }
+
+    // ---- fitness_factor (3) ---------------------------------------------
+
+    #[test]
+    fn fitness_in_range_pass_through() {
+        let v = std::hint::black_box(0.42_f64);
+        assert!((fitness_factor(v) - 0.42).abs() < 1e-12);
+    }
+
+    #[test]
+    fn fitness_clamps_above_one() {
+        assert!((fitness_factor(2.5) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn fitness_clamps_below_zero_or_nan() {
+        assert!(fitness_factor(-0.5).abs() < 1e-12);
+        assert!(fitness_factor(f64::NAN).abs() < 1e-12);
+        assert!(fitness_factor(f64::NEG_INFINITY).abs() < 1e-12);
+    }
+}

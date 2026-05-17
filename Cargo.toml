@@ -40,6 +40,8 @@ time = { version = "0.3", features = ["parsing", "formatting", "macros"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 # m10 allowlist tests use temp TSV files.
 tempfile = "3"
+# m11 Gap 2 property tests — 10 invariants × up-to-10k cases each.
+proptest = "1"
 
 [features]
 default = ["full"]

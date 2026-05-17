@@ -32,6 +32,7 @@
 pub mod m8_povm_build_prereq;
 pub mod m9_watcher_namespace_guard;
 pub mod m10_ember_ci_gate;
+pub mod m11_fitness_weighted_decay;
 pub mod user_facing_strings;
 
 pub use m9_watcher_namespace_guard::{
@@ -41,4 +42,9 @@ pub use m9_watcher_namespace_guard::{
 pub use m10_ember_ci_gate::{
     evaluate_string, evaluate_string_at, is_approved, is_approved_at, load_approvals,
     score_against_rubric, EmberGateError, EmberStatus, GateVerdict, HeldApproval, TraitName,
+};
+pub use m11_fitness_weighted_decay::{
+    chrono_now_ms, compute_decay_factor, fitness_factor, frequency_factor, recency_factor,
+    run_consolidation_cycle, AcceptedWorkflowDecay, DecayConfig, DecayError, DecayFactor,
+    FrequencyReader, LifecycleBank, PathwayWeightReader, SunsetPhase, SunsetStats,
 };

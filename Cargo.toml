@@ -27,6 +27,9 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
+# m10 Ember CI gate — RFC 3339 timestamps for the allowlist TSV.
+# Chosen over `chrono` per GOD_TIER_RUST rule 18.
+time = { version = "0.3", features = ["parsing", "formatting", "macros"] }
 
 [build-dependencies]
 # Build script is intentionally minimal (env-var-only per m8 spec § 10);
@@ -35,6 +38,8 @@ tracing = "0.1"
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
+# m10 allowlist tests use temp TSV files.
+tempfile = "3"
 
 [features]
 default = ["full"]

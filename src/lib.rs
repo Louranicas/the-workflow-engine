@@ -31,8 +31,14 @@
 
 pub mod m8_povm_build_prereq;
 pub mod m9_watcher_namespace_guard;
+pub mod m10_ember_ci_gate;
+pub mod user_facing_strings;
 
 pub use m9_watcher_namespace_guard::{
     assert_workflow_trace_namespace, munge_hyphen_slug, NamespaceViolation,
     ValidatedNamespace, WORKFLOW_TRACE_NS_PREFIX,
+};
+pub use m10_ember_ci_gate::{
+    evaluate_string, evaluate_string_at, is_approved, is_approved_at, load_approvals,
+    score_against_rubric, EmberGateError, EmberStatus, GateVerdict, HeldApproval, TraitName,
 };

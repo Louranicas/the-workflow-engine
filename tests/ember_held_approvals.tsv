@@ -1,0 +1,9 @@
+artefact_key	approved_by	approved_at	expiry
+# Allowlist for Ember 7-trait CI gate (m10) Held verdicts.
+# Format: tab-separated 4 fields after the header.
+# - artefact_key:  <module>.<context>.<variant> matching crate::user_facing_strings::ALL
+# - approved_by:   HumanAcceptanceSignature anchor (operator identity)
+# - approved_at:   RFC3339 UTC timestamp of approval
+# - expiry:        RFC3339 UTC timestamp after which the approval no longer authorises
+# Rejected verdicts (confidence ≥ 0.5) CANNOT be allowlisted per D-C decision (S1002127).
+# Day-1: empty (no Held verdicts to allowlist; registry is empty).

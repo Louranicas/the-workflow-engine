@@ -186,6 +186,17 @@ impl OracHttpReader {
 }
 
 impl LtpDensityReader for OracHttpReader {
+    /// `None` is the load-bearing "probe unreachable" sentinel that drives the
+    /// 3-band gate to defer. Each `.ok()?` below collapses a typed transport
+    /// error into the unreachable sentinel by design:
+    ///
+    /// - `Client::builder().build()` — TLS / runtime construction failure.
+    /// - `client.get(...).send()` — connection refused / DNS / timeout.
+    /// - `.json::<Value>()` — body is not valid UTF-8 JSON.
+    ///
+    /// Rationale: ORAC blackboard transient unreachability is the EXPECTED
+    /// failure mode and MUST NOT be propagated as a typed error; defer is
+    /// the correct response per 3-band gate spec.
     fn read_density(&self) -> Option<f64> {
         let client = reqwest::blocking::Client::builder()
             .timeout(self.timeout)
@@ -317,7 +328,18 @@ where
             },
         });
         let line = format!("{}\n", serde_json::to_string(&entry)?);
-        let _guard = self.outbox_lock.lock().ok();
+        // Poison-recovery: previous impl was `lock().ok()` which silently
+        // dropped the guard on PoisonError, allowing concurrent writers to
+        // race past the lock and interleave bytes into the JSONL outbox.
+        // Recover from poison by extracting the inner guard — a poisoned
+        // outbox lock is safe to reuse because the outbox is append-only
+        // and lines are pre-rendered (no protected invariant to repair).
+        // (Fix: CONFIRMED silent-failure-hunter — `let _ = lock().ok()` drop
+        // pattern on a Mutex protecting concurrent file appends.)
+        let _guard = self
+            .outbox_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(parent) = self.outbox_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -336,6 +358,13 @@ where
     }
 }
 
+/// Wall-clock time in milliseconds since UNIX epoch. Returns `0` only when
+/// the system clock is *before* 1970 (impossible on production hardware) or
+/// when `as_millis()` overflows `i64` in year ~292,471,209 AD.
+///
+/// F-POVM-07 mitigation: the `0` sentinel is documented (not silent) and the
+/// outbox consumer must treat `ts_ms == 0` as "clock anomaly" rather than
+/// "epoch boundary".
 fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -581,5 +610,192 @@ mod tests {
     #[test]
     fn ltp_phase_3_target_is_zero_point_one() {
         assert!((LTP_PHASE_3_TARGET - 0.10).abs() < 1e-12);
+    }
+
+    // ====================================================================
+    // Hardening pass (S1002388) — +10 tests for m13 stcortex writer.
+    // Lock-poisoning recovery + threshold boundaries + AP30 enforcement
+    // + F9 zero-weight + adversarial input + cross-module surfaces.
+    // ====================================================================
+
+    use std::sync::Arc;
+    use std::thread;
+
+    use super::DEFAULT_PROBE_TIMEOUT;
+
+    // rationale: Boundary — LTP density exactly equal to LTP_PHASE_1_FLOOR
+    // (0.015) is NOT below the floor (strict `<` check); writer proceeds
+    // in band-2 (under-pressure).
+    #[test]
+    fn band_at_exact_floor_writes_under_pressure_not_deferred() {
+        // rationale: Boundary (3-band gate exact threshold)
+        let w = writer(Some(LTP_PHASE_1_FLOOR), false);
+        let out = w
+            .promote_run(&run(), &canonical_ns())
+            .expect("promote at floor");
+        assert!(
+            matches!(out, PromoteOutcome::WrittenUnderPressure { .. }),
+            "exact floor must NOT defer (strict `<`); got {out:?}"
+        );
+    }
+
+    // rationale: Boundary — LTP density exactly equal to
+    // LTP_PHASE_3_TARGET (0.10) is NOT in the pressure band; writer
+    // proceeds in band-3 (normal write).
+    #[test]
+    fn band_at_exact_phase_3_target_writes_normally() {
+        // rationale: Boundary (3-band gate exact threshold)
+        let w = writer(Some(LTP_PHASE_3_TARGET), false);
+        let out = w
+            .promote_run(&run(), &canonical_ns())
+            .expect("promote at target");
+        assert!(
+            matches!(out, PromoteOutcome::Written { .. }),
+            "exact target must write normally; got {out:?}"
+        );
+    }
+
+    // rationale: Anti-property — AP30 namespace check happens BEFORE the
+    // LTP probe. Foreign namespace must fail-fast with NamespaceViolation
+    // and never invoke the probe path.
+    #[test]
+    fn namespace_check_precedes_ltp_probe() {
+        // rationale: Anti-property (AP30 order-of-operations)
+        struct PanickingReader;
+        impl LtpDensityReader for PanickingReader {
+            fn read_density(&self) -> Option<f64> {
+                panic!("LTP probe must not fire when namespace is rejected");
+            }
+        }
+        let outbox = tempfile::Builder::new()
+            .suffix(".jsonl")
+            .tempfile()
+            .expect("temp")
+            .into_temp_path();
+        let path = outbox.to_path_buf();
+        std::mem::forget(outbox);
+        let w = StcortexWriter::new(
+            PanickingReader,
+            RecordingWriter {
+                next_id: StdMutex::new(0),
+                written: StdMutex::new(Vec::new()),
+                fail: false,
+            },
+            path,
+        );
+        let err = w.promote_run(&run(), "orac_evil").expect_err("AP30");
+        assert!(matches!(err, StcortexWriterError::NamespaceViolation(_)));
+    }
+
+    // rationale: Concurrency — defer() recovers from a poisoned outbox
+    // mutex. Pre-fix `lock().ok()` silently dropped the guard on poison;
+    // the fix uses PoisonError::into_inner so concurrent defers stay
+    // serialised.
+    #[test]
+    fn defer_recovers_from_poisoned_outbox_lock() {
+        // rationale: Concurrency (silent-failure-hunter CONFIRMED bug)
+        let w = Arc::new(writer(Some(0.001), false));
+        let w_poison = Arc::clone(&w);
+        let join = thread::spawn(move || {
+            let _g = w_poison.outbox_lock.lock().expect("first lock");
+            panic!("intentional poison");
+        });
+        let _ = join.join();
+        assert!(
+            w.outbox_lock.is_poisoned(),
+            "test setup failed to poison the lock"
+        );
+        let out = w
+            .promote_run(&run(), &canonical_ns())
+            .expect("defer after poison");
+        assert!(matches!(
+            out,
+            PromoteOutcome::Deferred {
+                reason: DeferReason::LtpBelowFloor { .. }
+            }
+        ));
+        let contents = std::fs::read_to_string(w.outbox_path()).expect("read");
+        assert!(contents.contains("LtpBelowFloor"));
+    }
+
+    // rationale: Cross-module surface invariant — m9 hyphen-munge
+    // composes correctly with m13: a hyphenated namespace arrives, gets
+    // munged, and the CorrelationMemory carries the underscored form.
+    #[test]
+    fn promote_munges_hyphen_namespace_via_m9() {
+        // rationale: Cross-module surface invariant (m9 munge + m13 write)
+        let w = writer(Some(0.20), false);
+        let out = w.promote_run(&run(), "workflow-trace-x").expect("promote");
+        assert!(matches!(out, PromoteOutcome::Written { .. }));
+        let written = w.writer.written.lock().expect("lock");
+        assert_eq!(written.len(), 1);
+        assert_eq!(
+            written[0].namespace, "workflow_trace_x",
+            "namespace must be munged to underscored form"
+        );
+    }
+
+    // rationale: F9 zero-weight — CorrelationMemory's `tensor` field is
+    // structurally `None` in Phase A regardless of pressure band; no
+    // fitness signal leaks via tensor in band-2 either.
+    #[test]
+    fn correlation_memory_tensor_is_none_under_all_pressure_bands() {
+        // rationale: F9 zero-weight (m13 surface)
+        for density in [0.20_f64, 0.05] {
+            let w = writer(Some(density), false);
+            let _ = w.promote_run(&run(), &canonical_ns()).expect("promote");
+            let written = w.writer.written.lock().expect("lock");
+            assert!(
+                !written.is_empty(),
+                "expected a substrate write at density={density}"
+            );
+            for m in written.iter() {
+                assert!(m.tensor.is_none(), "F9: tensor must stay None");
+            }
+        }
+    }
+
+    // rationale: Adversarial input — unknown outcome strings (future m7
+    // variant unsynced with m13) collapse to the "unknown" relevance
+    // bucket (0.1). Failure-soft documentation.
+    #[test]
+    fn unknown_outcome_collapses_to_unknown_relevance() {
+        // rationale: Adversarial input
+        let ns = assert_workflow_trace_namespace(&canonical_ns()).expect("ns");
+        let mut r = run();
+        r.outcome = Some("future_variant_zzz".into());
+        let m = CorrelationMemory::from_row(&r, &ns, false);
+        assert!((m.relevance - 0.1).abs() < 1e-6);
+    }
+
+    // rationale: Anti-property — F-POVM-07 silent-zero-timestamp.
+    // now_ms() returns a positive realistic i64 on production clocks
+    // (> 2024).
+    #[test]
+    fn now_ms_returns_positive_on_well_defined_clock() {
+        // rationale: Anti-property (F-POVM-07 silent-zero-timestamp)
+        let ts = super::now_ms();
+        assert!(
+            ts > 1_700_000_000_000,
+            "now_ms must return realistic 2024+ wall-clock ms, got {ts}"
+        );
+    }
+
+    // rationale: Contract regression — DEFAULT_PROBE_TIMEOUT is the
+    // documented 5s upper bound. Drift detection.
+    #[test]
+    fn default_probe_timeout_is_five_seconds() {
+        // rationale: Contract regression
+        assert_eq!(DEFAULT_PROBE_TIMEOUT, std::time::Duration::from_secs(5));
+    }
+
+    // rationale: Contract regression — CorrelationMemory's `memory_type`
+    // is the stable string "semantic" in Phase A.
+    #[test]
+    fn correlation_memory_memory_type_is_semantic_in_phase_a() {
+        // rationale: Contract regression
+        let ns = assert_workflow_trace_namespace(&canonical_ns()).expect("ns");
+        let m = CorrelationMemory::from_row(&run(), &ns, false);
+        assert_eq!(m.memory_type, "semantic");
     }
 }

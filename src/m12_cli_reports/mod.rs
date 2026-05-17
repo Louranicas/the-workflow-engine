@@ -8,6 +8,20 @@
 //! only (recorded, observed, emitted, cost, outcome, rate). Forbidden
 //! verbs (recommend / optimise / select / route / dispatch / auto) MUST
 //! NOT appear in any rendered output.
+//!
+//! **`let _ = writeln!(out, ...)` discard pattern:** `fmt::Write` for
+//! `String` is infallible per the std::fmt docs — the only error the
+//! trait can return is from `Formatter`s with bounded buffers (e.g.
+//! `&mut [u8]`). Discarding the `Result<(), fmt::Error>` from each
+//! `writeln!` into a `String` is therefore safe and not a silent-failure
+//! pattern. Every such discard in this module is rationale-tagged via
+//! this top-level note (per workspace "no silent discard" rule).
+//!
+//! **F9 zero-weight discipline:** `Option<T>` fields on `WorkflowRunRow`
+//! (`outcome`, `ended_at`, `cost_tokens`) carry signal-present vs
+//! signal-absent semantics. Renderers MUST emit distinct sentinels for
+//! `None` (`open`, `---`) versus explicit zero (`0 tok`, `unknown`
+//! outcome), never collapse `None` to a numeric sentinel.
 
 use std::fmt::Write;
 
@@ -95,6 +109,13 @@ pub fn render_outcome_timeline(runs: &[WorkflowRunRow]) -> String {
 
 /// Render a cost-by-cascade-cluster table. Cluster ids are truncated to
 /// their opaque 6-char hex tail (F11 enforced — never reveal labels).
+///
+/// F9 zero-weight discipline: a row with `cost_tokens == None` is
+/// counted in the `runs` column for its cluster (it IS a run) but its
+/// cost contribution is `0` because there is no cost signal yet — the
+/// additive identity, not a fabricated sentinel. Operators read both
+/// columns together: high `runs` + low `total cost` is the "many rows,
+/// no cost recorded yet" reading, distinct from "many rows, all zero-cost".
 #[must_use]
 pub fn render_cluster_cost_table(runs: &[WorkflowRunRow]) -> String {
     let mut buckets: std::collections::BTreeMap<String, (usize, i64)> =
@@ -102,6 +123,8 @@ pub fn render_cluster_cost_table(runs: &[WorkflowRunRow]) -> String {
     let mut ungrouped = (0_usize, 0_i64);
     for r in runs {
         let cluster = extract_cluster_short(&r.consumer_inputs);
+        // None → 0 contribution (additive identity, NOT silent sentinel).
+        // Run count still increments regardless — see § F9 doc above.
         let cost = r.cost_tokens.unwrap_or(0);
         if let Some(c) = cluster {
             let entry = buckets.entry(c).or_insert((0, 0));
@@ -129,12 +152,29 @@ pub fn render_cluster_cost_table(runs: &[WorkflowRunRow]) -> String {
     out
 }
 
+/// Extract the 6-char tail of a cascade `cluster_id` from a row's
+/// `consumer_inputs` JSON blob. Returns `None` for any of:
+///
+/// - JSON parse failure (malformed / non-JSON blob)
+/// - missing `cascade` discriminant (no cascade observation on this row)
+/// - missing `cluster_id` field
+/// - `cluster_id` not a string
+/// - empty tail after split-on-`_`
+///
+/// Each `None` collapses to "(ungrouped)" in the caller — this is
+/// intentional. F11 (opaque IDs): rendering "(ungrouped)" is the correct
+/// response for "no cluster signal recorded" — never fabricate a label.
+/// `.ok()?` on the JSON parse is load-bearing graceful handling for
+/// operator-supplied corruption (render-as-missing, don't crash).
 fn extract_cluster_short(consumer_inputs: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(consumer_inputs).ok()?;
     let cascade = value.get("cascade")?;
     let cluster_id = cascade.get("cluster_id")?.as_str()?;
     let tail = cluster_id.split('_').next_back()?;
     let short: String = tail.chars().take(6).collect();
+    if short.is_empty() {
+        return None;
+    }
     Some(short)
 }
 
@@ -163,13 +203,27 @@ pub fn render_summary_line(runs: &[WorkflowRunRow]) -> String {
 }
 
 /// Render in machine-readable JSON / NdJson per format.
+///
+/// `WorkflowRunRow` is composed entirely of types `serde_json` can always
+/// serialise; the single failure mode is `fitness_dimension` being NaN
+/// — which would be an upstream F9 violation (the column is `NOT NULL
+/// DEFAULT 0.0` in SQL and only m11 may write it). The fallback `"[]"`
+/// (Json) / row-skip (NdJson) surfaces that catastrophic case visibly
+/// rather than panicking; the contract is "infallible on well-formed
+/// rows".
 #[must_use]
 pub fn render_machine(runs: &[WorkflowRunRow], format: OutputFormat) -> String {
     match format {
         OutputFormat::Table => render_summary_line(runs),
+        // Fallback "[]" indicates a NaN fitness_dimension or similar
+        // structural anomaly — render the empty-sentinel rather than
+        // crash the report so the operator can inspect the DB.
         OutputFormat::Json => serde_json::to_string_pretty(runs).unwrap_or_else(|_| "[]".into()),
         OutputFormat::NdJson => runs
             .iter()
+            // filter_map drops rows that fail to serialise (same NaN
+            // case as Json). Per F9 we never substitute a placeholder
+            // row — dropping is the correct response.
             .filter_map(|r| serde_json::to_string(r).ok())
             .collect::<Vec<_>>()
             .join("\n"),
@@ -303,5 +357,185 @@ mod tests {
         // is pure (returns String).
         let s: String = render_summary_line(&[]);
         assert!(s.starts_with("0 runs recorded"));
+    }
+
+    // ====================================================================
+    // Hardening pass (S1002388) — +10 tests for m12 CLI reports.
+    // Cross-module (m10 Ember gate) + F9 zero-weight + adversarial input
+    // + determinism + contract regression.
+    // ====================================================================
+
+    use crate::m10_ember_ci_gate::{evaluate_string, GateVerdict};
+
+    // rationale: Cross-module surface invariant — render_summary_line
+    // emits a string that passes m10's Ember gate. Strongest m12↔m10
+    // contract.
+    #[test]
+    fn ember_gate_passes_render_summary_line() {
+        // rationale: Cross-module surface invariant
+        let runs = vec![
+            run(1, Some(100), Some("ok"), "{}"),
+            run(2, Some(200), Some("fail"), "{}"),
+            run(3, None, None, "{}"),
+        ];
+        let s = render_summary_line(&runs);
+        assert_eq!(
+            evaluate_string("m12.summary", &s, &[]),
+            GateVerdict::Pass,
+            "m12 output failed Ember gate: {s:?}"
+        );
+    }
+
+    // rationale: Cross-module surface invariant — render_outcome_timeline
+    // passes Ember gate for typical and edge inputs.
+    #[test]
+    fn ember_gate_passes_render_outcome_timeline() {
+        // rationale: Cross-module surface invariant
+        for runs in [
+            vec![],
+            vec![run(1, Some(100), Some("ok"), "{}")],
+            vec![run(1, None, None, "{}")],
+            vec![
+                run(1, Some(100), Some("fail"), "{}"),
+                run(2, Some(200), Some("abort"), "{}"),
+            ],
+        ] {
+            let s = render_outcome_timeline(&runs);
+            assert_eq!(
+                evaluate_string("m12.timeline", &s, &[]),
+                GateVerdict::Pass,
+                "timeline failed Ember gate: {s:?}"
+            );
+        }
+    }
+
+    // rationale: Cross-module surface invariant — render_cost_histogram
+    // passes Ember gate.
+    #[test]
+    fn ember_gate_passes_render_cost_histogram() {
+        // rationale: Cross-module surface invariant
+        let runs = vec![
+            run(1, Some(500), Some("ok"), "{}"),
+            run(2, Some(2_000), Some("ok"), "{}"),
+        ];
+        let s = render_cost_histogram(&runs);
+        assert_eq!(
+            evaluate_string("m12.histogram", &s, &[]),
+            GateVerdict::Pass
+        );
+    }
+
+    // rationale: Cross-module surface invariant — render_cluster_cost_table
+    // passes Ember gate for grouped and ungrouped cases.
+    #[test]
+    fn ember_gate_passes_render_cluster_cost_table() {
+        // rationale: Cross-module surface invariant
+        let ci = r#"{"cascade":{"kind":"cascade","cluster_id":"cascade_cluster_abc123def456","session_range":[0,1]}}"#;
+        let runs = vec![
+            run(1, Some(100), Some("ok"), ci),
+            run(2, Some(200), Some("ok"), "{}"),
+        ];
+        let s = render_cluster_cost_table(&runs);
+        assert_eq!(
+            evaluate_string("m12.cluster_cost", &s, &[]),
+            GateVerdict::Pass
+        );
+    }
+
+    // rationale: Anti-property (F9 zero-weight) — None cost renders as
+    // "---", NEVER as "0 tok" (silent-zero substitution).
+    #[test]
+    fn timeline_none_cost_renders_dashes_not_zero() {
+        // rationale: Anti-property (F9 zero-weight)
+        let runs = vec![run(1, None, Some("ok"), "{}")];
+        let s = render_outcome_timeline(&runs);
+        assert!(s.contains("---"), "None cost must render as dashes: {s}");
+        assert!(!s.contains("0 tok"), "None must not collapse to 0: {s}");
+    }
+
+    // rationale: Anti-property (F9 zero-weight) — explicit 0 cost
+    // renders as "0 tok"; distinct from None (which renders "---").
+    #[test]
+    fn timeline_explicit_zero_cost_renders_as_zero_tok() {
+        // rationale: Anti-property (F9 zero-weight)
+        let runs = vec![run(1, Some(0), Some("ok"), "{}")];
+        let s = render_outcome_timeline(&runs);
+        assert!(s.contains("0 tok"), "explicit zero must render as 0 tok: {s}");
+        // Header has a "---------" separator; we check the data line only.
+        let data_line = s
+            .lines()
+            .find(|l| l.starts_with("2026-"))
+            .expect("data line");
+        assert!(
+            !data_line.contains("---"),
+            "explicit zero must not render as dashes in cost field: {data_line}"
+        );
+    }
+
+    // rationale: Determinism — render_machine NdJson preserves input
+    // row order; output line N serialises input row N.
+    #[test]
+    fn render_machine_ndjson_preserves_input_order() {
+        // rationale: Determinism
+        let runs = vec![
+            run(1, Some(100), Some("ok"), "{}"),
+            run(2, Some(200), Some("fail"), "{}"),
+            run(3, Some(300), Some("abort"), "{}"),
+        ];
+        let s = render_machine(&runs, OutputFormat::NdJson);
+        let lines: Vec<&str> = s.lines().collect();
+        assert_eq!(lines.len(), 3);
+        for (i, line) in lines.iter().enumerate() {
+            let parsed: WorkflowRunRow = serde_json::from_str(line).expect("parse");
+            assert_eq!(parsed.id, runs[i].id, "row order divergence at index {i}");
+        }
+    }
+
+    // rationale: Adversarial input — render_cluster_cost_table must NOT
+    // crash on malformed JSON in consumer_inputs; all such rows fall to
+    // "(ungrouped)" with cost summed.
+    #[test]
+    fn cluster_cost_table_groups_malformed_json_to_ungrouped() {
+        // rationale: Adversarial input
+        let runs = vec![
+            run(1, Some(100), Some("ok"), "not json"),
+            run(2, Some(200), Some("ok"), "[1,2,3]"),
+            run(3, Some(300), Some("ok"), r#"{"unrelated":"key"}"#),
+        ];
+        let s = render_cluster_cost_table(&runs);
+        assert!(s.contains("ungrouped"));
+        assert!(s.contains("600"), "ungrouped total cost must sum: {s}");
+    }
+
+    // rationale: Contract regression (F11 opaque IDs) — m12 truncates
+    // cluster id tail at 6 chars; the full upstream label must not leak.
+    #[test]
+    fn cluster_cost_table_truncates_to_six_chars_max() {
+        // rationale: Contract regression (F11 opaque IDs)
+        let ci = r#"{"cascade":{"kind":"cascade","cluster_id":"cascade_cluster_LONG_REVEAL_TOKEN","session_range":[0,1]}}"#;
+        let runs = vec![run(1, Some(100), Some("ok"), ci)];
+        let s = render_cluster_cost_table(&runs);
+        assert!(!s.contains("LONG"), "F11 leak: full cluster label revealed: {s}");
+        assert!(!s.contains("REVEAL"), "F11 leak: full cluster label revealed: {s}");
+    }
+
+    // rationale: Resource accounting — render_summary_line over 10k
+    // rows produces a single-line output (quadratic-alloc smoke).
+    #[test]
+    fn render_summary_line_handles_ten_thousand_rows() {
+        // rationale: Resource accounting
+        let runs: Vec<WorkflowRunRow> = (0..10_000_i64)
+            .map(|i| {
+                run(
+                    i,
+                    Some(i * 10),
+                    Some(if i % 4 == 0 { "ok" } else { "fail" }),
+                    "{}",
+                )
+            })
+            .collect();
+        let s = render_summary_line(&runs);
+        assert!(s.contains("10000 runs recorded"));
+        assert_eq!(s.lines().count(), 1);
     }
 }

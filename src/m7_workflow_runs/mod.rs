@@ -592,4 +592,184 @@ mod tests {
         let row = find_by_id(&conn, id).expect("find");
         assert!(row.fitness_dimension.abs() < f64::EPSILON, "F9 leak");
     }
+
+    // ====================================================================
+    // Hardening pass (S1002388) — +10 tests for m7 workflow_runs.
+    // F9 zero-weight + concurrency + adversarial input + contract regression.
+    // ====================================================================
+
+    use rusqlite::params as rsq_params;
+
+    use super::{open_database, WorkflowRunRow};
+
+    // rationale: Anti-property (F9 zero-weight on m7 nullable columns) —
+    // open run must round-trip `ended_at = None` and `outcome = None`
+    // after merge + cost update; NEITHER gets fabricated.
+    #[test]
+    fn f9_open_run_keeps_ended_at_and_outcome_as_none_across_merges() {
+        // rationale: Anti-property (F9 zero-weight)
+        let conn = mem();
+        let id = insert_run(&conn, "2026-05-17T00:00:00Z").expect("insert");
+        merge_observation(
+            &conn,
+            id,
+            &ClusterBObservation::BatternStep {
+                battern_id: "battern_x".into(),
+                step_index: 1,
+                duration_ms: 10,
+                outcome: "ok".into(),
+            },
+        )
+        .expect("merge");
+        update_cost_tokens(&conn, id, 500).expect("cost");
+        let row = find_by_id(&conn, id).expect("find");
+        assert!(row.ended_at.is_none(), "F9: ended_at must stay None");
+        assert!(row.outcome.is_none(), "F9: outcome must stay None");
+        assert_eq!(row.cost_tokens, Some(500));
+    }
+
+    // rationale: Anti-property (F9 zero-weight) — cost_tokens never
+    // collapses None→0 through the public API; explicit 0 stays Some(0).
+    #[test]
+    fn f9_cost_tokens_none_distinguishes_from_signal_zero() {
+        // rationale: Anti-property (F9 zero-weight)
+        let conn = mem();
+        let id_none = insert_run(&conn, "2026-05-17T00:00:00Z").expect("ins");
+        let id_zero = insert_run(&conn, "2026-05-17T00:00:01Z").expect("ins");
+        update_cost_tokens(&conn, id_zero, 0).expect("explicit 0");
+        let row_none = find_by_id(&conn, id_none).expect("find");
+        let row_zero = find_by_id(&conn, id_zero).expect("find");
+        assert_eq!(row_none.cost_tokens, None, "no signal");
+        assert_eq!(row_zero.cost_tokens, Some(0), "explicit zero signal");
+        assert_ne!(row_none.cost_tokens, row_zero.cost_tokens, "F9");
+    }
+
+    // rationale: Adversarial input — non-object JSON in consumer_inputs
+    // (e.g., a top-level array) MUST surface JsonPatch error, never
+    // silently corrupt.
+    #[test]
+    fn merge_observation_rejects_non_object_consumer_inputs() {
+        // rationale: Adversarial input
+        let conn = mem();
+        let id = insert_run(&conn, "2026-05-17T00:00:00Z").expect("ins");
+        conn.execute(
+            "UPDATE workflow_runs SET consumer_inputs = ?1 WHERE id = ?2",
+            rsq_params!["[1,2,3]", id],
+        )
+        .expect("manual corrupt");
+        let err = merge_observation(
+            &conn,
+            id,
+            &ClusterBObservation::InjectionChain { chain_id: 1 },
+        )
+        .unwrap_err();
+        assert!(matches!(err, WorkflowError::JsonPatch(_)));
+    }
+
+    // rationale: Boundary — find_open with limit 0 returns empty Vec
+    // (no error).
+    #[test]
+    fn find_open_with_zero_limit_returns_empty() {
+        // rationale: Boundary
+        let conn = mem();
+        let _id = insert_run(&conn, "2026-05-17T00:00:00Z").expect("ins");
+        let rows = find_open(&conn, 0).expect("find_open");
+        assert!(rows.is_empty());
+    }
+
+    // rationale: Boundary — find_open with usize::MAX limit saturates
+    // i64 cast (no overflow).
+    #[test]
+    fn find_open_with_usize_max_limit_saturates_to_i64_max() {
+        // rationale: Boundary
+        let conn = mem();
+        let id = insert_run(&conn, "2026-05-17T00:00:00Z").expect("ins");
+        let rows = find_open(&conn, usize::MAX).expect("find_open");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, id);
+    }
+
+    // rationale: Concurrency / resource accounting — open_database is
+    // idempotent on the same file path (DDL is CREATE IF NOT EXISTS).
+    #[test]
+    fn open_database_is_idempotent_on_same_path() {
+        // rationale: Concurrency / resource accounting
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("test.db");
+        let conn1 = open_database(&path).expect("first open");
+        let _id = insert_run(&conn1, "2026-05-17T00:00:00Z").expect("ins");
+        drop(conn1);
+        let conn2 = open_database(&path).expect("second open");
+        let n: i64 = conn2
+            .query_row("SELECT COUNT(*) FROM workflow_runs", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(n, 1, "DB must persist across open_database calls");
+    }
+
+    // rationale: Determinism + Contract regression — serde JSON round-trip
+    // identity for WorkflowRunRow preserves all fields including F9
+    // zero-weight fitness_dimension.
+    #[test]
+    fn round_trip_workflow_run_row_serde_via_find_by_id() {
+        // rationale: Determinism + Contract regression
+        let conn = mem();
+        let id = insert_run(&conn, "2026-05-17T00:00:00Z").expect("ins");
+        update_cost_tokens(&conn, id, 1234).expect("cost");
+        close_run(&conn, id, "2026-05-17T01:00:00Z", "fail").expect("close");
+        let a = find_by_id(&conn, id).expect("find a");
+        let j = serde_json::to_string(&a).expect("ser");
+        let c: WorkflowRunRow = serde_json::from_str(&j).expect("de");
+        assert_eq!(a.id, c.id);
+        assert_eq!(a.cost_tokens, c.cost_tokens);
+        assert_eq!(a.outcome, c.outcome);
+        assert!((a.fitness_dimension - c.fitness_dimension).abs() < f64::EPSILON);
+    }
+
+    // rationale: Cross-module surface invariant — Outcome wire set is
+    // exactly {ok, fail, abort, unknown}, matching SQL CHECK. Cardinality
+    // 4 is locked (drift detection for future variant additions).
+    #[test]
+    fn outcome_wire_set_matches_sql_check_constraint() {
+        // rationale: Cross-module surface invariant
+        for o in [Outcome::Ok, Outcome::Fail, Outcome::Abort, Outcome::Unknown] {
+            assert_eq!(Outcome::parse(o.as_str()).expect("parse"), o);
+        }
+        let set: std::collections::HashSet<&str> = [
+            Outcome::Ok.as_str(),
+            Outcome::Fail.as_str(),
+            Outcome::Abort.as_str(),
+            Outcome::Unknown.as_str(),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(set.len(), 4);
+    }
+
+    // rationale: Resource accounting / contract regression — close_run
+    // on an already-closed run succeeds; last write wins (UPDATE).
+    #[test]
+    fn close_run_is_idempotent_on_already_closed_run() {
+        // rationale: Resource accounting / contract regression
+        let conn = mem();
+        let id = insert_run(&conn, "2026-05-17T00:00:00Z").expect("ins");
+        close_run(&conn, id, "2026-05-17T01:00:00Z", "ok").expect("close 1");
+        close_run(&conn, id, "2026-05-17T02:00:00Z", "fail").expect("close 2");
+        let row = find_by_id(&conn, id).expect("find");
+        assert_eq!(row.outcome.as_deref(), Some("fail"));
+        assert_eq!(row.ended_at.as_deref(), Some("2026-05-17T02:00:00Z"));
+    }
+
+    // rationale: Anti-property / contract regression — close_run with
+    // empty `ended_at` persists the empty string (DB has no NOT-NULL-
+    // empty check). Regression anchor.
+    #[test]
+    fn close_run_with_empty_ended_at_persists_empty_string() {
+        // rationale: Anti-property / contract regression
+        let conn = mem();
+        let id = insert_run(&conn, "2026-05-17T00:00:00Z").expect("ins");
+        close_run(&conn, id, "", "ok").expect("close");
+        let row = find_by_id(&conn, id).expect("find");
+        assert_eq!(row.ended_at.as_deref(), Some(""));
+        assert_eq!(row.outcome.as_deref(), Some("ok"));
+    }
 }

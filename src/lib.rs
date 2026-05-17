@@ -34,6 +34,7 @@ pub mod m2_stcortex_consumer;
 pub mod m3_injection_db_consumer;
 pub mod m4_cascade;
 pub mod m5_battern;
+pub mod m6_cost;
 pub mod m8_povm_build_prereq;
 
 pub use m4_cascade::{
@@ -43,6 +44,10 @@ pub use m4_cascade::{
 pub use m5_battern::{
     derive_battern_id, BatternError, BatternId, BatternRecord, BatternStepLabel,
     BatternStepObservation, BatternStepRecord, BatternStepRecordConfig,
+};
+pub use m6_cost::{
+    ContextCostError, ContextCostRecord, ContextCostRecordConfig, CostBand, ExplorationBaseline,
+    SessionCostRecord, WorkflowOutcome,
 };
 pub mod m9_watcher_namespace_guard;
 pub mod m10_ember_ci_gate;

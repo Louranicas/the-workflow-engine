@@ -48,6 +48,9 @@ pub mod m30_bank;
 pub mod m31_selector;
 pub mod m32_dispatcher;
 pub mod m33_verifier;
+pub mod m40_nexus_emit;
+pub mod m41_lcm_rpc;
+pub mod m42_stcortex_emit;
 pub mod m8_povm_build_prereq;
 
 pub use m4_cascade::{
@@ -114,6 +117,17 @@ pub use m32_dispatcher::{
 pub use m33_verifier::{
     aggregate as aggregate_verifiers, AggregateVerdict, Verifier, VerifierError,
     VerifierKind, VerifierVerdict,
+};
+pub use m40_nexus_emit::{
+    build_event as build_nexus_event, HttpNexusClient, NexusClient, NexusEmitError,
+    NexusEvent, DEFAULT_NEXUS_URL, DEFAULT_PUSH_TIMEOUT,
+};
+pub use m41_lcm_rpc::{
+    HttpLcmClient, LcmClient, LcmLoopCreateParams, LcmLoopCreateResult, LcmRpcError,
+    DEFAULT_LCM_URL, DEFAULT_RPC_TIMEOUT, RPC_METHOD,
+};
+pub use m42_stcortex_emit::{
+    emit_feedback, outcome_summary, signal_for_outcome, HebbianSignal, SubstrateEmitError,
 };
 pub mod m9_watcher_namespace_guard;
 pub mod m10_ember_ci_gate;

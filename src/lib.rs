@@ -30,3 +30,9 @@
 #![allow(clippy::doc_markdown)]
 
 pub mod m8_povm_build_prereq;
+pub mod m9_watcher_namespace_guard;
+
+pub use m9_watcher_namespace_guard::{
+    assert_workflow_trace_namespace, munge_hyphen_slug, NamespaceViolation,
+    ValidatedNamespace, WORKFLOW_TRACE_NS_PREFIX,
+};

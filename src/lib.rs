@@ -44,6 +44,10 @@ pub mod m20_prefixspan;
 pub mod m21_variant_builder;
 pub mod m22_kmeans;
 pub mod m23_proposer;
+pub mod m30_bank;
+pub mod m31_selector;
+pub mod m32_dispatcher;
+pub mod m33_verifier;
 pub mod m8_povm_build_prereq;
 
 pub use m4_cascade::{
@@ -97,6 +101,19 @@ pub use m22_kmeans::{
 pub use m23_proposer::{
     build_proposal, compose_proposals, ProposerError, WorkflowProposal,
     PROPOSAL_F2_THRESHOLD,
+};
+pub use m30_bank::{AcceptedWorkflow, BankError, CuratedBank, DEFAULT_SUNSET_DAYS};
+pub use m31_selector::{
+    select_top_k, ScoreComponents, ScoredCandidate, SelectorConfig, SelectorError,
+    DEFAULT_ALPHA, DEFAULT_BETA, DEFAULT_DELTA, DEFAULT_GAMMA, RECENCY_HALF_LIFE_DAYS,
+};
+pub use m32_dispatcher::{
+    ConductorClient, ConductorDispatcher, DispatchOutcome, DispatcherError,
+    EscapeSurfaceProfile, HumanAcceptanceSignature, RefusalReason,
+};
+pub use m33_verifier::{
+    aggregate as aggregate_verifiers, AggregateVerdict, Verifier, VerifierError,
+    VerifierKind, VerifierVerdict,
 };
 pub mod m9_watcher_namespace_guard;
 pub mod m10_ember_ci_gate;

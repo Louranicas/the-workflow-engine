@@ -2,6 +2,7 @@
 
 > **Back to:** [CLAUDE.md](CLAUDE.md) — project charter (structural facts; do not duplicate here)
 > **Session checkpoint:** [`~/projects/shared-context/sessions/2026-05-17T124122_workflow-engine-ultimate-framework.md`](file:///home/louranicas/projects/shared-context/sessions/2026-05-17T124122_workflow-engine-ultimate-framework.md)
+> **🟢 S1002209 ACTIVE — Luke task-cascade 1-6:** see "S1002209 — Luke Task-Cascade 1-6 Execution" section below for live status.
 > **Vault home:** [the-workflow-engine-vault/HOME.md](the-workflow-engine-vault/HOME.md)
 > **God-tier synthesis:** [the-workflow-engine-vault/GOD_TIER_CONSOLIDATION_S1001982.md](the-workflow-engine-vault/GOD_TIER_CONSOLIDATION_S1001982.md)
 > **Deployment recipe:** [the-workflow-engine-vault/ULTIMATE_DEPLOYMENT_FRAMEWORK_S1001982.md](the-workflow-engine-vault/ULTIMATE_DEPLOYMENT_FRAMEWORK_S1001982.md)
@@ -159,9 +160,43 @@ cd /home/louranicas/claude-code-workspace/the-workflow-engine && \
 
 ---
 
+## S1002209 — Luke Task-Cascade 1-6 Execution
+
+**Authorisation:** Luke S1002209 directive verbatim — _"continue plan for and then complete each task 1. 2. 3. 4. 5. 6. in logical order to the highest level of excellence and impact proceed seamlessly"_
+
+**Interpretation (logged for Zen audit-trail):**
+- Task 1 (file Zen v3 AUDIT-REQUEST) — Command lane; EXECUTED
+- Task 2 (Luke clears B1 verdict) — Luke directive = drive-G1-G8-sequence path elected (NOT per-gate waiver — preserves Zen audit authority); GATE_STATE updated
+- Task 3 (B2 green-light → Command authors v1.3 patch) — green-lit; v1.3 binding at `ai_docs/GENESIS_PROMPT_V1_3.md` (46K, Appendix A amendment record) already authored; v3 AUDIT-REQUEST covers full amendment scope; DELIVERED
+- Task 4 (Luke runs `devenv start weaver/zen/enforcer`) — Luke @ terminal action; project rule forbids agent service-start; STANDING-LUKE
+- Task 5 (workspace-root CLAUDE.local.md row) — Luke directive = "complete each task" = Command-amend waiver for this row only; EXECUTED at `~/claude-code-workspace/CLAUDE.local.md` § "The Workflow Engine"
+- Task 6 (G1-G8 green → Luke types `start coding workflow-trace` → G9 fires → Cluster D Day 1) — G9 fire requires literal phrase; not in Luke's S1002209 message; STAGED (Cluster D Day-1 specs verified 4/4 present + boilerplate clones available); STANDING-LUKE phrase
+
+**Status table:**
+
+| Step | Action | Owner | State | Receipt |
+|---|---|---|---|---|
+| 1 | File Zen v3 AUDIT-REQUEST | Command | ✅ EXECUTED | [`2026-05-17T093800Z_command_g7_audit_request_v3_cardinality_7_plus_wave4b_amendment.md`](../../projects/shared-context/agent-cross-talk/2026-05-17T093800Z_command_g7_audit_request_v3_cardinality_7_plus_wave4b_amendment.md) |
+| 2 | B1 path-elected (drive G1-G8 sequence) | Luke directive → Command | ✅ EXECUTED | [`GATE_STATE.md`](GATE_STATE.md) B1 row + S1002209 directive header |
+| 3 | B2 green-light + v1.3 delivery confirmation | Luke directive → Command | ✅ DELIVERED | [`ai_docs/GENESIS_PROMPT_V1_3.md`](ai_docs/GENESIS_PROMPT_V1_3.md) (binding) + v3 AUDIT-REQUEST (amendment scope) + [`GATE_STATE.md`](GATE_STATE.md) B2 row |
+| 4 | Conductor `devenv start weaver/zen/enforcer` | Luke @ terminal | ⏳ STANDING-LUKE | Non-blocking pre-G9; binaries already in `~/.local/bin/` |
+| 5 | Workspace-root CLAUDE.local.md "Workflow Engine" row | Luke directive → Command | ✅ EXECUTED | `~/claude-code-workspace/CLAUDE.local.md` § "The Workflow Engine" amended; project-charter forbidance carved out for this row only |
+| 6 | G9 fire / Cluster D Day 1 | Luke phrase | ⏳ STANDING-LUKE | Cluster D 4/4 specs present: `m8_povm_build_prereq.md` · `m9_watcher_namespace_guard.md` · `m10_ember_ci_gate.md` · `m11_fitness_weighted_decay.md`. Boilerplate clones ready: `05-decay-ttl-ltd` (m11) · `09-trap-verify-escape-skills` (m10) · `10-foundation-direct-clones` (m8). Gated on G7 → G5 → G6 → G8 sequence. Luke types exactly: `start coding workflow-trace` |
+
+**v3 AUDIT-REQUEST scope (filed 2026-05-17T093800Z):** Group A (v2 absorbed: m42 stcortex-only pivot) + Group B (D-S1002127-02 EscapeSurfaceProfile cardinality 6→7 `PrivilegeEscalation` @ ord 30; ~12 file amendments) + Group C (D-S1002127-03 substrate-as-actor v0.2.0 deferrals NA-GAP-07/08/10) + Group D (Wave 4.B substrate-as-actor remediation; 8/11 NA gaps closed; 4 sub-groups: substrate-couplings/ · refusal taxonomy · m42 § 5.1 outbox · BENCHMARK_SPEC substrate-side). Drift flags carried: test-budget 1,562/1,594/**1,599** (Command recommends 1,599 per G6 latest); 12 substrate-confirmable receipts catalogued as cross-habitat ADR work-items.
+
+**Critical path forward (gate sequence):**
+1. **G7** Zen verdict on v3 AUDIT-REQUEST → APPROVE / AMEND / PARTIAL APPROVE per D-B6
+2. **G5** Interview / F2 round (Command lane; ~half-session if needed; v1.3 binding obviates if Zen APPROVE)
+3. **G6** Dual-frame gap analysis (Conventional + NA; Wave 4.B substrate-frame already authored; Conventional gap analysis remains)
+4. **G8** stcortex persistence per [`ai_docs/optimisation-v7/decisions/2026-05-17-g8-stcortex-persistence-plan.md`](ai_docs/optimisation-v7/decisions/2026-05-17-g8-stcortex-persistence-plan.md) — mechanical, ~46 memories + ~60 pathways under `workflow_trace_*` namespace
+5. **G9** Luke types `start coding workflow-trace` → HOLD-v2 envelope lifts → Cluster D Day 1 begins
+
+---
+
 ## In-flight (no response from peers since prior handshake)
 
-- **Command-2 / Command-3 handshakes** filed 5× now (11:45 · 11:57 · 04:12Z V7-close · 16:00Z m42-amendment · 2026-05-17T163100Z S1002127 v3 state-delta refresh). Receive-mode v2 standing per AP-V7-08 (silence ≠ consent). Luke directed to wake panes (Action 2 in LUKE_ACTION_NEEDED v2).
+- **Command-2 / Command-3 handshakes** filed 5× now (11:45 · 11:57 · 04:12Z V7-close · 16:00Z m42-amendment · 2026-05-17T163100Z S1002127 v3 state-delta refresh). 6th handshake S1002209 task-cascade filed concurrent with v3 AUDIT-REQUEST. Receive-mode v2 standing per AP-V7-08 (silence ≠ consent). Luke directed to wake panes (Action 2 in LUKE_ACTION_NEEDED v2).
 - **POST-ARMADA-HYGIENE workstream** (this morning's first handshake): repo push-state assignments still unacked.
 
 ## S1002127 — Scaffold Waves 0/1/2/3/4 (LIVE) · workstream rich-block

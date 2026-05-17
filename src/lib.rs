@@ -30,6 +30,7 @@
 #![allow(clippy::doc_markdown)]
 
 pub mod m1_atuin_consumer;
+pub mod m3_injection_db_consumer;
 pub mod m8_povm_build_prereq;
 pub mod m9_watcher_namespace_guard;
 pub mod m10_ember_ci_gate;
@@ -37,9 +38,14 @@ pub mod m11_fitness_weighted_decay;
 pub mod user_facing_strings;
 
 pub use m1_atuin_consumer::{
-    canonical_default_path, db_path_exists, expand_tilde, fallback_subprocess_ingest,
+    canonical_default_path, expand_tilde, fallback_subprocess_ingest,
     open_readonly as open_atuin_readonly, AtuinConsumer, AtuinConsumerConfig,
     AtuinConsumerError, AtuinHistoryRow, PageIter, PageResult, SessionId,
+};
+pub use m3_injection_db_consumer::{
+    open_readonly as open_injection_db_readonly, parse_causal_chain_row, parse_chain_type,
+    parse_consent, CausalChainRow, ChainId, ChainLabel, ChainType, ConsentLevel,
+    InjectionDbConfig, InjectionDbConsumer, InjectionDbError,
 };
 
 pub use m9_watcher_namespace_guard::{

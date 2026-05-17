@@ -29,11 +29,18 @@
 // reference, not the rustdoc).
 #![allow(clippy::doc_markdown)]
 
+pub mod m1_atuin_consumer;
 pub mod m8_povm_build_prereq;
 pub mod m9_watcher_namespace_guard;
 pub mod m10_ember_ci_gate;
 pub mod m11_fitness_weighted_decay;
 pub mod user_facing_strings;
+
+pub use m1_atuin_consumer::{
+    canonical_default_path, db_path_exists, expand_tilde, fallback_subprocess_ingest,
+    open_readonly as open_atuin_readonly, AtuinConsumer, AtuinConsumerConfig,
+    AtuinConsumerError, AtuinHistoryRow, PageIter, PageResult, SessionId,
+};
 
 pub use m9_watcher_namespace_guard::{
     assert_workflow_trace_namespace, munge_hyphen_slug, NamespaceViolation,

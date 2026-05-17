@@ -30,6 +30,9 @@ tracing = "0.1"
 # m10 Ember CI gate — RFC 3339 timestamps for the allowlist TSV.
 # Chosen over `chrono` per GOD_TIER_RUST rule 18.
 time = { version = "0.3", features = ["parsing", "formatting", "macros"] }
+# m1 atuin consumer + m3 injection.db consumer — read-only SQLite WAL.
+# `bundled` ships libsqlite3 source so we don't depend on the host's lib.
+rusqlite = { version = "0.33", features = ["bundled"] }
 
 [build-dependencies]
 # Build script is intentionally minimal (env-var-only per m8 spec § 10);

@@ -41,6 +41,9 @@ pub mod m13_stcortex_writer;
 pub mod m14_lift;
 pub mod m15_pressure;
 pub mod m20_prefixspan;
+pub mod m21_variant_builder;
+pub mod m22_kmeans;
+pub mod m23_proposer;
 pub mod m8_povm_build_prereq;
 
 pub use m4_cascade::{
@@ -82,6 +85,18 @@ pub use m15_pressure::{
 pub use m20_prefixspan::{
     mine_sequences, MaxGap, MinSupport, MinerError, Pattern, StepToken, DEFAULT_MAX_GAP,
     DEFAULT_MAX_LENGTH, MIN_SUPPORT_FLOOR,
+};
+pub use m21_variant_builder::{
+    build_variants, MutationKind, VariantBuilderError, WorkflowVariant,
+    MAX_VARIANTS_PER_PATTERN,
+};
+pub use m22_kmeans::{
+    kmeans, ClusteredPoint, KMeansConfig, KMeansError, DEFAULT_CONVERGENCE_EPSILON,
+    DEFAULT_MAX_ITERATIONS,
+};
+pub use m23_proposer::{
+    build_proposal, compose_proposals, ProposerError, WorkflowProposal,
+    PROPOSAL_F2_THRESHOLD,
 };
 pub mod m9_watcher_namespace_guard;
 pub mod m10_ember_ci_gate;

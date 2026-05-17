@@ -18,6 +18,12 @@ pub use step_label::BatternStepLabel;
 
 use crate::m4_cascade::{cluster_id::fnv1a_64, AtuinStep};
 
+/// Minimum step count for a Battern observation to be considered
+/// `is_complete = true` in [`BatternStepRecord::summarise`]. Matches the
+/// per-spec floor (also the default of `BatternStepRecordConfig::min_steps`)
+/// — extracted from the previously-hardcoded `2` for documentability.
+pub const MIN_COMPLETE_STEPS: usize = 2;
+
 /// Opaque identifier for one Battern execution.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BatternId(pub String);
@@ -212,10 +218,17 @@ impl BatternStepRecord {
             }
             let first_ts = group.first().map_or(0, |s| s.ts_ns);
             let battern_id = derive_battern_id(first_ts);
+            // Hardening: use saturating arithmetic on `recorded_at_ms`-vs-`last.ts_ns`
+            // diff. Plain `-` previously underflowed on test inputs where
+            // `last.ts_ns` was below recorded_at_ms (synthetic timestamps with
+            // tiny ts_ns vs real-clock ms recorded_at). saturating_mul +
+            // saturating_sub make the heuristic well-defined across the entire
+            // i64 range without changing observable behaviour at habitat scale.
+            let wallclock_ns = recorded_at_ms.saturating_mul(1_000_000);
             let is_partial = battern_idx + 1 == total
                 && group
                     .last()
-                    .is_some_and(|last| recorded_at_ms.saturating_mul(1_000_000) - last.ts_ns < timeout_ns / 2);
+                    .is_some_and(|last| wallclock_ns.saturating_sub(last.ts_ns) < timeout_ns / 2);
             for (step_index, step) in group.iter().enumerate() {
                 let next_ts = group.get(step_index + 1).map_or(step.ts_ns, |n| n.ts_ns);
                 let elapsed_ns = next_ts.saturating_sub(step.ts_ns).max(0);
@@ -240,6 +253,10 @@ impl BatternStepRecord {
     /// `observations` MUST all share the same `battern_id`; a precondition
     /// the caller arranges. The function does not validate this and uses
     /// the first id encountered.
+    ///
+    /// `is_complete` is `true` iff: no observation is marked partial AND
+    /// `total_steps >= MIN_COMPLETE_STEPS` (the per-spec floor; matches
+    /// the default `BatternStepRecordConfig::min_steps`).
     #[must_use]
     pub fn summarise(observations: &[BatternStepObservation]) -> BatternRecord {
         if observations.is_empty() {
@@ -266,7 +283,7 @@ impl BatternStepRecord {
             failed_steps,
             total_duration_ms,
             is_partial,
-            is_complete: !is_partial && total_steps >= 2,
+            is_complete: !is_partial && total_steps >= MIN_COMPLETE_STEPS,
         }
     }
 }
@@ -473,5 +490,154 @@ mod tests {
         let r = rec();
         let s = format!("{r:?}");
         assert!(s.contains("BatternStepRecord"));
+    }
+
+    // ---- Hardening pass: anti-property + adversarial input (10) -----------
+
+    // rationale: Boundary — i64::MAX timestamps survive observe() without
+    // arithmetic overflow in the is_partial heuristic.
+    #[test]
+    fn observe_does_not_panic_on_i64_max_timestamps() {
+        let r = rec();
+        let steps = vec![
+            step(i64::MAX - 10, "cc-dispatch A", "s1"),
+            step(i64::MAX - 5, "cc-health", "s1"),
+        ];
+        let _obs = r.observe(&steps);
+    }
+
+    // rationale: Boundary — i64::MIN timestamps survive observe() (saturating
+    // arithmetic prevents overflow in the recorded_at vs ts_ns diff).
+    #[test]
+    fn observe_does_not_panic_on_i64_min_timestamps() {
+        let r = rec();
+        let steps = vec![
+            step(i64::MIN, "cc-dispatch A", "s1"),
+            step(i64::MIN + 1, "cc-health", "s1"),
+        ];
+        let _obs = r.observe(&steps);
+    }
+
+    // rationale: Anti-property F1 — battern_id is opaque hex; even when the
+    // first dispatch ts carries a meaningful semantic shape (round number),
+    // the hash output is hex-only.
+    #[test]
+    fn battern_id_no_semantic_leak_for_round_number_timestamps() {
+        let id = derive_battern_id(1_700_000_000_000_000_000);
+        let s = format!("{id}");
+        // Strip prefix, assert pure hex (no `1700`, `000`, etc. as substrings
+        // would be valid hex characters, but we assert structural hex-only).
+        let suffix = &s["battern_".len()..];
+        assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // rationale: Determinism — same input ts produces same id across many
+    // calls, even when interleaved with other derivations.
+    #[test]
+    fn battern_id_stable_under_interleaved_derivation() {
+        let target = derive_battern_id(42);
+        for noise in 0..1000_i64 {
+            let _ = derive_battern_id(noise * 17 + 1);
+        }
+        assert_eq!(derive_battern_id(42), target);
+    }
+
+    // rationale: Anti-property F1 — observe records keep step_label as None
+    // for unrecognised commands; never a placeholder. Tested with many
+    // adversarial commands.
+    #[test]
+    fn observe_preserves_none_for_many_unrecognised_commands() {
+        let r = rec();
+        let steps = vec![
+            step(1, "cc-dispatch A", "s1"),
+            step(2, "unknown-1", "s1"),
+            step(3, "unknown-2", "s1"),
+            step(4, "unknown-3", "s1"),
+            step(5, "unknown-4", "s1"),
+        ];
+        let obs = r.observe(&steps);
+        let nones = obs.iter().filter(|o| o.step_label.is_none()).count();
+        assert!(nones >= 4, "F1 preservation broken: only {nones} Nones");
+    }
+
+    // rationale: Boundary battern-boundary rule — `cc-dispatch` opens a new
+    // battern ONLY IF the current battern already saw a dispatch. A
+    // Design→Dispatch transition stays in ONE battern.
+    #[test]
+    fn boundary_design_then_dispatch_stays_in_one_battern() {
+        let r = rec();
+        let steps = vec![
+            step(1_000_000_000, "rg foo", "s1"),
+            step(2_000_000_000, "cc-dispatch ALPHA", "s1"),
+            step(3_000_000_000, "cc-health", "s1"),
+        ];
+        let obs = r.observe(&steps);
+        // All three observations should share one battern_id.
+        let ids: std::collections::HashSet<_> =
+            obs.iter().map(|o| o.battern_id.clone()).collect();
+        assert_eq!(ids.len(), 1, "Design→Dispatch should not split battern");
+    }
+
+    // rationale: Boundary battern-boundary rule — a SECOND dispatch
+    // (Dispatch→Gate→Dispatch) opens a NEW battern.
+    #[test]
+    fn boundary_second_dispatch_opens_new_battern() {
+        let r = rec();
+        let steps = vec![
+            step(1_000_000_000, "cc-dispatch A", "s1"),
+            step(2_000_000_000, "cc-health", "s1"),
+            step(3_000_000_000, "cc-dispatch B", "s1"),
+            step(4_000_000_000, "cc-health", "s1"),
+        ];
+        let obs = r.observe(&steps);
+        let ids: std::collections::HashSet<_> =
+            obs.iter().map(|o| o.battern_id.clone()).collect();
+        assert_eq!(ids.len(), 2, "second dispatch must open a new battern");
+    }
+
+    // rationale: Anti-property F11 — battern_id MUST NOT contain any
+    // human-meaningful substring, even when input commands are semantically
+    // loaded.
+    #[test]
+    fn battern_id_does_not_leak_dispatch_command_substring() {
+        let r = rec();
+        let steps = vec![
+            step(1_000_000_000, "cc-dispatch ALPHA-LEFT", "s1"),
+            step(2_000_000_000, "cc-health", "s1"),
+        ];
+        let obs = r.observe(&steps);
+        let id = obs[0].battern_id.as_str();
+        for forbidden in ["ALPHA", "LEFT", "dispatch", "health", "cc-"] {
+            assert!(!id.contains(forbidden), "F11 leak: {forbidden:?} in {id:?}");
+        }
+    }
+
+    // rationale: Cross-module surface invariant — exported
+    // MIN_COMPLETE_STEPS matches BatternStepRecordConfig::default().min_steps.
+    #[test]
+    fn min_complete_steps_matches_default_min_steps() {
+        let cfg = BatternStepRecordConfig::default();
+        assert_eq!(super::MIN_COMPLETE_STEPS, cfg.min_steps);
+    }
+
+    // rationale: Determinism — same input twice produces equal observations
+    // (apart from recorded_at_ms wall-clock skew).
+    #[test]
+    fn observe_is_deterministic_on_structural_fields() {
+        let r = rec();
+        let steps = vec![
+            step(1, "cc-dispatch A", "s1"),
+            step(2, "cc-health", "s1"),
+        ];
+        let obs_a = r.observe(&steps);
+        let obs_b = r.observe(&steps);
+        assert_eq!(obs_a.len(), obs_b.len());
+        for (a, b) in obs_a.iter().zip(obs_b.iter()) {
+            assert_eq!(a.battern_id, b.battern_id);
+            assert_eq!(a.step_index, b.step_index);
+            assert_eq!(a.step_label, b.step_label);
+            assert_eq!(a.duration_ms, b.duration_ms);
+            assert_eq!(a.exit_code, b.exit_code);
+        }
     }
 }

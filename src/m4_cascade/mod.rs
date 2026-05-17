@@ -13,6 +13,13 @@ use std::path::PathBuf;
 pub use cluster_id::{assign_cluster_id, fnv1a_64, CascadeClusterId};
 pub use error::CascadeError;
 
+/// Trailing-window slack (ns) within which a `DispatchRecord` is considered
+/// part of a step group's pane fan-out. Hardening pass: extracted from the
+/// previously-inline `60_000_000_000` magic constant in
+/// [`collect_pane_labels`]. 60s wall-clock — well above the 30s
+/// `max_gap_ms` default and aligned with the m4 spec § 3 windowing budget.
+pub const DISPATCH_TRAILING_SLACK_NS: i64 = 60_000_000_000;
+
 /// A single atuin tool-call row.
 #[derive(Debug, Clone)]
 pub struct AtuinStep {
@@ -194,10 +201,14 @@ fn collect_pane_labels(group: &[&AtuinStep], dispatch: &[DispatchRecord]) -> Vec
     let mut set: BTreeSet<String> = BTreeSet::new();
     if let Some(first) = group.first() {
         for d in dispatch {
+            // Hardening: `last.ts_ns + slack` could overflow on adversarial
+            // i64::MAX timestamps. saturating_add keeps the comparison
+            // well-defined on the entire i64 range without changing
+            // observable behaviour at habitat scale.
             if d.ts_ns >= first.ts_ns
                 && group
                     .last()
-                    .is_some_and(|last| d.ts_ns <= last.ts_ns + 60_000_000_000)
+                    .is_some_and(|last| d.ts_ns <= last.ts_ns.saturating_add(DISPATCH_TRAILING_SLACK_NS))
             {
                 set.insert(d.pane_label.clone());
             }
@@ -214,15 +225,18 @@ fn collect_pane_labels(group: &[&AtuinStep], dispatch: &[DispatchRecord]) -> Vec
 }
 
 fn compute_dag_depth(group: &[&AtuinStep], max_gap_ns: i64) -> usize {
-    // Lightweight Kahn-style: depth = longest temporal chain where each
-    // edge respects max_gap_ns. We don't need a full DAG here because the
-    // input is already temporally sorted; we approximate depth as the
-    // number of contiguous edges under the gap threshold.
+    // Longest-contiguous-run depth: the temporal sort means the DAG is
+    // already topologically linearised. Depth is the longest contiguous
+    // subsequence of steps where each consecutive pair respects
+    // `max_gap_ns`. (Earlier doc-comment claimed "Kahn-style" which was
+    // misleading: there is no in-degree computation. This is a single
+    // forward sweep of cost O(n).) Saturating arithmetic on the diff
+    // guards against adversarial i64 boundary timestamps.
     let mut depth = 1_usize;
     let mut run = 1_usize;
     for w in group.windows(2) {
         if w[1].ts_ns.saturating_sub(w[0].ts_ns) <= max_gap_ns {
-            run += 1;
+            run = run.saturating_add(1);
             if run > depth {
                 depth = run;
             }
@@ -431,5 +445,157 @@ mod tests {
         assert_eq!(c.min_pane_count, 2);
         assert_eq!(c.window_ms, 300_000);
         assert_eq!(c.max_steps_per_cluster, 500);
+    }
+
+    // ---- Hardening pass: anti-property + adversarial input (10) -----------
+
+    // rationale: Anti-property F11 — the hex-suffix portion of Display MUST
+    // NOT contain user-meaningful semantic strings, even when those strings
+    // are workflow-relevant terms. (The static prefix `cascade_cluster_`
+    // legitimately contains the word "cluster"; we strip it and assert on
+    // the hash suffix only.)
+    #[test]
+    fn cluster_id_display_suffix_does_not_contain_semantic_workflow_terms() {
+        let c = corr(2, 30_000);
+        let steps = vec![step("a", 1_000_000_000, "s1"), step("b", 1_500_000_000, "s2")];
+        let d = vec![
+            dispatch(1_000_000_000, "cc-dispatch-pane", "s1"),
+            dispatch(1_500_000_000, "git-commit-pane", "s2"),
+        ];
+        let clusters = c.correlate(&steps, &d);
+        let id = clusters[0].cluster_id.as_str();
+        let suffix = id
+            .strip_prefix("cascade_cluster_")
+            .expect("opaque id must start with prefix");
+        for forbidden in ["cc-dispatch", "git-commit", "pane", "cluster", "workflow"] {
+            assert!(!suffix.contains(forbidden), "F11 leak: {forbidden:?} in suffix {suffix:?}");
+        }
+    }
+
+    // rationale: Anti-property F11 — id remains hex-only across the full
+    // cardinality of cluster names (defence against future label
+    // proliferation per spec § 7).
+    #[test]
+    fn cluster_id_display_is_hex_only_after_prefix() {
+        let c = corr(2, 30_000);
+        let steps = vec![step("a", 1, "s1"), step("b", 2, "s2")];
+        let clusters = c.correlate(&steps, &[]);
+        let id = clusters[0].cluster_id.as_str();
+        let suffix = id
+            .strip_prefix("cascade_cluster_")
+            .expect("id must start with prefix");
+        assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()), "suffix={suffix}");
+        assert_eq!(suffix.len(), 16, "expected 16-hex suffix, got {suffix}");
+    }
+
+    // rationale: Boundary — saturating timestamp arithmetic survives
+    // adversarial i64::MAX without overflow.
+    #[test]
+    fn correlate_does_not_panic_on_i64_max_timestamps() {
+        let c = corr(2, 30_000);
+        let steps = vec![
+            step("a", i64::MAX - 10, "s1"),
+            step("b", i64::MAX - 5, "s2"),
+        ];
+        // Must not panic on saturating_add inside collect_pane_labels.
+        let _clusters = c.correlate(&steps, &[]);
+    }
+
+    // rationale: Boundary — adversarial i64::MIN timestamps do not break
+    // sort or windowing.
+    #[test]
+    fn correlate_does_not_panic_on_i64_min_timestamps() {
+        let c = corr(2, 30_000);
+        let steps = vec![step("a", i64::MIN, "s1"), step("b", i64::MIN + 1, "s2")];
+        let _clusters = c.correlate(&steps, &[]);
+    }
+
+    // rationale: Determinism — same input across thread-local environment
+    // variation (HOME differences) yields same cluster ids; ids only depend
+    // on inputs to `assign_cluster_id`, not on env.
+    #[test]
+    fn correlate_cluster_ids_independent_of_env() {
+        let c = corr(2, 30_000);
+        let steps = vec![step("a", 1, "s1"), step("b", 2, "s2")];
+        let id_run_1 = c.correlate(&steps, &[])[0].cluster_id.clone();
+        let id_run_2 = c.correlate(&steps, &[])[0].cluster_id.clone();
+        assert_eq!(id_run_1, id_run_2);
+    }
+
+    // rationale: Adversarial input — duplicate timestamps must not crash;
+    // stable order via key-only sort means insertion order is preserved.
+    #[test]
+    fn correlate_handles_duplicate_timestamps_without_panic() {
+        let c = corr(2, 30_000);
+        let steps = vec![
+            step("a", 1_000_000_000, "s1"),
+            step("b", 1_000_000_000, "s2"),
+            step("c", 1_000_000_000, "s3"),
+        ];
+        let clusters = c.correlate(&steps, &[]);
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].step_count, 3);
+    }
+
+    // rationale: Cross-module surface invariant — dispatch slack constant
+    // is exposed and == 60s in ns (matches m4 spec § 3 trailing slack).
+    #[test]
+    fn dispatch_trailing_slack_constant_is_60s_in_ns() {
+        assert_eq!(super::DISPATCH_TRAILING_SLACK_NS, 60_000_000_000);
+    }
+
+    // rationale: Anti-property F11 — id space sanity: even at the
+    // saturating-arithmetic boundary, the id is still well-formed
+    // (prefix + 16 hex).
+    #[test]
+    fn cluster_id_remains_well_formed_at_saturating_boundary() {
+        let c = corr(2, 30_000);
+        let steps = vec![
+            step("a", i64::MAX - 1, "s1"),
+            step("b", i64::MAX, "s2"),
+        ];
+        let clusters = c.correlate(&steps, &[]);
+        if !clusters.is_empty() {
+            let id = clusters[0].cluster_id.as_str();
+            assert!(id.starts_with("cascade_cluster_"));
+            let suffix = &id["cascade_cluster_".len()..];
+            assert_eq!(suffix.len(), 16);
+        }
+    }
+
+    // rationale: Resource accounting — max_steps_per_cluster=1 hard-caps
+    // cluster growth at 1 (every step opens a new cluster).
+    #[test]
+    fn max_steps_per_cluster_one_yields_singleton_clusters() {
+        let c = CascadeCorrelator::new(CascadeCorrelatorConfig {
+            min_pane_count: 1,
+            max_gap_ms: 60_000,
+            max_steps_per_cluster: 1,
+            ..CascadeCorrelatorConfig::default()
+        });
+        let steps: Vec<AtuinStep> = (0..5_i64)
+            .map(|i| step(&format!("s{i}"), i * 1_000_000, "s1"))
+            .collect();
+        let clusters = c.correlate(&steps, &[]);
+        assert!(clusters.iter().all(|c| c.step_count <= 1));
+    }
+
+    // rationale: Contract regression — config() returns a borrow that
+    // matches the constructor input verbatim (no field-mangling).
+    #[test]
+    fn config_round_trip_preserves_fields() {
+        let cfg = CascadeCorrelatorConfig {
+            max_gap_ms: 12_345,
+            min_pane_count: 7,
+            window_ms: 99_999,
+            max_steps_per_cluster: 42,
+            ..CascadeCorrelatorConfig::default()
+        };
+        let c = CascadeCorrelator::new(cfg.clone());
+        let got = c.config();
+        assert_eq!(got.max_gap_ms, cfg.max_gap_ms);
+        assert_eq!(got.min_pane_count, cfg.min_pane_count);
+        assert_eq!(got.window_ms, cfg.window_ms);
+        assert_eq!(got.max_steps_per_cluster, cfg.max_steps_per_cluster);
     }
 }

@@ -123,7 +123,13 @@ impl ExplorationBaseline {
     }
 
     /// Classify a cost relative to the current baseline. Returns `None`
-    /// during bootstrap (`n < bootstrap_n`).
+    /// during bootstrap (`n < bootstrap_n`) or when the baseline is the
+    /// degenerate zero EMA (which would otherwise collapse the band
+    /// boundary to 0 and make every non-negative cost look `AboveBaseline`).
+    /// Hardening: pre-CR-2 a zero EMA would have classified cost=0 as
+    /// `AboveBaseline` since `0 >= 0` is true — that's a silent
+    /// division-by-zero-class defect. We now refuse to classify when the
+    /// EMA is non-positive.
     #[must_use]
     pub fn classify(
         &self,
@@ -136,6 +142,11 @@ impl ExplorationBaseline {
             return None;
         }
         let ema = self.ema?;
+        // Degenerate baseline guard: a non-positive or non-finite EMA cannot
+        // produce a meaningful band — refuse to classify.
+        if !ema.is_finite() || ema <= 0.0 {
+            return None;
+        }
         #[allow(
             clippy::cast_precision_loss,
             reason = "see update()"
@@ -232,14 +243,22 @@ impl ContextCostRecord {
 
     /// Update the baseline (if the outcome is exploration) and fill in
     /// `cost_band` + `exploration_baseline` on the record.
+    ///
+    /// Hardening: this method holds the baseline lock for the entire
+    /// update-then-classify window, so the band returned in the record
+    /// always reflects the same EMA that was just written. Previously two
+    /// separate `lock()` calls left a race window in which a concurrent
+    /// writer could move the EMA between update and classify.
     #[must_use]
     pub fn record_and_update_baseline(&self, mut record: SessionCostRecord) -> SessionCostRecord {
-        if let Some(outcome) = record.outcome {
-            if let Ok(mut b) = self.baseline.lock() {
+        // Single-lock atomic update-then-read. A poisoned mutex is treated
+        // as a no-op (no baseline movement, no classification) rather than
+        // silently replaced with a fresh baseline (which would mask the
+        // failure mode).
+        if let Ok(mut b) = self.baseline.lock() {
+            if let Some(outcome) = record.outcome {
                 b.update(record.total_cost_proxy, outcome);
             }
-        }
-        if let Ok(b) = self.baseline.lock() {
             record.exploration_baseline = b.ema;
             record.cost_band = b.classify(
                 record.total_cost_proxy,
@@ -522,5 +541,166 @@ mod tests {
         let r = ContextCostRecord::new(ContextCostRecordConfig::default());
         let s = format!("{r:?}");
         assert!(s.contains("ContextCostRecord"));
+    }
+
+    // ---- Hardening pass: anti-property F10 + adversarial + concurrency (10)
+
+    // rationale: Adversarial input — NaN cost is never produced by the
+    // codebase, but the EMA must not be poisoned by a deliberate or
+    // wrap-induced NaN. (We cast `cost: i64` → f64 so NaN can't enter via
+    // sample, but a future ExplorationBaseline mutation could; this
+    // regression-pins the current well-defined behaviour.)
+    #[test]
+    fn classify_rejects_non_finite_ema() {
+        // Manually construct a baseline with NaN ema (can only happen via
+        // future bug; this pins the classify guard).
+        let mut b = ExplorationBaseline::new(20);
+        for _ in 0..6_u32 {
+            b.update(100, WorkflowOutcome::Explored);
+        }
+        b.ema = Some(f64::NAN);
+        assert!(b.classify(100, 5, 0.8, 1.2).is_none(), "NaN ema must refuse classify");
+        b.ema = Some(f64::INFINITY);
+        assert!(b.classify(100, 5, 0.8, 1.2).is_none(), "Inf ema must refuse classify");
+    }
+
+    // rationale: Anti-property F10 — empty-cohort / zero-cost EMA must NOT
+    // be classified as `AboveBaseline` for a zero cost. The pre-hardening
+    // code would have, because `0 >= 0 * 1.2` is `0 >= 0` is `true`.
+    #[test]
+    fn classify_rejects_zero_ema_to_prevent_division_by_zero_collapse() {
+        let mut b = ExplorationBaseline::new(20);
+        for _ in 0..6_u32 {
+            b.update(0, WorkflowOutcome::Explored);
+        }
+        // EMA = 0.0 (degenerate). Pre-hardening this returned Some(AboveBaseline)
+        // for cost=0; post-hardening it returns None.
+        assert!(b.classify(0, 5, 0.8, 1.2).is_none(), "zero-ema must refuse classify");
+    }
+
+    // rationale: Anti-property F10 — A burst of 1000 Converged updates
+    // followed by a single Explored update must produce an EMA equal to
+    // that one Explored sample (Converged never contributed).
+    #[test]
+    fn property_burst_converged_then_one_explored_baseline_is_explored_sample() {
+        let mut b = ExplorationBaseline::new(20);
+        for _ in 0..1000_u32 {
+            b.update(999_999, WorkflowOutcome::Converged);
+        }
+        b.update(42, WorkflowOutcome::Explored);
+        assert_eq!(b.ema, Some(42.0));
+        assert_eq!(b.n, 1);
+    }
+
+    // rationale: Anti-property F10 — Repeated never contributes regardless
+    // of how cost trends.
+    #[test]
+    fn property_repeated_never_contributes_even_with_huge_cost() {
+        let mut b = ExplorationBaseline::new(20);
+        b.update(i64::MAX, WorkflowOutcome::Repeated);
+        assert!(b.ema.is_none());
+        assert_eq!(b.n, 0);
+    }
+
+    // rationale: Boundary — i64::MIN cost on an Explored outcome casts to
+    // a finite f64 (no overflow); EMA is finite and bounded.
+    #[test]
+    fn update_handles_i64_min_cost_without_nan_or_inf() {
+        let mut b = ExplorationBaseline::new(20);
+        b.update(i64::MIN, WorkflowOutcome::Explored);
+        let ema = b.ema.expect("ema");
+        assert!(ema.is_finite(), "i64::MIN cost should produce finite ema");
+    }
+
+    // rationale: Boundary — i64::MAX cost on Explored outcome stays finite.
+    #[test]
+    fn update_handles_i64_max_cost_without_nan_or_inf() {
+        let mut b = ExplorationBaseline::new(20);
+        b.update(i64::MAX, WorkflowOutcome::Explored);
+        let ema = b.ema.expect("ema");
+        assert!(ema.is_finite(), "i64::MAX cost should produce finite ema");
+    }
+
+    // rationale: Concurrency — record_and_update_baseline is atomic
+    // across threads (post-hardening). N threads contributing N samples
+    // each yield exactly N*N exploration counts (no lost updates).
+    #[test]
+    fn concurrent_record_and_update_no_lost_updates() {
+        use std::sync::Arc;
+        use std::thread;
+        let r = Arc::new(ContextCostRecord::new(ContextCostRecordConfig::default()));
+        let threads = 8_u32;
+        let per_thread = 50_u32;
+        let mut handles = Vec::with_capacity(threads as usize);
+        for t in 0..threads {
+            let r2 = Arc::clone(&r);
+            handles.push(thread::spawn(move || {
+                for i in 0..per_thread {
+                    let _ = r2.record_and_update_baseline(cost(
+                        &format!("t{t}s{i}"),
+                        100,
+                        Some(WorkflowOutcome::Explored),
+                    ));
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("thread");
+        }
+        let snap = r.baseline_snapshot();
+        let expected = (threads * per_thread) as usize;
+        assert_eq!(snap.n, expected, "expected {expected} updates, got {}", snap.n);
+    }
+
+    // rationale: Anti-property F10 — recorded band reflects the EMA
+    // recorded in the SAME atomic update (no time-of-check/time-of-use gap).
+    #[test]
+    fn record_and_update_band_matches_ema_atomically() {
+        let r = ContextCostRecord::new(ContextCostRecordConfig::default());
+        for i in 0..6_u32 {
+            let _ = r.record_and_update_baseline(cost(
+                &format!("s{i}"),
+                100,
+                Some(WorkflowOutcome::Explored),
+            ));
+        }
+        let out = r.record_and_update_baseline(cost(
+            "probe",
+            100,
+            Some(WorkflowOutcome::Explored),
+        ));
+        // EMA is some, band is some, and band classification matches the
+        // ema we got back in the same record.
+        let ema = out.exploration_baseline.expect("ema");
+        let band = out.cost_band.expect("band");
+        // cost == 100, ema near 100 → NearBaseline
+        assert_eq!(band, CostBand::NearBaseline);
+        assert!((ema - 100.0).abs() < 50.0);
+    }
+
+    // rationale: Contract regression — WorkflowOutcome::is_exploration is
+    // const-fn and pure; the compile-time evaluation below proves the
+    // function is usable in `const` context (the surface-stability
+    // invariant). Runtime calls then re-confirm the runtime path agrees.
+    #[test]
+    fn is_exploration_is_const_pure() {
+        const E: bool = WorkflowOutcome::Explored.is_exploration();
+        const C: bool = WorkflowOutcome::Converged.is_exploration();
+        assert_eq!(E, WorkflowOutcome::Explored.is_exploration());
+        assert_eq!(C, WorkflowOutcome::Converged.is_exploration());
+        assert!(WorkflowOutcome::Explored.is_exploration());
+        assert!(!WorkflowOutcome::Converged.is_exploration());
+    }
+
+    // rationale: Cross-module surface invariant — CostBand variants enum
+    // is exactly three (defensive against silent enum growth).
+    #[test]
+    fn cost_band_has_exactly_three_variants() {
+        // Exhaustive match; compile error if a new variant is added.
+        for b in [CostBand::BelowBaseline, CostBand::NearBaseline, CostBand::AboveBaseline] {
+            match b {
+                CostBand::BelowBaseline | CostBand::NearBaseline | CostBand::AboveBaseline => {}
+            }
+        }
     }
 }

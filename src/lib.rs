@@ -30,6 +30,7 @@
 #![allow(clippy::doc_markdown)]
 
 pub mod m1_atuin_consumer;
+pub mod m2_stcortex_consumer;
 pub mod m3_injection_db_consumer;
 pub mod m8_povm_build_prereq;
 pub mod m9_watcher_namespace_guard;
@@ -41,6 +42,12 @@ pub use m1_atuin_consumer::{
     canonical_default_path, expand_tilde, fallback_subprocess_ingest,
     open_readonly as open_atuin_readonly, AtuinConsumer, AtuinConsumerConfig,
     AtuinConsumerError, AtuinHistoryRow, PageIter, PageResult, SessionId,
+};
+pub use m2_stcortex_consumer::{
+    consumption_event_query, register_narrowed_consumer, tool_call_query,
+    ConsumerIdentity, ConsumerName, ConsumptionEventRow, Namespace, RegistrationHandle,
+    StcortexConsumerError, StcortexRow, ToolCallRow, Transport,
+    WORKFLOW_TRACE_PREFIX as STCORTEX_WORKFLOW_TRACE_PREFIX,
 };
 pub use m3_injection_db_consumer::{
     open_readonly as open_injection_db_readonly, parse_causal_chain_row, parse_chain_type,

@@ -33,6 +33,12 @@ time = { version = "0.3", features = ["parsing", "formatting", "macros"] }
 # m1 atuin consumer + m3 injection.db consumer — read-only SQLite WAL.
 # `bundled` ships libsqlite3 source so we don't depend on the host's lib.
 rusqlite = { version = "0.33", features = ["bundled"] }
+# m2 stcortex narrowed consumer — local path dep matching the stcortex
+# rust-subscriber Cargo.toml. module_bindings are vendored under
+# `src/m2_stcortex_consumer/module_bindings/` (canonical SpacetimeDB
+# consumer pattern).
+spacetimedb-sdk = { path = "/home/louranicas/claude-code-workspace/spacetimedb/sdks/rust" }
+tokio = { version = "1", features = ["full"] }
 
 [build-dependencies]
 # Build script is intentionally minimal (env-var-only per m8 spec § 10);

@@ -38,6 +38,8 @@ pub mod m6_cost;
 pub mod m7_workflow_runs;
 pub mod m12_cli_reports;
 pub mod m13_stcortex_writer;
+pub mod m14_lift;
+pub mod m15_pressure;
 pub mod m8_povm_build_prereq;
 
 pub use m4_cascade::{
@@ -66,6 +68,15 @@ pub use m13_stcortex_writer::{
     CorrelationMemory, DeferReason, LtpDensityReader, OracHttpReader, PromoteOutcome,
     StcortexWriter, StcortexWriterError, SubstrateWriter, LTP_PHASE_1_FLOOR,
     LTP_PHASE_3_TARGET,
+};
+pub use m14_lift::{
+    cost_lift, wilson_ci_half, LiftAggregator, LiftAggregatorConfig, LiftError, LiftSnapshot,
+    WorkflowId, WorkflowLiftContribution, DEFAULT_CASCADE_WEIGHT, DEFAULT_COST_WEIGHT,
+    DEFAULT_WINDOW_SIZE, MIN_SAMPLE_SIZE, WILSON_Z,
+};
+pub use m15_pressure::{
+    classify_excerpt, truncate_excerpt, CharterSection, ForbiddenCategory, PressureEvent,
+    PressureRegister, PressureRegisterConfig, PressureRegisterError, PressureSource,
 };
 pub mod m9_watcher_namespace_guard;
 pub mod m10_ember_ci_gate;

@@ -4,13 +4,26 @@
 //! `n < MIN_SAMPLE_SIZE`. m14 surfaces that `None` outward; consumers
 //! MUST treat `None` as "insufficient evidence; hold current state" —
 //! never as "zero lift".
+//!
+//! AP30 (POVM/stcortex namespace collision) is delegated to m9 — m14
+//! imports the `workflow_trace` prefix constant via
+//! [`crate::m9_watcher_namespace_guard::WORKFLOW_TRACE_NS_PREFIX`] and
+//! never hard-codes the literal.
+//!
+//! Spec: `ai_specs/modules/cluster-E/m14_habitat_outcome_lift.md` (§3, §4,
+//! §5, §8). Hardened S1002388 (god-tier maintainer pass): F10
+//! (exploration-cost-preservation) gate on `cost_lift`; explicit
+//! `LiftError::InsufficientSamples` variant alongside the `Option` surface;
+//! `latest_ts_ms` honoured per spec §11; rolling window evicts oldest
+//! (`take(last N)`); arithmetic over `cost_tokens` uses checked addition.
 
 use std::time::SystemTime;
 
 use crate::m7_workflow_runs::WorkflowRunRow;
+use crate::m9_watcher_namespace_guard::WORKFLOW_TRACE_NS_PREFIX;
 
 /// Hard minimum sample size for any Wilson CI emission. Below this the
-/// aggregator emits `None`.
+/// aggregator emits `None` (the F2 gate).
 pub const MIN_SAMPLE_SIZE: usize = 20;
 
 /// Default rolling window size (run-count).
@@ -25,7 +38,17 @@ pub const DEFAULT_COST_WEIGHT: f64 = 0.4;
 /// 95% CI z-score.
 pub const WILSON_Z: f64 = 1.96;
 
+/// Per-workflow modulation clamp applied by m31 — surfaced as a const so
+/// downstream selectors agree with the cluster spec § 7.
+pub const M31_MODULATION_CLAMP: f64 = 0.3;
+
 /// Workflow identifier newtype (AP30 prefix-guarded at the m13/m42 boundary).
+///
+/// The newtype is opaque on purpose: callers MUST construct via
+/// [`WorkflowId::from_validated`] when they already hold an
+/// [`crate::m9_watcher_namespace_guard::ValidatedNamespace`]. The `pub`
+/// tuple field is retained for serde / test convenience but its content
+/// is contractually expected to carry the `workflow_trace_*` prefix.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct WorkflowId(pub String);
 
@@ -35,21 +58,55 @@ impl WorkflowId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Construct from an already-validated namespace (round-trip
+    /// constructor for the m9 gate; never re-runs the validator).
+    #[must_use]
+    pub fn from_validated(
+        v: &crate::m9_watcher_namespace_guard::ValidatedNamespace,
+    ) -> Self {
+        Self(v.as_str().to_owned())
+    }
+
+    /// Returns `true` iff the inner string carries the
+    /// [`WORKFLOW_TRACE_NS_PREFIX`] (advisory check; m9 is the canonical
+    /// gate).
+    #[must_use]
+    pub fn has_workflow_trace_prefix(&self) -> bool {
+        self.0.starts_with(WORKFLOW_TRACE_NS_PREFIX)
+    }
 }
 
 /// Aggregate lift snapshot.
 #[derive(Debug, Clone)]
 pub struct LiftSnapshot {
-    /// Composite habitat-outcome-lift; `None` below `MIN_SAMPLE_SIZE`.
+    /// Composite habitat-outcome-lift; `None` below `MIN_SAMPLE_SIZE` or
+    /// when arithmetic preconditions fail.
     pub lift: Option<f64>,
     /// Wilson CI half-width; `Some` iff `lift` is `Some`.
     pub ci_half: Option<f64>,
     /// Number of rows in the window.
     pub n: usize,
-    /// Most recent `ts_ms` in the window.
+    /// Most recent `ts_ms` proxy — the maximum `WorkflowRunRow::id` in the
+    /// window (id is monotonic per m7's `INTEGER PRIMARY KEY
+    /// AUTOINCREMENT`). Zero iff `n == 0`.
     pub latest_ts_ms: i64,
-    /// Wall-clock time the snapshot was computed.
+    /// Wall-clock time the snapshot was computed (AP-Hab-13 freshness).
     pub computed_at: SystemTime,
+}
+
+impl LiftSnapshot {
+    /// Empty / refusal snapshot — `lift` and `ci_half` both `None`. Used
+    /// when the window is below `MIN_SAMPLE_SIZE`.
+    fn empty(n: usize, latest_ts_ms: i64) -> Self {
+        Self {
+            lift: None,
+            ci_half: None,
+            n,
+            latest_ts_ms,
+            computed_at: SystemTime::now(),
+        }
+    }
 }
 
 /// Per-workflow contribution to aggregate lift.
@@ -57,7 +114,8 @@ pub struct LiftSnapshot {
 pub struct WorkflowLiftContribution {
     /// Workflow identifier.
     pub workflow_id: WorkflowId,
-    /// Delta in approximately `[-1.0, +1.0]`; m31 clamps further.
+    /// Delta in approximately `[-1.0, +1.0]`; m31 clamps further to
+    /// `[-M31_MODULATION_CLAMP, +M31_MODULATION_CLAMP]`.
     pub delta: f64,
     /// Number of runs contributing to this workflow's delta.
     pub run_count: usize,
@@ -66,7 +124,12 @@ pub struct WorkflowLiftContribution {
 }
 
 /// Errors for the lift aggregator.
+///
+/// Variants are additive — new variants do NOT break the `Option`-typed
+/// `compute_snapshot` surface. Direct callers of the fallible API see the
+/// typed reason.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum LiftError {
     /// Cascade/cost weights did not sum to 1.0.
     #[error("invalid weights: cascade={cascade} cost={cost} must sum to 1.0")]
@@ -75,6 +138,22 @@ pub enum LiftError {
         cascade: f64,
         /// Cost weight.
         cost: f64,
+    },
+    /// Window contained fewer than [`MIN_SAMPLE_SIZE`] rows; the F2 gate
+    /// refuses emission rather than fabricating a CI bar.
+    #[error("insufficient samples: n={n} < MIN_SAMPLE_SIZE={min}")]
+    InsufficientSamples {
+        /// Observed sample size.
+        n: usize,
+        /// The F2 floor.
+        min: usize,
+    },
+    /// Cost arithmetic was not safe (overflow, NaN, infinite, or
+    /// non-positive baseline). Spec § 5: baseline must be > 0 and finite.
+    #[error("cost arithmetic invalid: {reason}")]
+    InvalidCostArithmetic {
+        /// Human-readable failure reason.
+        reason: &'static str,
     },
 }
 
@@ -111,6 +190,10 @@ pub fn wilson_ci_half(n_success: usize, n_total: usize) -> Option<f64> {
     if n_total < MIN_SAMPLE_SIZE {
         return None;
     }
+    debug_assert!(
+        n_success <= n_total,
+        "wilson_ci_half: n_success={n_success} > n_total={n_total} (Bernoulli contract violated)"
+    );
     let p = n_success as f64 / n_total as f64;
     let n = n_total as f64;
     let z = WILSON_Z;
@@ -119,13 +202,78 @@ pub fn wilson_ci_half(n_success: usize, n_total: usize) -> Option<f64> {
     Some(half)
 }
 
-/// Composite cost-lift: `(baseline - actual) / baseline`, clamped to `[-1, 1]`.
-#[must_use]
-pub fn cost_lift(baseline: f64, actual: f64) -> f64 {
-    if !baseline.is_finite() || baseline <= 0.0 || !actual.is_finite() {
-        return 0.0;
+/// Composite cost-lift: `(baseline - actual) / baseline`, clamped to
+/// `[-1, 1]`.
+///
+/// Returns [`LiftError::InvalidCostArithmetic`] on:
+///
+/// - non-finite `baseline` or `actual` (NaN, ±∞),
+/// - non-positive `baseline` (`baseline <= 0.0` — division-by-zero guard
+///   per spec § 4),
+/// - negative `actual` (cost must be non-negative per m6 contract).
+///
+/// This replaces the prior silent-`0.0` semantics — F10 mitigation
+/// (exploration-cost-preservation collapse).
+///
+/// # Errors
+///
+/// See variants above.
+pub fn cost_lift(baseline: f64, actual: f64) -> Result<f64, LiftError> {
+    if !baseline.is_finite() {
+        return Err(LiftError::InvalidCostArithmetic {
+            reason: "baseline must be finite",
+        });
     }
-    ((baseline - actual) / baseline).clamp(-1.0, 1.0)
+    if baseline <= 0.0 {
+        return Err(LiftError::InvalidCostArithmetic {
+            reason: "baseline must be strictly positive (division-by-zero guard)",
+        });
+    }
+    if !actual.is_finite() {
+        return Err(LiftError::InvalidCostArithmetic {
+            reason: "actual must be finite",
+        });
+    }
+    if actual < 0.0 {
+        return Err(LiftError::InvalidCostArithmetic {
+            reason: "actual cost must be non-negative",
+        });
+    }
+    Ok(((baseline - actual) / baseline).clamp(-1.0, 1.0))
+}
+
+/// Compute the baseline cost (mean of `cost_tokens` over the window),
+/// guarded against `i64` summation overflow and against zero-cardinality
+/// cohorts.
+///
+/// Returns `Ok(None)` when no row in the window carries a `cost_tokens`
+/// value. Returns the typed error on overflow or negative-cost.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "window size and cost magnitudes are bounded well below 2^53"
+)]
+fn baseline_cost_from_window(
+    window: &[&WorkflowRunRow],
+) -> Result<Option<f64>, LiftError> {
+    let mut sum: i64 = 0;
+    let mut count: usize = 0;
+    for r in window {
+        if let Some(c) = r.cost_tokens {
+            if c < 0 {
+                return Err(LiftError::InvalidCostArithmetic {
+                    reason: "negative cost_tokens in window (m6 contract violation)",
+                });
+            }
+            sum = sum.checked_add(c).ok_or(LiftError::InvalidCostArithmetic {
+                reason: "i64 overflow summing cost_tokens",
+            })?;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return Ok(None);
+    }
+    Ok(Some(sum as f64 / count as f64))
 }
 
 /// The lift aggregator.
@@ -167,62 +315,130 @@ impl LiftAggregator {
 
     /// Compute a snapshot over the given rolling window of rows.
     ///
-    /// Treats `outcome == "ok"` as cascade-success; uses `cost_tokens` as
-    /// the cost proxy. `latest_ts_ms` is derived from the row with the
-    /// largest `started_at` lexicographic value (proxy for "newest").
-    #[must_use]
+    /// Window discipline (spec § 6): when `rows.len() > window`, the
+    /// **oldest** rows are evicted — we operate on the last `window`
+    /// entries (a `VecDeque::pop_front` semantic).
+    ///
+    /// `latest_ts_ms` is the maximum `WorkflowRunRow::id` in the window
+    /// (m7 ids are monotonic per the table's `AUTOINCREMENT`).
+    ///
+    /// On any arithmetic failure, the snapshot degrades to `lift=None`,
+    /// `ci_half=None` and emits a `tracing::warn!`. Use
+    /// [`Self::try_compute_snapshot`] for the typed-error variant.
     #[allow(
         clippy::cast_precision_loss,
         reason = "n is bounded by window size << 2^53"
     )]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "cost_tokens is non-negative i64 bounded by m6 contract"
+    )]
     pub fn compute_snapshot(&self, rows: &[WorkflowRunRow]) -> LiftSnapshot {
-        let take = self.config.window.min(rows.len());
-        let window: Vec<&WorkflowRunRow> = rows.iter().take(take).collect();
+        match self.try_compute_snapshot(rows) {
+            Ok(snap) => snap,
+            Err(LiftError::InsufficientSamples { n, .. }) => {
+                let latest = max_id_in_window(rows, self.config.window);
+                LiftSnapshot::empty(n, latest)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "m14.compute_snapshot",
+                    error = %e,
+                    "lift snapshot degraded to None on arithmetic failure"
+                );
+                let n = self.config.window.min(rows.len());
+                let latest = max_id_in_window(rows, self.config.window);
+                LiftSnapshot::empty(n, latest)
+            }
+        }
+    }
+
+    /// Fallible variant of [`Self::compute_snapshot`] — returns the typed
+    /// reason on refusal instead of degrading to `None`.
+    ///
+    /// # Errors
+    ///
+    /// - [`LiftError::InsufficientSamples`] when window has < `MIN_SAMPLE_SIZE` rows.
+    /// - [`LiftError::InvalidCostArithmetic`] on overflow or contract drift.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "n is bounded by window size << 2^53"
+    )]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "cost_tokens is non-negative i64 bounded by m6 contract"
+    )]
+    pub fn try_compute_snapshot(
+        &self,
+        rows: &[WorkflowRunRow],
+    ) -> Result<LiftSnapshot, LiftError> {
+        let window: Vec<&WorkflowRunRow> = last_n(rows, self.config.window).collect();
         let n = window.len();
+        let latest_ts_ms = window.iter().map(|r| r.id).max().unwrap_or(0);
         if n < MIN_SAMPLE_SIZE {
-            return LiftSnapshot {
-                lift: None,
-                ci_half: None,
+            return Err(LiftError::InsufficientSamples {
                 n,
-                latest_ts_ms: 0,
-                computed_at: SystemTime::now(),
-            };
+                min: MIN_SAMPLE_SIZE,
+            });
         }
         let successes = window
             .iter()
             .filter(|r| r.outcome.as_deref() == Some("ok"))
             .count();
         let cascade_rate = successes as f64 / n as f64;
-        let costs: Vec<i64> = window.iter().filter_map(|r| r.cost_tokens).collect();
-        let baseline = if costs.is_empty() {
-            0.0
+        let baseline = baseline_cost_from_window(&window)?;
+        let c_lift = if let Some(b) = baseline {
+            let latest_cost = window
+                .last()
+                .and_then(|r| r.cost_tokens)
+                .map_or(0.0, |c| c as f64);
+            if b <= 0.0 {
+                0.0
+            } else {
+                cost_lift(b, latest_cost)?
+            }
         } else {
-            let sum: i64 = costs.iter().sum();
-            sum as f64 / costs.len() as f64
+            0.0
         };
-        // Cost-lift uses the latest row's cost vs baseline.
-        let latest_cost = window.last().and_then(|r| r.cost_tokens).unwrap_or(0);
-        let c_lift = cost_lift(baseline, latest_cost as f64);
-        let composite = self.config.cascade_weight.mul_add(
-            cascade_rate,
-            self.config.cost_weight * c_lift,
-        );
+        let composite = self
+            .config
+            .cascade_weight
+            .mul_add(cascade_rate, self.config.cost_weight * c_lift);
         let ci_half = wilson_ci_half(successes, n);
-        LiftSnapshot {
+        debug_assert!(
+            ci_half.is_some(),
+            "ci_half MUST be Some whenever n >= MIN_SAMPLE_SIZE (n={n})"
+        );
+        Ok(LiftSnapshot {
             lift: Some(composite),
             ci_half,
             n,
-            latest_ts_ms: 0,
+            latest_ts_ms,
             computed_at: SystemTime::now(),
-        }
+        })
     }
+}
+
+/// Iterator over the last `n` elements of `slice`, in original order.
+fn last_n<T>(slice: &[T], n: usize) -> std::slice::Iter<'_, T> {
+    let len = slice.len();
+    let start = len.saturating_sub(n);
+    slice[start..].iter()
+}
+
+/// Maximum `id` over the trailing `window` rows; 0 when window is empty.
+fn max_id_in_window(rows: &[WorkflowRunRow], window: usize) -> i64 {
+    last_n(rows, window).map(|r| r.id).max().unwrap_or(0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        cost_lift, wilson_ci_half, LiftAggregator, LiftAggregatorConfig, LiftError,
-        MIN_SAMPLE_SIZE, WorkflowId,
+        baseline_cost_from_window, cost_lift, last_n, max_id_in_window, wilson_ci_half,
+        LiftAggregator, LiftAggregatorConfig, LiftError, LiftSnapshot, WorkflowId,
+        M31_MODULATION_CLAMP, MIN_SAMPLE_SIZE,
     };
     use crate::m7_workflow_runs::WorkflowRunRow;
 
@@ -269,24 +485,59 @@ mod tests {
 
     #[test]
     fn cost_lift_positive_when_actual_below_baseline() {
-        assert!(cost_lift(100.0, 50.0) > 0.0);
+        assert!(cost_lift(100.0, 50.0).expect("ok") > 0.0);
     }
 
     #[test]
     fn cost_lift_negative_when_actual_above_baseline() {
-        assert!(cost_lift(100.0, 200.0) < 0.0);
+        assert!(cost_lift(100.0, 200.0).expect("ok") < 0.0);
     }
 
     #[test]
     fn cost_lift_clamped_to_negative_one() {
-        assert!(cost_lift(100.0, f64::MAX).abs() <= 1.0);
+        assert!(cost_lift(100.0, f64::MAX).expect("ok").abs() <= 1.0);
     }
 
     #[test]
-    fn cost_lift_zero_when_baseline_invalid() {
-        assert!(cost_lift(0.0, 100.0).abs() < f64::EPSILON);
-        assert!(cost_lift(-50.0, 100.0).abs() < f64::EPSILON);
-        assert!(cost_lift(f64::NAN, 100.0).abs() < f64::EPSILON);
+    fn cost_lift_typed_error_when_baseline_zero() {
+        // rationale: Anti-property F10 — division-by-zero guard surfaces typed.
+        let err = cost_lift(0.0, 100.0).unwrap_err();
+        assert!(matches!(err, LiftError::InvalidCostArithmetic { .. }));
+    }
+
+    #[test]
+    fn cost_lift_typed_error_when_baseline_negative() {
+        // rationale: Anti-property — baseline must be strictly positive.
+        let err = cost_lift(-50.0, 100.0).unwrap_err();
+        assert!(matches!(err, LiftError::InvalidCostArithmetic { .. }));
+    }
+
+    #[test]
+    fn cost_lift_typed_error_when_baseline_nan() {
+        // rationale: Adversarial input — NaN propagates silently otherwise.
+        let err = cost_lift(f64::NAN, 100.0).unwrap_err();
+        assert!(matches!(err, LiftError::InvalidCostArithmetic { .. }));
+    }
+
+    #[test]
+    fn cost_lift_typed_error_when_baseline_infinite() {
+        // rationale: Adversarial input — +Inf baseline collapses lift to 1.0 silently.
+        let err = cost_lift(f64::INFINITY, 100.0).unwrap_err();
+        assert!(matches!(err, LiftError::InvalidCostArithmetic { .. }));
+    }
+
+    #[test]
+    fn cost_lift_typed_error_when_actual_nan() {
+        // rationale: Adversarial input — NaN actual would propagate to composite.
+        let err = cost_lift(100.0, f64::NAN).unwrap_err();
+        assert!(matches!(err, LiftError::InvalidCostArithmetic { .. }));
+    }
+
+    #[test]
+    fn cost_lift_typed_error_when_actual_negative() {
+        // rationale: Anti-property — m6 emits non-negative cost_tokens.
+        let err = cost_lift(100.0, -50.0).unwrap_err();
+        assert!(matches!(err, LiftError::InvalidCostArithmetic { .. }));
     }
 
     #[test]
@@ -330,7 +581,6 @@ mod tests {
         let rows: Vec<WorkflowRunRow> = (0..30).map(|i| run(i, "ok", Some(100))).collect();
         let snap = agg.compute_snapshot(&rows);
         let lift = snap.lift.expect("lift");
-        // cascade_rate=1.0, cost_lift=0 (cost==baseline). composite=0.6*1.0+0.4*0=0.6
         assert!((lift - 0.6).abs() < 1e-9);
     }
 
@@ -355,5 +605,203 @@ mod tests {
         let s = serde_json::to_string(&id).expect("ser");
         let back: WorkflowId = serde_json::from_str(&s).expect("de");
         assert_eq!(back, id);
+    }
+
+    // ====================================================================
+    // Hardening pass (S1002388) — m14 god-tier maintainer pass.
+    // ====================================================================
+
+    // rationale: Boundary — wilson_ci_half at n=MIN_SAMPLE_SIZE-1 refuses;
+    // at MIN_SAMPLE_SIZE returns Some. F2 floor exact.
+    #[test]
+    fn wilson_boundary_n_minus_1_refuses_n_returns_some() {
+        assert!(wilson_ci_half(5, MIN_SAMPLE_SIZE - 1).is_none());
+        assert!(wilson_ci_half(5, MIN_SAMPLE_SIZE).is_some());
+    }
+
+    // rationale: Anti-property F2 — try_compute_snapshot at n=19 returns
+    // typed InsufficientSamples (not Option::None silently).
+    #[test]
+    fn try_compute_snapshot_below_min_returns_typed_insufficient() {
+        let agg = LiftAggregator::new(LiftAggregatorConfig::default()).expect("agg");
+        let rows: Vec<WorkflowRunRow> = (0..19).map(|i| run(i, "ok", Some(100))).collect();
+        let err = agg.try_compute_snapshot(&rows).unwrap_err();
+        let LiftError::InsufficientSamples { n, min } = err else {
+            panic!("expected InsufficientSamples, got {err:?}");
+        };
+        assert_eq!(n, 19);
+        assert_eq!(min, MIN_SAMPLE_SIZE);
+    }
+
+    // rationale: Anti-property F2 — try_compute_snapshot at n=20 succeeds.
+    #[test]
+    fn try_compute_snapshot_at_floor_succeeds() {
+        let agg = LiftAggregator::new(LiftAggregatorConfig::default()).expect("agg");
+        let rows: Vec<WorkflowRunRow> =
+            (0..20).map(|i| run(i, "ok", Some(100))).collect();
+        let snap = agg.try_compute_snapshot(&rows).expect("ok");
+        assert!(snap.lift.is_some());
+        assert_eq!(snap.n, 20);
+    }
+
+    // rationale: Boundary — latest_ts_ms is the max row id in the window,
+    // not zero. Spec §11 contract.
+    #[test]
+    fn snapshot_latest_ts_ms_is_max_row_id_in_window() {
+        let agg = LiftAggregator::new(LiftAggregatorConfig::default()).expect("agg");
+        let rows: Vec<WorkflowRunRow> =
+            (0..30).map(|i| run(i, "ok", Some(100))).collect();
+        let snap = agg.compute_snapshot(&rows);
+        assert_eq!(snap.latest_ts_ms, 29);
+    }
+
+    // rationale: Boundary — latest_ts_ms is also set on the refusal path.
+    #[test]
+    fn snapshot_latest_ts_ms_set_on_refusal_path() {
+        let agg = LiftAggregator::new(LiftAggregatorConfig::default()).expect("agg");
+        let rows: Vec<WorkflowRunRow> = (0..5).map(|i| run(i, "ok", Some(100))).collect();
+        let snap = agg.compute_snapshot(&rows);
+        assert!(snap.lift.is_none());
+        assert_eq!(snap.latest_ts_ms, 4);
+    }
+
+    // rationale: Contract regression — window discipline. With rows=125
+    // and window=120, the window must keep the LAST 120 (ids 5..124).
+    #[test]
+    fn window_evicts_oldest_first_per_spec_section_6() {
+        let agg = LiftAggregator::new(LiftAggregatorConfig::default()).expect("agg");
+        let rows: Vec<WorkflowRunRow> =
+            (0..125).map(|i| run(i, "ok", Some(100))).collect();
+        let snap = agg.compute_snapshot(&rows);
+        assert_eq!(snap.n, 120);
+        assert_eq!(snap.latest_ts_ms, 124);
+    }
+
+    // rationale: Anti-property — i64 overflow on cost summation MUST NOT
+    // panic; returns InvalidCostArithmetic instead.
+    #[test]
+    fn baseline_cost_returns_overflow_error_on_i64_saturation() {
+        let rows = [run(0, "ok", Some(i64::MAX)), run(1, "ok", Some(1))];
+        let refs: Vec<&WorkflowRunRow> = rows.iter().collect();
+        let err = baseline_cost_from_window(&refs).unwrap_err();
+        assert!(matches!(err, LiftError::InvalidCostArithmetic { .. }));
+    }
+
+    // rationale: Anti-property — negative cost_tokens (m6 contract
+    // violation) surfaces typed; never silently inverts lift sign.
+    #[test]
+    fn baseline_cost_returns_error_on_negative_cost() {
+        let rows = [run(0, "ok", Some(-1))];
+        let refs: Vec<&WorkflowRunRow> = rows.iter().collect();
+        let err = baseline_cost_from_window(&refs).unwrap_err();
+        assert!(matches!(err, LiftError::InvalidCostArithmetic { .. }));
+    }
+
+    // rationale: Boundary — zero-cardinality cohort returns Ok(None).
+    #[test]
+    fn baseline_cost_none_when_no_cost_tokens_in_window() {
+        let rows = [run(0, "ok", None), run(1, "ok", None)];
+        let row_refs: Vec<&WorkflowRunRow> = rows.iter().collect();
+        let outcome = baseline_cost_from_window(&row_refs).expect("ok");
+        assert!(outcome.is_none());
+    }
+
+    // rationale: Resource accounting — last_n on empty / zero-window.
+    #[test]
+    fn last_n_handles_empty_and_zero_window() {
+        let v: Vec<i32> = vec![];
+        assert_eq!(last_n(&v, 5).count(), 0);
+        let v = vec![1, 2, 3];
+        assert_eq!(last_n(&v, 0).count(), 0);
+        assert_eq!(last_n(&v, 100).count(), 3);
+    }
+
+    // rationale: Cross-module surface invariant — WorkflowId's
+    // has_workflow_trace_prefix agrees with m9 const.
+    #[test]
+    fn workflow_id_prefix_check_agrees_with_m9_const() {
+        let good = WorkflowId("workflow_trace_xyz".into());
+        let bad = WorkflowId("orac_xyz".into());
+        assert!(good.has_workflow_trace_prefix());
+        assert!(!bad.has_workflow_trace_prefix());
+    }
+
+    // rationale: Cross-module — from_validated round-trips through m9.
+    #[test]
+    fn workflow_id_from_validated_round_trip() {
+        let v = crate::m9_watcher_namespace_guard::assert_workflow_trace_namespace(
+            "workflow_trace_abc",
+        )
+        .expect("v");
+        let id = WorkflowId::from_validated(&v);
+        assert!(id.has_workflow_trace_prefix());
+        assert_eq!(id.as_str(), "workflow_trace_abc");
+    }
+
+    // rationale: Determinism — same input yields same snapshot.
+    #[test]
+    fn compute_snapshot_is_deterministic_modulo_computed_at() {
+        let agg = LiftAggregator::new(LiftAggregatorConfig::default()).expect("agg");
+        let rows: Vec<WorkflowRunRow> = (0..30)
+            .map(|i| run(i, if i % 2 == 0 { "ok" } else { "fail" }, Some(100)))
+            .collect();
+        let first = agg.compute_snapshot(&rows);
+        for _ in 0..100_u32 {
+            let again = agg.compute_snapshot(&rows);
+            assert_eq!(first.n, again.n);
+            assert_eq!(first.latest_ts_ms, again.latest_ts_ms);
+            let lift_first = first.lift.expect("lift");
+            let lift_again = again.lift.expect("lift");
+            assert!((lift_first - lift_again).abs() < 1e-12);
+            let ci_first = first.ci_half.expect("ci");
+            let ci_again = again.ci_half.expect("ci");
+            assert!((ci_first - ci_again).abs() < 1e-12);
+        }
+    }
+
+    // rationale: Adversarial input — compute_snapshot degrades to None on
+    // i64 overflow without panicking.
+    #[test]
+    fn compute_snapshot_degrades_to_none_on_overflow() {
+        let agg = LiftAggregator::new(LiftAggregatorConfig::default()).expect("agg");
+        let mut rows: Vec<WorkflowRunRow> =
+            (0..20).map(|i| run(i, "ok", Some(1))).collect();
+        rows.push(run(20, "ok", Some(i64::MAX)));
+        let snap = agg.compute_snapshot(&rows);
+        assert!(snap.lift.is_none(), "lift must degrade on overflow");
+        assert!(snap.ci_half.is_none());
+    }
+
+    // rationale: Contract — M31_MODULATION_CLAMP within unit range.
+    #[test]
+    fn m31_modulation_clamp_within_unit_range() {
+        let clamp = std::hint::black_box(M31_MODULATION_CLAMP);
+        assert!(clamp > 0.0);
+        assert!(clamp <= 1.0);
+    }
+
+    // rationale: Concurrency — LiftAggregator is Send + Sync.
+    #[test]
+    fn lift_aggregator_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<LiftAggregator>();
+    }
+
+    // rationale: Contract regression — refusal snapshot n field reflects
+    // input size (clamped), never silently zero.
+    #[test]
+    fn refusal_snapshot_n_matches_input_clamped_to_window() {
+        let agg = LiftAggregator::new(LiftAggregatorConfig::default()).expect("agg");
+        let rows: Vec<WorkflowRunRow> = (0..7).map(|i| run(i, "ok", Some(50))).collect();
+        let snap = agg.compute_snapshot(&rows);
+        let LiftSnapshot { n, .. } = snap;
+        assert_eq!(n, 7);
+    }
+
+    // rationale: Boundary — max_id_in_window on empty slice returns 0.
+    #[test]
+    fn max_id_in_window_zero_for_empty_input() {
+        let rows: Vec<WorkflowRunRow> = vec![];
+        assert_eq!(max_id_in_window(&rows, 10), 0);
     }
 }

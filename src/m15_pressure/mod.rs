@@ -9,18 +9,42 @@
 //! record that scope-pressure happened, where it came from, and what
 //! verb / feature was being pushed. Watcher ☤ and Zen read at their
 //! own cadence.
+//!
+//! # Invariants (preserved under refactor)
+//!
+//! - `PressureEvent` JSONL writer is one-event-per-file (atomic via
+//!   tmp + rename); the on-disk shape is a single JSONL line.
+//! - Every emitted event carries a **monotonic** `id` per
+//!   [`PressureRegister`] instance and a `detected_at_ms` Unix-millis
+//!   timestamp; combined, `(id, detected_at_ms)` is a strict total
+//!   order even when wall clock drifts.
+//! - `CharterSection` and `ForbiddenCategory` enums are CLOSED in this
+//!   release. Adding a variant is a spec amendment, not a refactor;
+//!   serde uses `snake_case` rename so on-disk format is stable.
+//! - `classify_excerpt` returns the closed category enum only — it
+//!   never folds the input excerpt into category metadata. F11
+//!   (cascade-monoculture) mitigated.
+//! - Hardening S1002388: timestamp + millis component; session id
+//!   sanitised before filename use; tmp file carries a pid suffix so
+//!   inter-process collisions cannot clobber.
 
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 
 /// Schema version for serialised [`PressureEvent`].
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// Maximum length of the `trigger_excerpt` field, in CHARS, after
+/// truncation. See [`truncate_excerpt`].
+pub const MAX_EXCERPT_CHARS: usize = 512;
+
 /// Failure modes for the pressure register.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum PressureRegisterError {
     /// I/O error writing the JSONL file.
     #[error("write failed: {0}")]
@@ -31,6 +55,9 @@ pub enum PressureRegisterError {
 }
 
 /// Closed-set forbidden-verb category.
+///
+/// CLOSED enum: adding a variant is a spec amendment, not a refactor.
+/// Variants serialise via `rename_all = "snake_case"`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ForbiddenCategory {
@@ -52,11 +79,14 @@ pub enum ForbiddenCategory {
     SidecarDaemon,
     /// POVM write (workflow-trace POVM-decoupled per 2026-05-17 ADR).
     DeprecatedPovmWrite,
-    /// `use synthex_v2::*` wholesale import (lift patterns, do not import).
+    /// `use synthex_v2::*` wholesale import.
     SynthexV2Import,
     /// Handshake silence past timeout (AP-V7-08 mitigation).
     HandshakeSilence,
-    /// Any other forbidden surface with description.
+    /// Any other forbidden surface with description. NOTE: callers are
+    /// the ONLY producers of this variant; [`classify_excerpt`] never
+    /// fabricates it (F11 mitigation — no excerpt content folded into
+    /// the closed category space).
     Other {
         /// Free-text description.
         description: String,
@@ -113,15 +143,20 @@ pub enum CharterSection {
 pub struct PressureEvent {
     /// Schema version.
     pub schema_version: u32,
-    /// Monotonic event id per process.
+    /// Monotonic event id per [`PressureRegister`] instance.
     pub id: u64,
-    /// RFC 3339 timestamp.
+    /// Pseudo-RFC3339 timestamp string (UTC seconds since epoch, no
+    /// chrono dep). Format: `ts_s=<unix_seconds>`; companion
+    /// [`Self::detected_at_ms`] carries millisecond precision.
     pub detected_at: String,
+    /// Unix milliseconds since epoch — strict ordering signal.
+    pub detected_at_ms: i64,
     /// Originating session id.
     pub session_id: String,
-    /// Forbidden category.
+    /// Forbidden category (closed set; F11 mitigation — never carries
+    /// input excerpt content).
     pub forbidden_category: ForbiddenCategory,
-    /// Trigger excerpt (≤ 512 chars).
+    /// Trigger excerpt (≤ [`MAX_EXCERPT_CHARS`]).
     pub trigger_excerpt: String,
     /// Source surface.
     pub source: PressureSource,
@@ -131,20 +166,32 @@ pub struct PressureEvent {
     pub violated_charter: CharterSection,
 }
 
-/// Truncate an excerpt to ≤ 512 chars, appending `…` on truncation.
+/// Truncate an excerpt to ≤ [`MAX_EXCERPT_CHARS`] *characters* (not bytes),
+/// appending the U+2026 ellipsis on truncation.
 #[must_use]
 pub fn truncate_excerpt(s: &str) -> String {
-    const MAX: usize = 512;
-    if s.len() <= MAX {
+    if s.len() <= MAX_EXCERPT_CHARS {
         return s.to_owned();
     }
-    let mut out: String = s.chars().take(MAX).collect();
-    out.push('\u{2026}');
-    out
+    let mut iter = s.chars();
+    let prefix: String = iter.by_ref().take(MAX_EXCERPT_CHARS).collect();
+    if iter.next().is_none() {
+        prefix
+    } else {
+        let mut out = prefix;
+        out.push('\u{2026}');
+        out
+    }
 }
 
 /// Heuristic classifier: match a command / text excerpt to a forbidden
 /// category. Returns `None` when the excerpt is in-charter.
+///
+/// **F11 mitigation:** returns ONLY the closed-set variants. NEVER
+/// constructs the `Other { description: <input> }` variant. The
+/// `trigger_excerpt` field on [`PressureEvent`] is the faithful copy of
+/// the input; the `forbidden_category` field is a pane-label-free
+/// classification.
 #[must_use]
 pub fn classify_excerpt(text: &str) -> Option<ForbiddenCategory> {
     let lower = text.to_lowercase();
@@ -243,8 +290,7 @@ impl PressureRegister {
     ///
     /// # Panics
     ///
-    /// Panics only if the internal id mutex is poisoned, which requires
-    /// a prior unwinding panic; treat as unrecoverable.
+    /// Panics only if the internal id mutex is poisoned.
     pub fn detect_and_emit(
         &self,
         trigger_excerpt: &str,
@@ -286,10 +332,12 @@ impl PressureRegister {
             *guard = guard.saturating_add(1);
             id
         };
+        let detected_at_ms = unix_ms_now();
         PressureEvent {
             schema_version: SCHEMA_VERSION,
             id,
-            detected_at: rfc3339_now(),
+            detected_at: pseudo_rfc3339(detected_at_ms),
+            detected_at_ms,
             session_id: self.config.session_id.clone(),
             forbidden_category,
             trigger_excerpt: truncate_excerpt(trigger_excerpt),
@@ -302,23 +350,26 @@ impl PressureRegister {
     /// Emit a pre-built event. Writes one JSONL line per file. Atomic
     /// (tmp + rename) per spec § 3.
     ///
+    /// The tmp filename carries the current pid as a suffix so two
+    /// processes that pick the same `(id, session_short, day)` triple
+    /// cannot clobber each other's tmp file.
+    ///
     /// # Errors
     ///
     /// See [`Self::detect_and_emit`].
     pub fn emit(&self, event: &PressureEvent) -> Result<PathBuf, PressureRegisterError> {
         std::fs::create_dir_all(&self.config.notices_dir)?;
-        let date = rfc3339_today();
-        let session_short = event
-            .session_id
-            .chars()
-            .take(8)
-            .collect::<String>();
+        let day = ymd_day_bucket(event.detected_at_ms);
+        let session_short = sanitise_session_id(&event.session_id);
         let filename = format!(
-            "PHASE-B-RESERVATION-NOTICE-{date}-{session_short}-{:06}.jsonl",
+            "PHASE-B-RESERVATION-NOTICE-{day}-{session_short}-{:06}.jsonl",
             event.id
         );
         let final_path = self.config.notices_dir.join(&filename);
-        let tmp_path = self.config.notices_dir.join(format!("{filename}.tmp"));
+        let tmp_path = self
+            .config
+            .notices_dir
+            .join(format!("{filename}.tmp.{}", std::process::id()));
         {
             let mut f = OpenOptions::new()
                 .create_new(true)
@@ -339,8 +390,7 @@ impl PressureRegister {
         Ok(final_path)
     }
 
-    /// Inspect a directory for emitted notices (used by tests +
-    /// observability tooling).
+    /// Inspect a directory for emitted notices.
     ///
     /// # Errors
     ///
@@ -370,23 +420,41 @@ impl PressureRegister {
     }
 }
 
-fn rfc3339_now() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
+/// Sanitise a session id for use in a filename: keep only
+/// `[A-Za-z0-9_-]`, take first 8 chars after filtering; fall back to
+/// `"unknown_"` when nothing survives. Path-traversal-safe.
+fn sanitise_session_id(raw: &str) -> String {
+    let filtered: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .take(8)
+        .collect();
+    if filtered.is_empty() {
+        "unknown_".to_owned()
+    } else {
+        filtered
+    }
+}
+
+/// Unix milliseconds since epoch, saturating on overflow / clock skew.
+fn unix_ms_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
-        .and_then(|d| i64::try_from(d.as_secs()).ok())
-        .map_or_else(|| "unknown".to_owned(), |s| format!("ts_s={s}"))
+        .and_then(|d| i64::try_from(d.as_millis()).ok())
+        .unwrap_or(0)
 }
 
-fn rfc3339_today() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|d| i64::try_from(d.as_secs()).ok())
-        .unwrap_or(0);
-    // YYYY-MM-DD approximation. Avoid a chrono dep per god-tier rule 18.
+/// Pseudo-RFC3339 string — Unix-seconds carried as text (chrono out per
+/// god-tier rule 18). Companion `detected_at_ms` carries ordering.
+fn pseudo_rfc3339(ms: i64) -> String {
+    let s = ms / 1_000;
+    format!("ts_s={s}")
+}
+
+/// Day bucket label for filename use. `d<N>` where N = days since epoch.
+fn ymd_day_bucket(ms: i64) -> String {
+    let secs = ms / 1_000;
     let days = secs / 86_400;
     format!("d{days}")
 }
@@ -394,8 +462,10 @@ fn rfc3339_today() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_excerpt, truncate_excerpt, CharterSection, ForbiddenCategory,
-        PressureRegister, PressureRegisterConfig, PressureSource, SCHEMA_VERSION,
+        classify_excerpt, pseudo_rfc3339, sanitise_session_id, truncate_excerpt,
+        unix_ms_now, ymd_day_bucket, CharterSection, ForbiddenCategory, PressureEvent,
+        PressureRegister, PressureRegisterConfig, PressureSource, MAX_EXCERPT_CHARS,
+        SCHEMA_VERSION,
     };
 
     fn tmp_register() -> (PressureRegister, tempfile::TempDir) {
@@ -418,11 +488,11 @@ mod tests {
     fn truncate_long_returns_ellipsis() {
         let big = "a".repeat(1024);
         let t = truncate_excerpt(&big);
-        assert!(t.chars().count() <= 513);
+        assert!(t.chars().count() <= MAX_EXCERPT_CHARS + 1);
         assert!(t.ends_with('\u{2026}'));
     }
 
-    // ---- classify_excerpt (10) ------------------------------------------
+    // ---- classify_excerpt (12) ------------------------------------------
 
     #[test]
     fn classify_recommend_verb() {
@@ -691,5 +761,321 @@ mod tests {
         let parent_ok =
             reg.config().notices_dir.as_path() == p.parent().expect("parent");
         assert!(parent_ok);
+    }
+
+    // ====================================================================
+    // Hardening pass (S1002388) — m15 god-tier maintainer pass.
+    // ====================================================================
+
+    // rationale: Anti-property F11 — classify_excerpt NEVER returns the
+    // `Other { description: <input> }` variant.
+    #[test]
+    fn classify_excerpt_never_returns_other_variant_f11() {
+        let inputs = [
+            "recommend_cascade",
+            "auto_promote",
+            "rewrite_src",
+            "package_release",
+            "optimise_x",
+            "http server :9000",
+            "POVM write back",
+            "use synthex_v2::x",
+            "handshake silence",
+            "innocuous read",
+            "agent reports recommend something",
+        ];
+        for inp in inputs {
+            if let Some(cat) = classify_excerpt(inp) {
+                assert!(
+                    !matches!(cat, ForbiddenCategory::Other { .. }),
+                    "classify_excerpt fabricated Other variant for {inp:?}"
+                );
+            }
+        }
+    }
+
+    // rationale: Anti-property F11 — input excerpt body is NEVER a
+    // substring of the category JSON.
+    #[test]
+    fn classify_excerpt_category_json_does_not_leak_input() {
+        let needle_input = "recommend_TOPSECRETSESSIONABC123";
+        let cat = classify_excerpt(needle_input).expect("classified");
+        let serialised = serde_json::to_string(&cat).expect("ser");
+        assert!(
+            !serialised.contains("TOPSECRETSESSIONABC123"),
+            "category JSON {serialised:?} leaked input substring"
+        );
+    }
+
+    // rationale: Boundary — truncate_excerpt at exactly
+    // MAX_EXCERPT_CHARS bytes of ASCII returns input as-is.
+    #[test]
+    fn truncate_excerpt_at_max_chars_returns_input_unchanged() {
+        let exact: String = "a".repeat(MAX_EXCERPT_CHARS);
+        assert_eq!(truncate_excerpt(&exact), exact);
+    }
+
+    // rationale: Boundary — truncate_excerpt at MAX + 1 ASCII chars
+    // truncates and appends U+2026.
+    #[test]
+    fn truncate_excerpt_just_over_max_truncates() {
+        let just_over: String = "a".repeat(MAX_EXCERPT_CHARS + 1);
+        let t = truncate_excerpt(&just_over);
+        assert!(t.ends_with('\u{2026}'));
+        assert_eq!(t.chars().count(), MAX_EXCERPT_CHARS + 1);
+    }
+
+    // rationale: Adversarial input — multi-byte UTF-8 does NOT slice a
+    // char in half. Output well-formed UTF-8.
+    #[test]
+    fn truncate_excerpt_does_not_split_multibyte_chars() {
+        let cjk: String = "测".repeat(600);
+        let t = truncate_excerpt(&cjk);
+        assert!(t.ends_with('\u{2026}'));
+        assert_eq!(t.chars().count(), MAX_EXCERPT_CHARS + 1);
+    }
+
+    // rationale: Contract regression — numeric fields round-trip
+    // bit-exact via serde_json.
+    #[test]
+    fn serde_round_trip_preserves_numeric_fields_bit_exact() {
+        let (reg, _dir) = tmp_register();
+        let event = reg.build_event(
+            ForbiddenCategory::AutoOrSmartVerb,
+            "auto_x",
+            PressureSource::Unknown,
+            "p",
+            CharterSection::V1_3HardRefusal,
+        );
+        let s = serde_json::to_string(&event).expect("ser");
+        let back: PressureEvent = serde_json::from_str(&s).expect("de");
+        assert_eq!(back.id, event.id);
+        assert_eq!(back.schema_version, event.schema_version);
+        assert_eq!(back.detected_at_ms, event.detected_at_ms);
+        assert_eq!(back.detected_at, event.detected_at);
+        assert_eq!(back.session_id, event.session_id);
+    }
+
+    // rationale: Concurrency — many threads on shared Arc produce
+    // strictly monotonic ids with no duplicates.
+    #[test]
+    fn concurrent_build_event_ids_are_strictly_monotonic_no_duplicates() {
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let reg = Arc::new(PressureRegister::new(PressureRegisterConfig {
+            notices_dir: dir.path().to_path_buf(),
+            session_id: "MT".into(),
+        }));
+        let mut handles = Vec::new();
+        for _ in 0..8_u32 {
+            let r = Arc::clone(&reg);
+            handles.push(std::thread::spawn(move || {
+                let mut ids = Vec::with_capacity(50);
+                for _ in 0..50_u32 {
+                    let e = r.build_event(
+                        ForbiddenCategory::RewriteVerb,
+                        "x",
+                        PressureSource::Unknown,
+                        "p",
+                        CharterSection::V1_3HardRefusal,
+                    );
+                    ids.push(e.id);
+                }
+                ids
+            }));
+        }
+        let mut all: Vec<u64> = Vec::new();
+        for h in handles {
+            all.extend(h.join().expect("join"));
+        }
+        let mut sorted = all.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), all.len(), "duplicates emitted");
+        assert_eq!(*sorted.first().expect("first"), 1);
+        assert_eq!(*sorted.last().expect("last"), all.len() as u64);
+    }
+
+    // rationale: Concurrency — concurrent emit() produces N distinct
+    // on-disk files.
+    #[test]
+    fn concurrent_emit_creates_n_distinct_files() {
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let reg = Arc::new(PressureRegister::new(PressureRegisterConfig {
+            notices_dir: dir.path().to_path_buf(),
+            session_id: "MT".into(),
+        }));
+        let mut handles = Vec::new();
+        for _ in 0..4_u32 {
+            let r = Arc::clone(&reg);
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..10_u32 {
+                    let e = r.build_event(
+                        ForbiddenCategory::RewriteVerb,
+                        "x",
+                        PressureSource::Unknown,
+                        "p",
+                        CharterSection::V1_3HardRefusal,
+                    );
+                    r.emit(&e).expect("emit");
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("join");
+        }
+        let notices = reg.list_notices().expect("list");
+        assert_eq!(notices.len(), 40);
+    }
+
+    // rationale: Resource accounting — emit() never leaves a `.tmp.*`
+    // behind on happy path.
+    #[test]
+    fn emit_does_not_leave_tmp_files_on_happy_path() {
+        let (reg, dir) = tmp_register();
+        for _ in 0..5_u32 {
+            let e = reg.build_event(
+                ForbiddenCategory::RewriteVerb,
+                "x",
+                PressureSource::Unknown,
+                "p",
+                CharterSection::V1_3HardRefusal,
+            );
+            reg.emit(&e).expect("emit");
+        }
+        for entry in std::fs::read_dir(dir.path()).expect("read_dir") {
+            let entry = entry.expect("entry");
+            let name = entry.file_name().to_string_lossy().into_owned();
+            assert!(!name.contains(".tmp."), "leftover tmp file: {name}");
+        }
+    }
+
+    // rationale: Adversarial input — path-traversal session_id sanitised
+    // before filename use.
+    #[test]
+    fn session_id_with_path_traversal_is_sanitised_in_filename() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let reg = PressureRegister::new(PressureRegisterConfig {
+            notices_dir: dir.path().to_path_buf(),
+            session_id: "../../etc/passwd ; rm -rf /".into(),
+        });
+        let e = reg.build_event(
+            ForbiddenCategory::RewriteVerb,
+            "x",
+            PressureSource::Unknown,
+            "p",
+            CharterSection::V1_3HardRefusal,
+        );
+        let p = reg.emit(&e).expect("emit");
+        let name = p
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .expect("name");
+        assert!(!name.contains('/'));
+        assert!(!name.contains(".."));
+        assert!(!name.contains(' '));
+        assert!(!name.contains(';'));
+        assert!(p.parent().expect("parent") == dir.path());
+    }
+
+    // rationale: Boundary — empty / non-alphanum session_id falls back.
+    #[test]
+    fn sanitise_empty_session_id_falls_back() {
+        assert_eq!(sanitise_session_id(""), "unknown_");
+        assert_eq!(sanitise_session_id("////"), "unknown_");
+    }
+
+    // rationale: Determinism — sanitise_session_id is pure.
+    #[test]
+    fn sanitise_session_id_is_deterministic() {
+        let first = sanitise_session_id("AbC-123_DEF456ghi");
+        for _ in 0..100_u32 {
+            assert_eq!(sanitise_session_id("AbC-123_DEF456ghi"), first);
+        }
+    }
+
+    // rationale: Boundary — timestamp helpers produce sensible shapes.
+    #[test]
+    fn timestamp_helpers_produce_sensible_values() {
+        let ms = unix_ms_now();
+        assert!(ms >= 0);
+        let s = pseudo_rfc3339(ms);
+        assert!(s.starts_with("ts_s="));
+        let bucket = ymd_day_bucket(ms);
+        assert!(bucket.starts_with('d'));
+    }
+
+    // rationale: Anti-property F11 — category field stays identical
+    // across differing excerpts; only trigger_excerpt reflects input.
+    #[test]
+    fn category_field_independent_of_excerpt_body() {
+        let (reg, _dir) = tmp_register();
+        let e1 = reg.build_event(
+            classify_excerpt("auto_promote_pane1").expect("c1"),
+            "auto_promote_pane1",
+            PressureSource::Unknown,
+            "p",
+            CharterSection::V1_3HardRefusal,
+        );
+        let e2 = reg.build_event(
+            classify_excerpt("auto_promote_pane2").expect("c2"),
+            "auto_promote_pane2",
+            PressureSource::Unknown,
+            "p",
+            CharterSection::V1_3HardRefusal,
+        );
+        assert_eq!(e1.forbidden_category, e2.forbidden_category);
+        assert_ne!(e1.trigger_excerpt, e2.trigger_excerpt);
+    }
+
+    // rationale: Contract regression — detected_at_ms is non-decreasing
+    // in emission order.
+    #[test]
+    fn detected_at_ms_is_non_decreasing_in_emission_order() {
+        let (reg, _dir) = tmp_register();
+        let mut last: i64 = 0;
+        for _ in 0..50_u32 {
+            let e = reg.build_event(
+                ForbiddenCategory::RewriteVerb,
+                "x",
+                PressureSource::Unknown,
+                "p",
+                CharterSection::V1_3HardRefusal,
+            );
+            assert!(
+                e.detected_at_ms >= last,
+                "detected_at_ms went backwards: {} < {last}",
+                e.detected_at_ms
+            );
+            last = e.detected_at_ms;
+        }
+    }
+
+    // rationale: Cross-module surface invariant — m15 emits the
+    // forbidden-verb category but never includes any namespace prefix
+    // string (that surface belongs to m9 / m13 / m42). Confirms via an
+    // indirect check: emit one event and assert the on-disk JSONL has no
+    // `_trace` suffix substring (which would be a tell for stray
+    // namespace literals leaking into the witness record).
+    #[test]
+    fn m15_emit_path_does_not_embed_namespace_suffix() {
+        let (reg, _dir) = tmp_register();
+        let e = reg.build_event(
+            ForbiddenCategory::RewriteVerb,
+            "rewrite_x",
+            PressureSource::Unknown,
+            "p",
+            CharterSection::V1_3HardRefusal,
+        );
+        let path = reg.emit(&e).expect("emit");
+        let content = std::fs::read_to_string(&path).expect("read");
+        // `_trace` is a distinctive substring of the workflow_trace
+        // namespace prefix; if it ever appears in an m15 event JSONL,
+        // someone has folded a namespace literal into m15's wire-form.
+        assert!(
+            !content.contains("_trace"),
+            "m15 event JSONL must not embed namespace-prefix substrings: {content}"
+        );
     }
 }

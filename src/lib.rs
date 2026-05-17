@@ -37,6 +37,7 @@ pub mod m5_battern;
 pub mod m6_cost;
 pub mod m7_workflow_runs;
 pub mod m12_cli_reports;
+pub mod m13_stcortex_writer;
 pub mod m8_povm_build_prereq;
 
 pub use m4_cascade::{
@@ -60,6 +61,11 @@ pub use m7_workflow_runs::{
 pub use m12_cli_reports::{
     render_cluster_cost_table, render_cost_histogram, render_machine, render_outcome_timeline,
     render_summary_line, OutputFormat,
+};
+pub use m13_stcortex_writer::{
+    CorrelationMemory, DeferReason, LtpDensityReader, OracHttpReader, PromoteOutcome,
+    StcortexWriter, StcortexWriterError, SubstrateWriter, LTP_PHASE_1_FLOOR,
+    LTP_PHASE_3_TARGET,
 };
 pub mod m9_watcher_namespace_guard;
 pub mod m10_ember_ci_gate;

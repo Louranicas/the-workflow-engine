@@ -33,6 +33,16 @@ pub enum NexusEmitError {
     /// Server returned a non-2xx status.
     #[error("non-2xx status: {0}")]
     NonSuccess(u16),
+    /// Server returned 2xx but the body carries a non-null `error` field —
+    /// the AP-V7-13 health-200-but-behaviour-rejected pattern (the same
+    /// shape that triggered the m42 stcortex-only ADR). Closes Cluster H
+    /// Wave-A3 C4: a 200 OK with `{"error":"queue_full"}` is NOT success.
+    #[error("server rejected (2xx body-shape): {body}")]
+    ServerRejected {
+        /// Raw response body that surfaced the rejection (bounded by the
+        /// HTTP client's response size; not stored verbatim if larger).
+        body: String,
+    },
 }
 
 /// Trait abstraction for the HTTP push (real impl uses reqwest).
@@ -43,6 +53,8 @@ pub trait NexusClient: Send + Sync {
     ///
     /// [`NexusEmitError::Transport`] on transport failure.
     /// [`NexusEmitError::NonSuccess`] on non-2xx.
+    /// [`NexusEmitError::ServerRejected`] on 2xx with a body containing a
+    /// non-null `error` field (AP-V7-13 body-shape check; Wave-A3 C4).
     fn push(&self, event: &NexusEvent) -> Result<(), NexusEmitError>;
 }
 
@@ -77,6 +89,30 @@ impl NexusClient for HttpNexusClient {
         let status = resp.status();
         if !status.is_success() {
             return Err(NexusEmitError::NonSuccess(status.as_u16()));
+        }
+        // AP-V7-13 body-shape check (Wave-A3 C4): a 2xx status is necessary
+        // but not sufficient. The server may return 200 + `{"error":"..."}`
+        // to indicate behavioural rejection (queue_full, deprecated, etc.).
+        // We read the body and inspect for a non-null `error` field. An
+        // empty body (e.g. 204 No Content) or a non-JSON body is treated as
+        // success — many sane servers omit body on accept.
+        let body = resp
+            .text()
+            .map_err(|e| NexusEmitError::Transport(e.to_string()))?;
+        if body.is_empty() {
+            return Ok(());
+        }
+        // If the body is not parseable JSON, we treat as success: this
+        // module's contract is "reject on a visibly-rejecting JSON body".
+        // Garbled bodies are a transport / contract-drift class that the
+        // caller will surface elsewhere (m41 has its own parse layer).
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) else {
+            return Ok(());
+        };
+        if let Some(err) = value.get("error") {
+            if !err.is_null() {
+                return Err(NexusEmitError::ServerRejected { body });
+            }
         }
         Ok(())
     }
@@ -324,7 +360,9 @@ mod tests {
         let r = c.push(&e);
         assert!(r.is_err(), "unreachable URL must yield a typed error");
         match r.unwrap_err() {
-            NexusEmitError::Transport(_) | NexusEmitError::NonSuccess(_) => {}
+            NexusEmitError::Transport(_)
+            | NexusEmitError::NonSuccess(_)
+            | NexusEmitError::ServerRejected { .. } => {}
         }
     }
 
@@ -376,5 +414,160 @@ mod tests {
             NexusEmitError::Transport("dns timeout".into()).to_string(),
             "transport: dns timeout"
         );
+    }
+
+    // ====================================================================
+    // Cluster H Wave-A3 — C4 AP-V7-13 body-shape check.
+    // Categories: Adversarial input · Boundary · Contract regression.
+    // wiremock-driven end-to-end push() exercise.
+    // ====================================================================
+
+    // rationale: Adversarial input (AP-V7-13) — a 200 OK with a JSON body
+    // carrying a non-null `error` field is the EXACT shape that motivated
+    // the m42 stcortex-only ADR. push() must NOT treat this as success.
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_returns_server_rejected_on_200_with_error_body() {
+        // rationale: Adversarial input (AP-V7-13 body-shape rejection)
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/nexus/push"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"error":"queue_full"}"#)
+                    .insert_header("content-type", "application/json"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v3/nexus/push", server.uri());
+        // Run the blocking client off-task so we don't deadlock current_thread.
+        let r = tokio::task::spawn_blocking(move || {
+            let c =
+                super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
+            let e = build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            c.push(&e)
+        })
+        .await
+        .expect("join");
+
+        match r {
+            Err(NexusEmitError::ServerRejected { body }) => {
+                assert!(body.contains("queue_full"), "rejection carries body");
+            }
+            other => panic!("expected ServerRejected, got {other:?}"),
+        }
+    }
+
+    // rationale: Boundary — a 204 No Content response (empty body) is a
+    // legitimate success mode for some servers (fire-and-forget accept).
+    // push() must NOT fail just because the body is empty.
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_succeeds_on_204_no_content() {
+        // rationale: Boundary (empty body = success)
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/nexus/push"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v3/nexus/push", server.uri());
+        let r = tokio::task::spawn_blocking(move || {
+            let c =
+                super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
+            let e = build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            c.push(&e)
+        })
+        .await
+        .expect("join");
+        assert!(r.is_ok(), "204 No Content is success, got {r:?}");
+    }
+
+    // rationale: Contract regression — a 200 OK with an explicitly-OK body
+    // (no `error` field) is the canonical success shape. Verifies the new
+    // body-inspection path doesn't regress the happy case.
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_succeeds_on_200_with_ok_body() {
+        // rationale: Contract regression (happy-path preservation)
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/nexus/push"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"ok":true,"accepted":1}"#)
+                    .insert_header("content-type", "application/json"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v3/nexus/push", server.uri());
+        let r = tokio::task::spawn_blocking(move || {
+            let c =
+                super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
+            let e = build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            c.push(&e)
+        })
+        .await
+        .expect("join");
+        assert!(r.is_ok(), "200 OK with non-error body is success, got {r:?}");
+    }
+
+    // rationale: Adversarial input — a 200 OK with `"error": null` is NOT
+    // a rejection (JSON-RPC null-error semantics carry over by analogy).
+    // Defends against an over-eager body-shape check that would fail-open
+    // on null.
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_treats_null_error_field_as_non_error() {
+        // rationale: Adversarial input (null-error semantics)
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/nexus/push"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"error":null,"ok":true}"#)
+                    .insert_header("content-type", "application/json"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v3/nexus/push", server.uri());
+        let r = tokio::task::spawn_blocking(move || {
+            let c =
+                super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
+            let e = build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            c.push(&e)
+        })
+        .await
+        .expect("join");
+        assert!(r.is_ok(), "null error field is not a rejection, got {r:?}");
+    }
+
+    // rationale: Anti-property — the ServerRejected variant Display format
+    // is pinned for operator runbooks and log scrapers.
+    #[test]
+    fn server_rejected_error_display_format_pinned() {
+        // rationale: Anti-property (operator-facing log format)
+        let err = NexusEmitError::ServerRejected {
+            body: r#"{"error":"queue_full"}"#.into(),
+        };
+        let s = err.to_string();
+        assert!(s.starts_with("server rejected (2xx body-shape):"));
+        assert!(s.contains("queue_full"));
     }
 }

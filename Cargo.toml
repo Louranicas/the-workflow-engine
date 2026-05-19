@@ -53,6 +53,12 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 tempfile = "3"
 # m11 Gap 2 property tests — 10 invariants × up-to-10k cases each.
 proptest = "1"
+# Cluster H Wave-A3 (C4 / H3 / H4) — mock HTTP server for end-to-end
+# adversarial tests of m40 body-shape rejection (AP-V7-13: health-200 ≠
+# behaviour-verified) and m41 JSON-RPC id-echo / error-envelope edge cases.
+# Pure tokio-based; doesn't pull in extra heavy deps (matches our existing
+# tokio dependency).
+wiremock = "0.6"
 
 [features]
 default = ["full"]

@@ -384,6 +384,118 @@ impl CuratedBank {
     }
 }
 
+// ─── m11 LifecycleBank bridge ─────────────────────────────────────────────────
+//
+// Wires the production [`CuratedBank`] into m11's
+// [`crate::m11_fitness_weighted_decay::run_consolidation_cycle`].
+//
+// Cross-cluster contract (G ↔ D, Mission §7 finding C1 — cluster-D scout +
+// cluster-G+H scout + cross-cluster scout converged): until this impl existed,
+// `LifecycleBank` was implemented only by `MockBank` in m11's test module, so
+// the consolidation cycle was UNRUNNABLE against the production bank.
+//
+// Bridge conventions (Day-1 — no spec amendment required, additive impl):
+//
+// * `workflow_id` is u64 on the bank side, &str on the trait side.
+//   Round-tripped via decimal `to_string()` / `parse::<u64>()`. Hex would also
+//   work but decimal preserves the FNV-1a hash as a single integer literal in
+//   logs without ambiguity.
+// * `pathway_id` does not exist as a distinct field on [`AcceptedWorkflow`]
+//   (proposals do not yet carry pathway lineage). Day-1 synthesis:
+//   `pathway_id = workflow_id.to_string()`. m42 + downstream stcortex writers
+//   own pathway lineage when it lands; the bridge will fold that field in
+//   without changing the trait.
+// * Recovery edge **PrunePending → Active**: m30 does NOT store
+//   [`SunsetPhase`]; phase is derived per-call via
+//   [`AcceptedWorkflow::phase_for`]. As soon as a workflow's weight rises back
+//   above [`DEFAULT_PRUNE_PENDING_THRESHOLD`] the next `phase_for` query
+//   classifies it Active again — the recovery edge is automatic, not an
+//   explicit transition emit. The trait's `transition` method is observational
+//   only (logged for telemetry; m30 has no phase to mutate).
+// * `mark_for_prune`: m30's eviction sweep
+//   ([`CuratedBank::prune_expired`]) classifies via `phase_for` —
+//   `weight < prune_threshold` rows are evicted on the next sweep regardless
+//   of any external mark. The trait method is therefore a logged no-op.
+// * `apply_decay` (trait, `&mut self`) delegates to the infallible
+//   [`CuratedBank::apply_decay`] (which uses interior mutability via the inner
+//   `Mutex`). The `&mut self` requirement enforces sole-owner discipline for
+//   the duration of one consolidation cycle — concurrent reads via `&self`
+//   methods are blocked by the borrow checker, which matches the design
+//   intent of `run_consolidation_cycle` (one driver, one tick).
+
+impl crate::m11_fitness_weighted_decay::LifecycleBank for CuratedBank {
+    fn iter_active(&self) -> Vec<crate::m11_fitness_weighted_decay::AcceptedWorkflowDecay> {
+        // Expose ALL rows (no sunset filter here); m11 sunset-filters via
+        // `sunset_at_of(...)` and the dispatch boundary in `m31` filters via
+        // `bank.active(now_ms, min_weight)`. Returning everything keeps the
+        // decay sweep idempotent across SunsetExpired rows that
+        // `prune_expired` will reap next tick.
+        let guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poison) => poison.into_inner(),
+        };
+        guard
+            .values()
+            .map(|w| crate::m11_fitness_weighted_decay::AcceptedWorkflowDecay {
+                workflow_id: w.workflow_id.to_string(),
+                pathway_id: w.workflow_id.to_string(),
+                last_run_ms: w.last_run_ms.unwrap_or(w.accepted_at_ms),
+            })
+            .collect()
+    }
+
+    fn apply_decay(
+        &mut self,
+        workflow_id: &str,
+        factor: crate::m11_fitness_weighted_decay::DecayFactor,
+    ) {
+        match workflow_id.parse::<u64>() {
+            Ok(id) => CuratedBank::apply_decay(self, id, factor.as_f64()),
+            Err(_) => {
+                tracing::warn!(
+                    target: "m30.lifecyclebank.parse",
+                    workflow_id,
+                    "m30: apply_decay skipped — workflow_id not parseable as u64"
+                );
+            }
+        }
+    }
+
+    fn weight_of(&self, workflow_id: &str) -> Option<f64> {
+        let id = workflow_id.parse::<u64>().ok()?;
+        self.get(id).ok().map(|w| w.weight)
+    }
+
+    fn mark_for_prune(&mut self, workflow_id: &str) {
+        tracing::debug!(
+            target: "m30.lifecyclebank.mark_for_prune",
+            workflow_id,
+            "m30: mark_for_prune is a no-op; prune_expired() sweeps lazily via phase_for()"
+        );
+    }
+
+    fn sunset_at_of(&self, workflow_id: &str) -> Option<i64> {
+        let id = workflow_id.parse::<u64>().ok()?;
+        self.get(id).ok().map(|w| w.sunset_at_ms)
+    }
+
+    fn transition(
+        &mut self,
+        workflow_id: &str,
+        phase: crate::m11_fitness_weighted_decay::SunsetPhase,
+    ) {
+        // m30 does not store SunsetPhase — phase is derived from weight via
+        // `phase_for`. We log for telemetry so the m11 consolidation cycle's
+        // transition emits leave an audit trail.
+        tracing::debug!(
+            target: "m30.lifecyclebank.transition",
+            workflow_id,
+            phase = phase.as_str(),
+            "m30: phase transition observed (derived, not stored)"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -788,5 +900,209 @@ mod tests {
         assert_eq!(e1, e2);
         let s = format!("{e1}");
         assert!(s.contains("42"));
+    }
+
+    // ─── LifecycleBank bridge (Scout-pass C1 finding) ─────────────────────
+    //
+    // Wave-1 hardening left `MockBank` as the sole `impl LifecycleBank`,
+    // so the m11 consolidation cycle was unrunnable against the production
+    // `CuratedBank`. These tests exercise the bridge end-to-end and lock
+    // the bridge conventions documented above the impl block.
+
+    use crate::m11_fitness_weighted_decay::{
+        run_consolidation_cycle, DecayConfig, DecayError, DecayFactor, FrequencyReader,
+        LifecycleBank, PathwayWeightReader,
+    };
+    // SunsetPhase already imported at line 508 above.
+    use std::collections::HashMap;
+
+    // Minimal readers backing the consolidation cycle against a CuratedBank.
+    struct StubPathways {
+        weights: HashMap<String, f64>,
+    }
+    impl PathwayWeightReader for StubPathways {
+        fn read_pathway_weight(&self, pathway_id: &str) -> Result<f64, DecayError> {
+            self.weights
+                .get(pathway_id)
+                .copied()
+                .ok_or_else(|| DecayError::PathwayReadFailed {
+                    pathway_id: pathway_id.to_owned(),
+                    reason: "stub: not seeded".into(),
+                })
+        }
+    }
+    struct StubFreq {
+        counts: HashMap<String, u64>,
+        cohort_max: u64,
+    }
+    impl FrequencyReader for StubFreq {
+        fn frequency(&self, workflow_id: &str) -> u64 {
+            self.counts.get(workflow_id).copied().unwrap_or(0)
+        }
+        fn cohort_max(&self) -> u64 {
+            self.cohort_max
+        }
+    }
+
+    #[test]
+    fn lifecyclebank_iter_active_returns_all_bank_rows() {
+        // rationale: Cross-module contract — bridge surface exposes every
+        // bank row (no sunset filter at trait boundary; m11 sunset-filters).
+        let bank = CuratedBank::new();
+        let id_a = bank.accept(sample_proposal_with_seed(1001), 0).expect("a");
+        let id_b = bank.accept(sample_proposal_with_seed(1002), 0).expect("b");
+        let rows = LifecycleBank::iter_active(&bank);
+        let ids: std::collections::HashSet<String> =
+            rows.iter().map(|r| r.workflow_id.clone()).collect();
+        assert!(ids.contains(&id_a.to_string()));
+        assert!(ids.contains(&id_b.to_string()));
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn lifecyclebank_workflow_id_round_trips_u64_decimal() {
+        // rationale: Contract regression — u64 ↔ &str decimal stringification
+        // is the bridge convention. A trip through iter_active + weight_of
+        // must preserve identity.
+        let bank = CuratedBank::new();
+        let id = bank.accept(sample_proposal_with_seed(2001), 0).expect("ok");
+        let rows = LifecycleBank::iter_active(&bank);
+        let row = rows.iter().find(|r| r.workflow_id == id.to_string()).expect("row");
+        let weight = LifecycleBank::weight_of(&bank, &row.workflow_id).expect("weight");
+        assert!((weight - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn lifecyclebank_apply_decay_via_trait_mutates_weight() {
+        // rationale: Cross-module — &mut-self trait method delegates to
+        // interior-mutable &self impl via the inner Mutex.
+        let mut bank = CuratedBank::new();
+        let id = bank.accept(sample_proposal_with_seed(3001), 0).expect("ok");
+        let key = id.to_string();
+        let factor = DecayFactor::new(0.5).expect("factor");
+        LifecycleBank::apply_decay(&mut bank, &key, factor);
+        let w = LifecycleBank::weight_of(&bank, &key).expect("weight");
+        assert!((w - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn lifecyclebank_apply_decay_unparseable_id_logged_no_op() {
+        // rationale: Anti-property — non-numeric workflow_id strings must
+        // be a logged no-op, NOT a panic, NOT silently coerced to id=0.
+        let mut bank = CuratedBank::new();
+        let id = bank.accept(sample_proposal_with_seed(4001), 0).expect("ok");
+        let pre = bank.get(id).expect("pre").weight;
+        let factor = DecayFactor::new(0.1).expect("factor");
+        LifecycleBank::apply_decay(&mut bank, "not_a_u64", factor);
+        let post = bank.get(id).expect("post").weight;
+        assert!((post - pre).abs() < f64::EPSILON,
+            "decay must NOT touch any workflow when id is unparseable");
+    }
+
+    #[test]
+    fn lifecyclebank_sunset_at_of_matches_accept_default_window() {
+        // rationale: Contract regression — sunset window invariant exposed
+        // identically via direct accessor and trait accessor.
+        let bank = CuratedBank::new();
+        let now = 1_700_000_000_000_i64;
+        let id = bank.accept(sample_proposal_with_seed(5001), now).expect("ok");
+        let key = id.to_string();
+        let via_trait = LifecycleBank::sunset_at_of(&bank, &key).expect("trait");
+        let via_direct = bank.get(id).expect("direct").sunset_at_ms;
+        assert_eq!(via_trait, via_direct);
+        assert_eq!(via_trait, now.saturating_add(DEFAULT_SUNSET_DAYS * MS_PER_DAY));
+    }
+
+    #[test]
+    fn lifecyclebank_weight_of_unknown_id_is_none() {
+        // rationale: Boundary — unknown id returns None, not a sentinel.
+        let bank = CuratedBank::new();
+        assert!(LifecycleBank::weight_of(&bank, "99999").is_none());
+        assert!(LifecycleBank::weight_of(&bank, "not_numeric").is_none());
+    }
+
+    #[test]
+    fn lifecyclebank_consolidation_cycle_runs_against_production_bank() {
+        // rationale: Cross-module integration — the headline scout-pass C1
+        // finding was that m11 could not run against CuratedBank. This
+        // test exercises the bridge end-to-end with a real consolidation
+        // cycle producing real SunsetStats.
+        let mut bank = CuratedBank::new();
+        let id_a = bank.accept(sample_proposal_with_seed(6001), 0).expect("a");
+        let id_b = bank.accept(sample_proposal_with_seed(6002), 0).expect("b");
+        let id_c = bank.accept(sample_proposal_with_seed(6003), 0).expect("c");
+
+        // Seed pathway weights at the synthetic Day-1 pathway_id = workflow_id.
+        let mut weights = HashMap::new();
+        weights.insert(id_a.to_string(), 0.5);
+        weights.insert(id_b.to_string(), 0.5);
+        weights.insert(id_c.to_string(), 0.5);
+        let pathways = StubPathways { weights };
+        let freq = StubFreq {
+            counts: HashMap::new(),
+            cohort_max: 1,
+        };
+        let cfg = DecayConfig::default();
+        let now = 1_700_000_000_000_i64;
+        let stats = run_consolidation_cycle(&mut bank, &pathways, &freq, &cfg, || Some(now))
+            .expect("cycle ok");
+        assert!(stats.workflows_decayed >= 3, "all 3 workflows decayed");
+        assert_eq!(stats.cycles_run, 1);
+    }
+
+    #[test]
+    fn lifecyclebank_prune_pending_recovers_on_weight_rise() {
+        // rationale: Anti-property / Contract regression — the recovery
+        // edge PrunePending → Active is automatic via phase_for(); no
+        // explicit transition emit needed. Drive weight below the soft
+        // floor, then back above, and verify phase_for() reports Active.
+        let bank = CuratedBank::new();
+        let id = bank.accept(sample_proposal_with_seed(7001), 0).expect("ok");
+        // Force weight into the PrunePending band.
+        bank.apply_decay(id, 0.08 / 1.0); // weight ~ 0.08; soft = 0.10, hard = 0.05
+        let w_low = bank.get(id).expect("low").weight;
+        assert!(w_low < DEFAULT_PRUNE_PENDING_THRESHOLD);
+        assert!(w_low >= DEFAULT_PRUNE_THRESHOLD);
+        let phase_low = bank.get(id).expect("p").phase_for(
+            1, DEFAULT_PRUNE_PENDING_THRESHOLD, DEFAULT_PRUNE_THRESHOLD,
+        );
+        assert_eq!(phase_low, SunsetPhase::PrunePending);
+        // Substrate rises: simulate by force-boosting the weight via a >1
+        // factor (multiplicative; clamped to 1.0).
+        bank.apply_decay(id, 50.0); // 0.08 * 50 = 4.0, clamped to 1.0
+        let w_high = bank.get(id).expect("high").weight;
+        assert!((w_high - 1.0).abs() < f64::EPSILON);
+        let phase_high = bank.get(id).expect("p").phase_for(
+            1, DEFAULT_PRUNE_PENDING_THRESHOLD, DEFAULT_PRUNE_THRESHOLD,
+        );
+        assert_eq!(phase_high, SunsetPhase::Active,
+            "recovery edge: phase_for must reclassify to Active automatically");
+    }
+
+    #[test]
+    fn lifecyclebank_mark_for_prune_is_no_op() {
+        // rationale: Contract regression — m30's prune_expired sweeps via
+        // phase_for; mark_for_prune is logged-no-op telemetry. Verify it
+        // does not mutate bank state.
+        let mut bank = CuratedBank::new();
+        let id = bank.accept(sample_proposal_with_seed(8001), 0).expect("ok");
+        let pre_len = bank.len();
+        LifecycleBank::mark_for_prune(&mut bank, &id.to_string());
+        assert_eq!(bank.len(), pre_len);
+        assert!(bank.get(id).is_ok());
+    }
+
+    #[test]
+    fn lifecyclebank_transition_is_observational_does_not_mutate() {
+        // rationale: Contract regression — transition is observational
+        // (phase is derived, not stored). Must not affect bank state.
+        let mut bank = CuratedBank::new();
+        let id = bank.accept(sample_proposal_with_seed(9001), 0).expect("ok");
+        let pre_weight = bank.get(id).expect("pre").weight;
+        let key = id.to_string();
+        LifecycleBank::transition(&mut bank, &key, SunsetPhase::PrunePending);
+        LifecycleBank::transition(&mut bank, &key, SunsetPhase::SunsetExpired);
+        let post_weight = bank.get(id).expect("post").weight;
+        assert!((post_weight - pre_weight).abs() < f64::EPSILON);
     }
 }

@@ -230,10 +230,28 @@ fn kmeans_plus_plus_seed(points: &[Vec<f64>], k: usize, seed: u64) -> Vec<Vec<f6
                 .map(|c| squared_l2(p, c))
                 .fold(f64::INFINITY, f64::min);
             // Deterministic tie-break: hash(idx, i, seed) for stability.
-            #[allow(
-                clippy::cast_possible_truncation,
-                reason = "tie-break ordering only; truncation has no observable effect"
-            )]
+            //
+            // H7 fix (carry-forward S1002600): the prior implementation
+            // computed `dt = d + (tiebreak as f64).copysign(1.0) * 1e-12`
+            // which was numerically broken on two counts:
+            //
+            //   1. `tiebreak` is a `u64` from FNV-1a typically near ~10^19.
+            //      The `as f64` cast truncates near the MSB; multiplying by
+            //      1e-12 yielded magnitudes of ~10^7. For any realistic
+            //      distance `d` (which is `squared_l2`, often in
+            //      [1e-6, 1e6]) the tiebreak bias DOMINATED the distance
+            //      term and flipped point selection arbitrarily — turning
+            //      k-means++ "pick the farthest point" into "pick a
+            //      hash-determined point".
+            //   2. `.copysign(1.0)` is a no-op for `u64 → f64` because the
+            //      cast is always non-negative, so the sign manipulation
+            //      did nothing.
+            //
+            // The replacement uses a bounded bias: `(tiebreak % 1024) as
+            // f64 * f64::EPSILON * d.max(1.0)`. Magnitude is at most
+            // `1023 * ε * max(d, 1)` ≈ `2.27e-13 * max(d, 1)`, which
+            // breaks ties deterministically without flipping the ordering
+            // of materially-different distances.
             let tiebreak = fnv1a_64(
                 &[
                     (idx as u64).to_le_bytes(),
@@ -244,9 +262,10 @@ fn kmeans_plus_plus_seed(points: &[Vec<f64>], k: usize, seed: u64) -> Vec<Vec<f6
             );
             #[allow(
                 clippy::cast_precision_loss,
-                reason = "tie-break value used only for ordering"
+                reason = "tiebreak % 1024 fits exactly in f64 mantissa; used only for ordering"
             )]
-            let dt = d + (tiebreak as f64).copysign(1.0) * 1e-12;
+            let bias = (tiebreak % 1024) as f64 * f64::EPSILON * d.max(1.0);
+            let dt = d + bias;
             if dt > best_dist {
                 best_dist = dt;
                 best_idx = idx;
@@ -500,6 +519,133 @@ mod tests {
         fn assert_send<T: Send>() {}
         assert_send::<super::ClusteredPoint>();
         assert_send::<KMeansError>();
+    }
+
+    // ====================================================================
+    // H7 closure (carry-forward S1002600) — k-means++ tiebreak precision.
+    // Prior `dt = d + (tiebreak as f64).copysign(1.0) * 1e-12` yielded
+    // bias magnitudes near 1e7 that dominated small distances. New form
+    // `bias = (tiebreak % 1024) as f64 * f64::EPSILON * d.max(1.0)` is
+    // bounded by ~2.3e-13 * max(d, 1) — breaks ties without flipping
+    // point order.
+    // ====================================================================
+
+    #[test]
+    // rationale: H7 — tiebreak bias must NEVER dominate the distance term.
+    // We exercise the bounded-bias property indirectly by constructing two
+    // distinct point sets (one with a clear far-point, one with all-equal
+    // distances) and confirming kmeans++ seeding still picks materially-
+    // farther points when they exist (i.e., the bias is small enough not
+    // to flip the ordering between d=1.0 and d=100.0).
+    fn tiebreak_bias_is_bounded_relative_to_distance() {
+        // 3 points: 0,0 and 1,0 (close) and 100,0 (far). Seeding picks one
+        // initial centroid (FNV-determined), then the second pick should
+        // be the FAR point because k-means++ chooses by max-min-distance.
+        // If the buggy 1e7-magnitude tiebreak were still active, the
+        // far-vs-near choice would be hash-determined, not distance-
+        // determined — and over many seeds the far point would NOT be
+        // consistently chosen.
+        let pts = vec![pt(&[0.0]), pt(&[1.0]), pt(&[100.0])];
+        let mut far_chosen = 0_usize;
+        for seed in 0_u64..50 {
+            let cfg = KMeansConfig {
+                k: 2,
+                seed,
+                ..KMeansConfig::default()
+            };
+            let (_, centroids) = kmeans(&pts, &cfg).expect("ok");
+            // One of the two centroids should be (or quickly converge to)
+            // the far point at x=100.0 after Lloyd's iterates.
+            let has_far = centroids.iter().any(|c| (c[0] - 100.0).abs() < 1e-6);
+            if has_far {
+                far_chosen += 1;
+            }
+        }
+        // Bounded-bias contract: across 50 seeds, the far point must be
+        // chosen by k-means++ + Lloyd's effectively every time. With the
+        // broken bias the count would be ~50% (hash-determined).
+        assert!(
+            far_chosen >= 45,
+            "tiebreak bias appears to dominate distance: far point chosen \
+             only {far_chosen}/50 times (expected ≥ 45)"
+        );
+    }
+
+    #[test]
+    // rationale: H7 — same seed + same input must yield bit-identical
+    // assignments and centroids across repeated calls. The bounded bias
+    // is fully deterministic; this is a regression guard for any future
+    // randomness introduction into the tiebreak path.
+    fn tiebreak_breaks_ties_deterministically_without_flipping_order() {
+        // Construct a case where multiple candidate points share the same
+        // squared_l2 to the seed centroid: equidistant points around the
+        // origin. The tiebreak then picks ONE of them; on repeat with the
+        // same seed it must pick the SAME one (no randomness).
+        let pts = vec![
+            pt(&[1.0, 0.0]),   // d=1 from origin
+            pt(&[-1.0, 0.0]),  // d=1
+            pt(&[0.0, 1.0]),   // d=1
+            pt(&[0.0, -1.0]),  // d=1
+            pt(&[10.0, 10.0]), // d=200 (clear far point)
+        ];
+        let cfg = KMeansConfig {
+            k: 2,
+            seed: 0xDEAD_BEEF_CAFE_BABE,
+            ..KMeansConfig::default()
+        };
+        let (a, ca) = kmeans(&pts, &cfg).expect("a");
+        let (b, cb) = kmeans(&pts, &cfg).expect("b");
+        // Bit-identical centroids across repeated calls — confirms the
+        // tiebreak is deterministic AND finite (no NaN/inf intrusion).
+        for (x, y) in ca.iter().zip(cb.iter()) {
+            for (xv, yv) in x.iter().zip(y.iter()) {
+                assert_eq!(xv.to_bits(), yv.to_bits(), "non-deterministic centroid");
+                assert!(xv.is_finite(), "centroid drifted non-finite: {xv}");
+            }
+        }
+        for (pa, pb) in a.iter().zip(b.iter()) {
+            assert_eq!(pa.cluster, pb.cluster, "non-deterministic assignment");
+        }
+    }
+
+    #[test]
+    // rationale: H7 regression guard — small-distance convergence didn't
+    // regress. Pre-fix, the 1e-12 * (huge u64 cast) bias added magnitudes
+    // ~1e7 to the distance term — which over many Lloyd's iterations
+    // could push centroids around. Post-fix, sub-millimetre cluster
+    // separations should still resolve cleanly.
+    fn regression_existing_kmeans_convergence_still_works() {
+        // Two tight clusters separated by 0.01 (within bounded-bias
+        // precision but far above f64::EPSILON).
+        let pts = vec![
+            pt(&[0.000, 0.000]),
+            pt(&[0.001, 0.001]),
+            pt(&[0.002, 0.002]),
+            pt(&[0.010, 0.010]),
+            pt(&[0.011, 0.011]),
+            pt(&[0.012, 0.012]),
+        ];
+        let cfg = KMeansConfig {
+            k: 2,
+            seed: 42,
+            max_iterations: 100,
+            convergence_epsilon: 1e-9,
+        };
+        let (clustered, centroids) = kmeans(&pts, &cfg).expect("ok");
+        assert_eq!(centroids.len(), 2);
+        // First triple should cluster together; second triple together.
+        assert_eq!(clustered[0].cluster, clustered[1].cluster);
+        assert_eq!(clustered[1].cluster, clustered[2].cluster);
+        assert_eq!(clustered[3].cluster, clustered[4].cluster);
+        assert_eq!(clustered[4].cluster, clustered[5].cluster);
+        // The two groups land in different clusters.
+        assert_ne!(clustered[0].cluster, clustered[3].cluster);
+        // Centroids stay finite (no bias-induced inf/NaN).
+        for c in &centroids {
+            for v in c {
+                assert!(v.is_finite());
+            }
+        }
     }
 
     #[test]

@@ -285,6 +285,22 @@ fn check_investment(text: &str) -> Option<(TraitName, String, f64)> {
 }
 
 /// Humility: absolutist single-frame verdicts without alternatives.
+///
+/// Two confidence tiers:
+/// - Strong absolutists ("the only path", "clearly the right", …) →
+///   confidence 0.7 → `EmberStatus::Rejected` (CI-FAIL, no allowlist).
+/// - Soft hedge-absolutists ("probably the best", "likely the right call",
+///   "pretty much the only", "more or less the only") → confidence 0.4 →
+///   `EmberStatus::Held` (CI-FAIL by default but allowlistable with
+///   `HumanAcceptanceSignature` per D-C decision, S1002127).
+///
+/// The soft tier exists because hedged absolutism is a real Humility-trait
+/// failure mode (the speaker is still collapsing alternatives, just with
+/// social cushioning) but its false-positive surface — papers, retrospectives,
+/// "probably the best path GIVEN constraint X" prose — is higher than the
+/// strong tier. The Held tier routes it through the operator-controlled
+/// escape hatch rather than blunt rejection. Day-1 wires the otherwise-dead
+/// `Held` rubric branch end-to-end (closes H2 in carry-forward S1002600).
 fn check_humility(text: &str) -> Option<(TraitName, String, f64)> {
     let lower = text.to_lowercase();
     for absolutist in [
@@ -298,6 +314,20 @@ fn check_humility(text: &str) -> Option<(TraitName, String, f64)> {
                 TraitName::Humility,
                 format!("absolutist phrase without alternatives: {absolutist}"),
                 0.7,
+            ));
+        }
+    }
+    for soft_absolutist in [
+        "probably the best",
+        "likely the right call",
+        "pretty much the only",
+        "more or less the only",
+    ] {
+        if lower.contains(soft_absolutist) {
+            return Some((
+                TraitName::Humility,
+                format!("soft-absolutist hedge collapsing alternatives: {soft_absolutist}"),
+                0.4,
             ));
         }
     }
@@ -664,12 +694,70 @@ mod tests {
     #[test]
     fn property_confidence_boundary_at_0_5_maps_to_rejected() {
         // The boundary case: Warmth `proceeding with X` returns confidence
-        // 0.55, which is ≥ 0.5 → Rejected. The Held arm activates only
-        // below 0.5 (no current trait produces < 0.5 — all heuristics are
-        // confident enough to Reject; Held branch is reserved for future
-        // sub-rejection heuristics).
+        // 0.55, which is ≥ 0.5 → Rejected. The Held arm activates below
+        // 0.5 — currently exercised by the Humility soft-absolutist tier
+        // (confidence 0.4); see `humility_held_soft_absolutist_*` tests
+        // below.
         let v = score_against_rubric("proceeding with substrate write");
         assert!(matches!(v, EmberStatus::Rejected { .. }));
+    }
+
+    // ---- Humility Held branch (low-confidence soft absolutists) ---------
+
+    #[test]
+    fn humility_held_soft_absolutist_probably_the_best() {
+        // Soft absolutist returns confidence 0.4 → Held (< 0.5), NOT
+        // Rejected. Wires the Day-1 dead branch end-to-end (H2 closure).
+        let v = score_against_rubric("This is probably the best approach.");
+        match v {
+            EmberStatus::Held {
+                trait_name,
+                confidence,
+                ..
+            } => {
+                assert_eq!(trait_name, TraitName::Humility);
+                assert!((confidence - 0.4).abs() < 1e-9, "expected conf 0.4, got {confidence}");
+            }
+            other => panic!("expected Held at conf 0.4, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn humility_held_soft_absolutist_likely_the_right_call() {
+        let v = score_against_rubric("This is likely the right call given the trade-offs.");
+        assert!(matches!(
+            v,
+            EmberStatus::Held {
+                trait_name: TraitName::Humility,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn humility_held_soft_absolutist_pretty_much_the_only() {
+        let v = score_against_rubric("That is pretty much the only viable path forward.");
+        assert!(matches!(
+            v,
+            EmberStatus::Held {
+                trait_name: TraitName::Humility,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn humility_strong_absolutist_still_rejected_not_held() {
+        // Regression guard: the strong tier ("clearly the right") MUST
+        // remain at confidence 0.7 → Rejected (no soft-tier downgrade).
+        let v = score_against_rubric("This is clearly the right call.");
+        assert!(matches!(
+            v,
+            EmberStatus::Rejected {
+                trait_name: TraitName::Humility,
+                ..
+            }
+        ));
     }
 
     // ---- F-Regression (2) -----------------------------------------------

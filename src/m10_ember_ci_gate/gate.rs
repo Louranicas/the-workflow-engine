@@ -392,6 +392,114 @@ mod tests {
         assert!(matches!(v, GateVerdict::Fail { .. }));
     }
 
+    // ====================================================================
+    // H2 closure (carry-forward S1002600) — Held branch end-to-end tests.
+    // The Day-1 rubric now emits Humility `Held` at confidence 0.4 for
+    // soft-absolutist phrases. These tests exercise the previously-dead
+    // gate routing: Held → HeldFailed (no allowlist) / HeldAllowlisted
+    // (matching unexpired allowlist row) / HeldFailed (matching but
+    // expired allowlist row).
+    // ====================================================================
+
+    // rationale: H2 contract — Held verdict with NO allowlist row → routes
+    // to HeldFailed with trait identity + confidence preserved.
+    #[test]
+    fn gate_routes_held_to_heldfailed_without_allowlist() {
+        let v = evaluate_string(
+            "m23.proposal.summary",
+            "This is probably the best path forward.",
+            &[],
+        );
+        match v {
+            GateVerdict::HeldFailed {
+                key,
+                trait_name,
+                confidence,
+                ..
+            } => {
+                assert_eq!(key, "m23.proposal.summary");
+                assert_eq!(trait_name, TraitName::Humility);
+                assert!(confidence < 0.5, "confidence must be < 0.5 on Held path");
+                assert!((confidence - 0.4).abs() < 1e-9, "expected 0.4, got {confidence}");
+            }
+            other => panic!("expected HeldFailed, got {other:?}"),
+        }
+    }
+
+    // rationale: H2 contract — Held verdict + unexpired allowlist row with
+    // matching key → routes to HeldAllowlisted with approved_by echoed.
+    // This is the D-C hybrid CI-FAIL+allowlist escape hatch.
+    #[test]
+    fn gate_routes_held_to_heldallowlisted_with_matching_unexpired_approval() {
+        let approvals = vec![HeldApproval {
+            artefact_key: "m23.proposal.summary".into(),
+            approved_by: "luke@node.0A".into(),
+            approved_at: datetime!(2026-05-17 10:00:00 UTC),
+            expiry: datetime!(2099-01-01 00:00:00 UTC),
+        }];
+        let now = datetime!(2026-05-20 10:00:00 UTC);
+        let v = evaluate_string_at(
+            "m23.proposal.summary",
+            "This is probably the best path forward.",
+            &approvals,
+            now,
+        );
+        match v {
+            GateVerdict::HeldAllowlisted {
+                key,
+                trait_name,
+                confidence,
+                approved_by,
+                ..
+            } => {
+                assert_eq!(key, "m23.proposal.summary");
+                assert_eq!(trait_name, TraitName::Humility);
+                assert_eq!(approved_by, "luke@node.0A");
+                assert!(confidence < 0.5);
+            }
+            other => panic!("expected HeldAllowlisted, got {other:?}"),
+        }
+    }
+
+    // rationale: H2 contract — Held verdict + EXPIRED allowlist row →
+    // routes to HeldFailed (not HeldAllowlisted). Expired approvals do
+    // NOT authorise; the strict `>` predicate at gate.rs:92 enforces this.
+    #[test]
+    fn gate_routes_held_to_heldfailed_when_allowlist_expired() {
+        let approvals = vec![HeldApproval {
+            artefact_key: "m23.proposal.summary".into(),
+            approved_by: "luke@node.0A".into(),
+            approved_at: datetime!(2024-01-01 00:00:00 UTC),
+            expiry: datetime!(2024-02-01 00:00:00 UTC),
+        }];
+        let now = datetime!(2026-05-20 10:00:00 UTC);
+        let v = evaluate_string_at(
+            "m23.proposal.summary",
+            "This is probably the best path forward.",
+            &approvals,
+            now,
+        );
+        assert!(
+            matches!(v, GateVerdict::HeldFailed { trait_name: TraitName::Humility, .. }),
+            "expected HeldFailed (expired row); got {v:?}"
+        );
+    }
+
+    // rationale: H2 regression guard — the existing Rejected (confidence
+    // ≥ 0.5) branch must STILL route to Fail (NOT HeldFailed) for the
+    // strong-absolutist tier. Confirms no aliasing between the new Held
+    // path and the legacy Rejected path.
+    #[test]
+    fn regression_existing_rejected_branch_still_routes_to_fail() {
+        let v = evaluate_string("m23.proposal.summary", "clearly the right answer.", &[]);
+        match v {
+            GateVerdict::Fail { trait_name, .. } => {
+                assert_eq!(trait_name, TraitName::Humility);
+            }
+            other => panic!("expected Fail (Rejected → Fail mapping); got {other:?}"),
+        }
+    }
+
     // rationale: Cross-module surface invariant — evaluate_string and
     // evaluate_string_at MUST return semantically identical verdicts for
     // inputs that don't involve allowlist expiry (which is the only

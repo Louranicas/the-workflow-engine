@@ -314,8 +314,20 @@ where
         memory: &CorrelationMemory,
         reason: &DeferReason,
     ) -> Result<(), StcortexWriterError> {
-        let entry = serde_json::json!({
-            "ts_ms": now_ms(),
+        // F-POVM-07 anti-pattern harmonisation (C2): emit ts_ms only when
+        // the wall-clock is well-defined. When `now_ms()` returns `None`
+        // (clock fault / pre-1970 / `i64` overflow), tag the entry with
+        // `clock_unavailable: true` rather than silently writing
+        // `"ts_ms": 0` into the outbox stream. Mirrors m11's
+        // `chrono_now_ms` typed-Option contract. Tag-and-defer preserves
+        // m13's fire-and-forget contract — the outbox consumer can choose
+        // to drop, hold, or reconcile clock-fault rows downstream.
+        let (ts_value, clock_ok) = match now_ms() {
+            Some(ms) => (serde_json::json!(ms), true),
+            None => (serde_json::Value::Null, false),
+        };
+        let mut entry = serde_json::json!({
+            "ts_ms": ts_value,
             "memory": memory,
             "reason": match reason {
                 DeferReason::LtpBelowFloor { density } => {
@@ -327,6 +339,18 @@ where
                 }
             },
         });
+        if !clock_ok {
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert(
+                    "clock_unavailable".to_owned(),
+                    serde_json::Value::Bool(true),
+                );
+            }
+            tracing::warn!(
+                target: "m13.defer.clock_unavailable",
+                "outbox entry tagged clock_unavailable: SystemTime pre-epoch or i64 overflow"
+            );
+        }
         let line = format!("{}\n", serde_json::to_string(&entry)?);
         // Poison-recovery: previous impl was `lock().ok()` which silently
         // dropped the guard on PoisonError, allowing concurrent writers to
@@ -358,20 +382,22 @@ where
     }
 }
 
-/// Wall-clock time in milliseconds since UNIX epoch. Returns `0` only when
-/// the system clock is *before* 1970 (impossible on production hardware) or
-/// when `as_millis()` overflows `i64` in year ~292,471,209 AD.
+/// Wall-clock time in milliseconds since UNIX epoch, or `None` when the
+/// system clock is set *before* 1970 (genuine fault) or `as_millis()`
+/// overflows `i64` in year ~292,471,209 AD.
 ///
-/// F-POVM-07 mitigation: the `0` sentinel is documented (not silent) and the
-/// outbox consumer must treat `ts_ms == 0` as "clock anomaly" rather than
-/// "epoch boundary".
-fn now_ms() -> i64 {
+/// **F-POVM-07 harmonisation (C2):** prior versions returned `0` via
+/// `unwrap_or(0)`, silently emitting `"ts_ms": 0` (= 1970-01-01) into the
+/// outbox JSONL stream on clock fault. This is the exact silent-zero
+/// pattern m11's [`crate::m11_fitness_weighted_decay::chrono_now_ms`] was
+/// hardened against. The signature is now `Option<i64>` — callers must
+/// handle the `None` case explicitly. m13's defer path emits a
+/// `clock_unavailable: true` tag rather than a phantom epoch timestamp.
+#[must_use]
+fn now_ms() -> Option<i64> {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|d| i64::try_from(d.as_millis()).ok())
-        .unwrap_or(0)
+    let dur = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+    i64::try_from(dur.as_millis()).ok()
 }
 
 #[cfg(test)]
@@ -769,15 +795,59 @@ mod tests {
     }
 
     // rationale: Anti-property — F-POVM-07 silent-zero-timestamp.
-    // now_ms() returns a positive realistic i64 on production clocks
-    // (> 2024).
+    // now_ms() returns Some(positive realistic i64) on production clocks
+    // (> 2024). Post-C2 harmonisation: signature is Option<i64>, never
+    // `0` as a silent sentinel.
     #[test]
-    fn now_ms_returns_positive_on_well_defined_clock() {
+    fn now_ms_returns_some_positive_on_well_defined_clock() {
         // rationale: Anti-property (F-POVM-07 silent-zero-timestamp)
-        let ts = super::now_ms();
+        let ts = super::now_ms().expect("production clock must be post-1970");
         assert!(
             ts > 1_700_000_000_000,
             "now_ms must return realistic 2024+ wall-clock ms, got {ts}"
+        );
+    }
+
+    // rationale: Anti-property (C2) — now_ms returns Option<i64> not
+    // `i64`. The contract change forbids the silent-zero `unwrap_or(0)`
+    // pattern at compile time. Type-system regression test.
+    #[test]
+    fn now_ms_signature_is_option_i64_not_silent_zero_i64() {
+        // rationale: Anti-property (C2 contract change at type level)
+        let ts: Option<i64> = super::now_ms();
+        assert!(ts.is_some(), "production clock must yield Some");
+        // Function-pointer coercion: if a future refactor reverts the
+        // signature to `fn() -> i64`, the assignment to this typed
+        // `fn() -> Option<i64>` slot fails to compile. Type-system
+        // regression test for the F-POVM-07 contract change.
+        let ensure_option: fn() -> Option<i64> = super::now_ms;
+        assert!(ensure_option().is_some(), "fn-pointer coercion verified");
+    }
+
+    // rationale: Anti-property (C2) — defer-path JSONL outbox never
+    // contains `"ts_ms": 0` on a well-defined clock. Regression test
+    // against the F-POVM-07 silent-zero pattern. On production hardware
+    // (post-1970) every defer must emit a positive ts_ms.
+    #[test]
+    fn defer_never_writes_silent_zero_ts_ms_on_well_defined_clock() {
+        // rationale: Anti-property (F-POVM-07 silent-zero-timestamp,
+        //            structural regression — no `"ts_ms":0` slips through
+        //            the JSONL outbox under any normal-clock condition)
+        let w = writer(Some(0.001), false);
+        let _ = w.promote_run(&run(), &canonical_ns()).expect("defer");
+        let contents = std::fs::read_to_string(w.outbox_path()).expect("read outbox");
+        assert!(
+            !contents.contains("\"ts_ms\":0"),
+            "F-POVM-07 silent-zero leaked into outbox JSONL: {contents}"
+        );
+        assert!(
+            !contents.contains("\"ts_ms\": 0"),
+            "F-POVM-07 silent-zero (whitespace variant) leaked into outbox: {contents}"
+        );
+        // Production clock should NEVER emit `clock_unavailable: true`.
+        assert!(
+            !contents.contains("clock_unavailable"),
+            "production clock should not tag clock_unavailable; outbox: {contents}"
         );
     }
 

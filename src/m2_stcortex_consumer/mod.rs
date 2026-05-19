@@ -69,7 +69,7 @@ pub use identity::{
 pub use row::{ConsumptionEventRow, StcortexRow, ToolCallRow};
 pub use subscription::{
     consumption_event_query, register_narrowed_consumer, tool_call_query, RegistrationHandle,
-    DEFAULT_SUBSCRIPTION_TIMEOUT_MS, STCORTEX_DB, STCORTEX_URI,
+    RegistrationStatus, DEFAULT_SUBSCRIPTION_TIMEOUT_MS, STCORTEX_DB, STCORTEX_URI,
 };
 
 #[cfg(test)]

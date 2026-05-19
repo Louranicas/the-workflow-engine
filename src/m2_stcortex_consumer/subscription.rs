@@ -69,8 +69,30 @@ pub struct RegistrationHandle {
     identity: ConsumerIdentity,
     registered_at: Instant,
     applied_flag: Arc<AtomicBool>,
+    /// `true` when the SDK's `on_disconnect` callback has fired since
+    /// registration. **H1 stale-fresh fix:** `applied_flag` is cleared
+    /// when this flips to true, so `is_fresh()` reports `false` after
+    /// any WebSocket drop until a fresh handshake re-applies the
+    /// subscription.
+    disconnected_flag: Arc<AtomicBool>,
     // Holding the connection keeps the SDK worker thread alive.
     _conn: DbConnection,
+}
+
+/// Triple-state view of a [`RegistrationHandle`]'s liveness.
+///
+/// Additive surface (H1) — `is_fresh()` keeps its boolean signature for
+/// the m13 write-gate hot path; callers that want finer granularity use
+/// [`RegistrationHandle::status`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistrationStatus {
+    /// Subscription has applied and the WebSocket is still connected.
+    Fresh,
+    /// `on_disconnect` fired since the last apply; the handle MUST be
+    /// considered stale until a fresh handshake re-applies.
+    Disconnected,
+    /// `on_applied` never fired (e.g., synchronous-path bypass in tests).
+    Stale,
 }
 
 impl std::fmt::Debug for RegistrationHandle {
@@ -79,17 +101,49 @@ impl std::fmt::Debug for RegistrationHandle {
             .field("identity", &self.identity)
             .field("registered_at", &self.registered_at)
             .field("applied", &self.applied_flag.load(Ordering::Relaxed))
+            .field(
+                "disconnected",
+                &self.disconnected_flag.load(Ordering::Relaxed),
+            )
             .finish_non_exhaustive()
     }
 }
 
 impl RegistrationHandle {
-    /// `true` once the subscription has applied. m13 calls this before
+    /// `true` once the subscription has applied AND the WebSocket
+    /// connection has not since been dropped. m13 calls this before
     /// every write attempt — refuse-write at the DB layer reads the same
     /// invariant.
+    ///
+    /// **H1 stale-fresh fix:** prior versions only checked
+    /// `applied_flag`; if the SDK fired `on_disconnect`, `is_fresh()`
+    /// would still return `true` until the SDK was dropped — m13 would
+    /// happily write against a dead consumer. The disconnect handler now
+    /// clears `applied_flag` via the second `Arc<AtomicBool>` clone, so
+    /// the contract `is_fresh()` reports is the actual live state.
     #[must_use]
     pub fn is_fresh(&self) -> bool {
-        self.applied_flag.load(Ordering::Relaxed)
+        // Both flags consulted: defence-in-depth. If a phantom
+        // on_applied somehow fires after on_disconnect without a fresh
+        // handshake (SDK pathology), the disconnected_flag still gates.
+        self.applied_flag.load(Ordering::Acquire)
+            && !self.disconnected_flag.load(Ordering::Acquire)
+    }
+
+    /// Triple-state view of the handle's liveness.
+    ///
+    /// Useful for callers that need to distinguish "never applied" from
+    /// "applied then dropped". m13's hot path keeps using
+    /// [`Self::is_fresh`].
+    #[must_use]
+    pub fn status(&self) -> RegistrationStatus {
+        if self.disconnected_flag.load(Ordering::Acquire) {
+            RegistrationStatus::Disconnected
+        } else if self.applied_flag.load(Ordering::Acquire) {
+            RegistrationStatus::Fresh
+        } else {
+            RegistrationStatus::Stale
+        }
     }
 
     /// Borrow the registered identity.
@@ -102,6 +156,59 @@ impl RegistrationHandle {
     #[must_use]
     pub fn age(&self) -> Duration {
         self.registered_at.elapsed()
+    }
+
+}
+
+/// Test-only freshness state machine — exposes the same applied /
+/// disconnected boolean pair as a [`RegistrationHandle`], without
+/// owning a live `DbConnection`. Lets us exercise the H1 stale-fresh
+/// contract under thread-pool interleavings that would otherwise need a
+/// real WebSocket. Not part of the public API.
+#[cfg(test)]
+pub(crate) struct FreshnessProbe {
+    applied_flag: Arc<AtomicBool>,
+    disconnected_flag: Arc<AtomicBool>,
+}
+
+#[cfg(test)]
+impl FreshnessProbe {
+    /// Construct in the same initial state as a freshly-built handle —
+    /// neither applied nor disconnected.
+    pub(crate) fn new() -> Self {
+        Self {
+            applied_flag: Arc::new(AtomicBool::new(false)),
+            disconnected_flag: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Simulate the SDK's `on_applied` callback firing.
+    pub(crate) fn simulate_on_applied(&self) {
+        self.applied_flag.store(true, Ordering::Release);
+    }
+
+    /// Simulate the SDK's `on_disconnect` callback firing — mirrors the
+    /// production-side handler (clears applied, sets disconnected).
+    pub(crate) fn simulate_on_disconnect(&self) {
+        self.disconnected_flag.store(true, Ordering::Release);
+        self.applied_flag.store(false, Ordering::Release);
+    }
+
+    /// Mirror of [`RegistrationHandle::is_fresh`].
+    pub(crate) fn is_fresh(&self) -> bool {
+        self.applied_flag.load(Ordering::Acquire)
+            && !self.disconnected_flag.load(Ordering::Acquire)
+    }
+
+    /// Mirror of [`RegistrationHandle::status`].
+    pub(crate) fn status(&self) -> RegistrationStatus {
+        if self.disconnected_flag.load(Ordering::Acquire) {
+            RegistrationStatus::Disconnected
+        } else if self.applied_flag.load(Ordering::Acquire) {
+            RegistrationStatus::Fresh
+        } else {
+            RegistrationStatus::Stale
+        }
     }
 }
 
@@ -120,6 +227,10 @@ impl RegistrationHandle {
 ///   reducer rejects the request.
 /// - [`StcortexConsumerError::SubscriptionTimeout`] if `on_applied`
 ///   does not fire within `timeout_ms`.
+#[allow(
+    clippy::too_many_lines,
+    reason = "End-to-end SDK orchestration: builder-pattern + on_connect/on_applied/on_disconnect closures with captured state form a single causally-ordered sequence per m2 spec § 5. Splitting the on_connect closure into a helper would scatter the H1 fresh/disconnect Arc<AtomicBool> wiring across two surfaces and obscure the single-glance audit of the callback graph. The 105-line count is mechanical (5 over the 100-line lint default) rather than a complexity smell."
+)]
 pub fn register_narrowed_consumer(
     identity: ConsumerIdentity,
     timeout_ms: u64,
@@ -130,6 +241,13 @@ pub fn register_narrowed_consumer(
     let tx = Mutex::new(Some(tx));
     let applied_flag = Arc::new(AtomicBool::new(false));
     let applied_for_callback = Arc::clone(&applied_flag);
+    // H1 stale-fresh fix: a SECOND clone of applied_flag is passed into
+    // on_disconnect so the SDK can clear the freshness gate when the
+    // WebSocket drops; the disconnected_flag is the durable "we saw a
+    // drop" sentinel for status() observers.
+    let applied_for_disconnect = Arc::clone(&applied_flag);
+    let disconnected_flag = Arc::new(AtomicBool::new(false));
+    let disconnected_for_callback = Arc::clone(&disconnected_flag);
     // rationale: capture any `register_consumer` reducer error so the
     // outer call surfaces it as `RegisterFailed` rather than letting
     // `on_applied` silently flip `is_fresh = true` for a consumer the
@@ -208,11 +326,19 @@ pub fn register_narrowed_consumer(
                 "stcortex connection failed"
             );
         })
-        .on_disconnect(|_ctx, err| {
+        .on_disconnect(move |_ctx, err| {
+            // H1 stale-fresh fix: prior to S1002600 Wave-A1 this
+            // handler was tracing-only — `applied_flag` was never
+            // cleared, so `is_fresh()` returned a STALE `true` after
+            // any WebSocket drop and m13 wrote against a dead
+            // consumer. Both flags are stored with Release ordering
+            // so a subsequent Acquire load by m13 sees the new state.
+            disconnected_for_callback.store(true, Ordering::Release);
+            applied_for_disconnect.store(false, Ordering::Release);
             tracing::warn!(
                 target: "m2.connect.disconnect",
                 error = ?err,
-                "stcortex disconnected"
+                "stcortex disconnected — applied_flag cleared, handle now reports !is_fresh"
             );
         })
         .build()
@@ -239,6 +365,7 @@ pub fn register_narrowed_consumer(
                 identity,
                 registered_at: Instant::now(),
                 applied_flag,
+                disconnected_flag,
                 _conn: conn,
             })
         }
@@ -249,8 +376,8 @@ pub fn register_narrowed_consumer(
 #[cfg(test)]
 mod tests {
     use super::{
-        consumption_event_query, tool_call_query, DEFAULT_SUBSCRIPTION_TIMEOUT_MS,
-        STCORTEX_DB, STCORTEX_URI,
+        consumption_event_query, tool_call_query, FreshnessProbe, RegistrationStatus,
+        DEFAULT_SUBSCRIPTION_TIMEOUT_MS, STCORTEX_DB, STCORTEX_URI,
     };
 
     #[test]
@@ -293,5 +420,79 @@ mod tests {
         assert!(!q.contains("pathway"));
         assert!(!q.contains("memory"));
         assert!(!q.contains("ghost_memory"));
+    }
+
+    // ====================================================================
+    // H1 stale-fresh fix (S1002600 Wave-A1) — RegistrationHandle's
+    // freshness state machine, exercised via FreshnessProbe (mirrors the
+    // applied/disconnected atomic-flag pair without owning a live SDK
+    // DbConnection).
+    // ====================================================================
+
+    // rationale: Anti-property (H1) — `is_fresh()` MUST return false
+    // after a disconnect event, even if `on_applied` had fired
+    // beforehand. Pre-fix the disconnect handler was tracing-only and
+    // applied_flag stayed `true`.
+    #[test]
+    fn is_fresh_returns_false_after_disconnect() {
+        // rationale: Anti-property (H1 stale-fresh regression)
+        let probe = FreshnessProbe::new();
+        probe.simulate_on_applied();
+        assert!(probe.is_fresh(), "applied should report fresh");
+        probe.simulate_on_disconnect();
+        assert!(
+            !probe.is_fresh(),
+            "post-disconnect: is_fresh MUST return false (H1 fix)"
+        );
+        assert_eq!(probe.status(), RegistrationStatus::Disconnected);
+    }
+
+    // rationale: Atomicity contract (H1) — a phantom on_applied that
+    // fires AFTER on_disconnect, with no fresh handshake in between,
+    // MUST NOT resurrect `is_fresh = true`. The disconnected_flag is
+    // sticky until a new RegistrationHandle is constructed.
+    #[test]
+    fn disconnect_then_reapplied_does_not_resurrect_fresh_without_fresh_handshake() {
+        // rationale: Atomicity contract (H1 stickiness invariant)
+        let probe = FreshnessProbe::new();
+        probe.simulate_on_applied();
+        probe.simulate_on_disconnect();
+        // Pathological replay — SDK fires on_applied a second time
+        // without a fresh connection. The disconnected_flag must still
+        // gate; m13 must not be tricked into writing.
+        probe.simulate_on_applied();
+        assert!(
+            !probe.is_fresh(),
+            "phantom on_applied after disconnect MUST NOT resurrect fresh"
+        );
+        assert_eq!(
+            probe.status(),
+            RegistrationStatus::Disconnected,
+            "disconnected_flag is sticky across phantom on_applied"
+        );
+    }
+
+    // rationale: Contract — initial state is Stale (neither applied nor
+    // disconnected). Drift detection for the state-machine invariant.
+    #[test]
+    fn initial_state_is_stale_not_fresh() {
+        // rationale: Contract regression (state-machine initial state)
+        let probe = FreshnessProbe::new();
+        assert!(!probe.is_fresh(), "initial state is NOT fresh");
+        assert_eq!(probe.status(), RegistrationStatus::Stale);
+    }
+
+    // rationale: Triple-state surface — the additive `status()` method
+    // distinguishes Stale (never applied) from Disconnected (was applied
+    // then dropped). H1 fix surface contract.
+    #[test]
+    fn status_triple_state_surface_distinguishes_stale_from_disconnected() {
+        // rationale: Triple-state contract (additive H1 surface)
+        let probe = FreshnessProbe::new();
+        assert_eq!(probe.status(), RegistrationStatus::Stale);
+        probe.simulate_on_applied();
+        assert_eq!(probe.status(), RegistrationStatus::Fresh);
+        probe.simulate_on_disconnect();
+        assert_eq!(probe.status(), RegistrationStatus::Disconnected);
     }
 }

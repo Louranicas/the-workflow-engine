@@ -142,7 +142,7 @@ pub use m1_atuin_consumer::{
 pub use m2_stcortex_consumer::{
     consumption_event_query, register_narrowed_consumer, tool_call_query,
     ConsumerIdentity, ConsumerName, ConsumptionEventRow, Namespace, RegistrationHandle,
-    StcortexConsumerError, StcortexRow, ToolCallRow, Transport,
+    RegistrationStatus, StcortexConsumerError, StcortexRow, ToolCallRow, Transport,
     WORKFLOW_TRACE_PREFIX as STCORTEX_WORKFLOW_TRACE_PREFIX,
 };
 pub use m3_injection_db_consumer::{

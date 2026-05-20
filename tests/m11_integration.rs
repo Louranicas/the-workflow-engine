@@ -349,3 +349,371 @@ fn day_1_clock_unavailable_skips_cycle_returns_typed_error() {
     let err = run_consolidation_cycle(&mut bank, &pathways, &freq, &cfg, || None).unwrap_err();
     assert!(matches!(err, DecayError::ClockUnavailable));
 }
+
+// =============================================================================
+// H9-rem — m11 consolidation cycle against REAL m30 CuratedBank
+//   (NOT MockBank). Wave-C1 hardening; closes the headline H9 carry-forward
+//   item "m11 (decay cycle correctness)" by exercising the m30↔m11 bridge
+//   end-to-end with the production bank.
+// =============================================================================
+
+mod m30_real_bank {
+    use super::{run_consolidation_cycle, DecayConfig, DecayError, FrequencyReader,
+                PathwayWeightReader, SunsetPhase};
+    use std::collections::HashMap;
+    use std::time::SystemTime;
+    use workflow_core::m14_lift::LiftSnapshot;
+    use workflow_core::m20_prefixspan::{Pattern, StepToken};
+    use workflow_core::m21_variant_builder::build_variants;
+    use workflow_core::m23_proposer::{build_proposal, WorkflowProposal};
+    use workflow_core::m30_bank::{
+        CuratedBank, DEFAULT_PRUNE_PENDING_THRESHOLD, DEFAULT_PRUNE_THRESHOLD,
+    };
+
+    // ---- fixtures --------------------------------------------------------
+
+    fn snap() -> LiftSnapshot {
+        LiftSnapshot {
+            lift: Some(0.5),
+            ci_half: Some(0.05),
+            n: 30,
+            latest_ts_ms: 0,
+            computed_at: SystemTime::now(),
+        }
+    }
+
+    fn proposal_with_seed(seed: u32) -> WorkflowProposal {
+        let p = Pattern::new(
+            vec![StepToken(seed), StepToken(seed.wrapping_add(1))],
+            30,
+            (0, seed as usize),
+        );
+        let v = build_variants(&p).expect("variant")[0].clone();
+        build_proposal(v, &snap(), None).expect("proposal")
+    }
+
+    /// Accept N workflows into a fresh `CuratedBank`. Returns the bank and
+    /// the ordered list of accepted `workflow_id` values (u64).
+    fn build_real_bank(n: u32, now_ms: i64) -> (CuratedBank, Vec<u64>) {
+        let bank = CuratedBank::new();
+        let mut ids = Vec::with_capacity(n as usize);
+        for i in 0..n {
+            // Use distinct seeds so each proposal hashes to a distinct
+            // workflow_id; the m30 bank rejects duplicates.
+            let id = bank.accept(proposal_with_seed(1000 + i), now_ms).expect("accept");
+            ids.push(id);
+        }
+        (bank, ids)
+    }
+
+    struct StubPathways {
+        weights: HashMap<String, f64>,
+    }
+    impl PathwayWeightReader for StubPathways {
+        fn read_pathway_weight(&self, pid: &str) -> Result<f64, DecayError> {
+            self.weights
+                .get(pid)
+                .copied()
+                .ok_or_else(|| DecayError::PathwayReadFailed {
+                    pathway_id: pid.to_owned(),
+                    reason: "stub: not seeded".into(),
+                })
+        }
+    }
+    struct StubFreq {
+        counts: HashMap<String, u64>,
+        cohort_max: u64,
+    }
+    impl FrequencyReader for StubFreq {
+        fn frequency(&self, wid: &str) -> u64 {
+            self.counts.get(wid).copied().unwrap_or(0)
+        }
+        fn cohort_max(&self) -> u64 {
+            self.cohort_max
+        }
+    }
+
+    /// `StubPathways` + `StubFreq` seeded so every workflow has fitness=1.0
+    /// (preserves weight under decay → exercise other invariants without
+    /// fitness-side perturbation unless a test overrides).
+    fn make_thriving_readers(ids: &[u64]) -> (StubPathways, StubFreq) {
+        let weights: HashMap<String, f64> = ids.iter().map(|id| (id.to_string(), 1.0)).collect();
+        let counts: HashMap<String, u64> = ids.iter().map(|id| (id.to_string(), 1)).collect();
+        (
+            StubPathways { weights },
+            StubFreq {
+                counts,
+                cohort_max: 1,
+            },
+        )
+    }
+
+    // ---- T2 — H9-rem integration tests ----------------------------------
+
+    #[test]
+    fn m11_consolidation_against_curated_bank_decays_all_active() {
+        // rationale: cross-module integration — the headline H9 carry-forward.
+        // Run a full consolidation cycle against a real m30 `CuratedBank`
+        // (no MockBank) and verify every active row had decay applied.
+        let now = 1_700_000_000_000_i64;
+        let (mut bank, ids) = build_real_bank(5, now);
+        let (pathways, freq) = make_thriving_readers(&ids);
+        let cfg = DecayConfig::default();
+        let stats = run_consolidation_cycle(&mut bank, &pathways, &freq, &cfg, || Some(now))
+            .expect("cycle ok against real bank");
+        assert_eq!(
+            stats.workflows_decayed, 5,
+            "all 5 real-bank workflows must be decayed in one cycle"
+        );
+        assert_eq!(stats.cycles_run, 1);
+        // Thriving signals → factor 1.0 → weights stay at 1.0.
+        for id in &ids {
+            let w = bank.get(*id).expect("row").weight;
+            assert!(
+                (w - 1.0).abs() < 1e-12,
+                "thriving workflow {id} should stay at 1.0, got {w}"
+            );
+        }
+    }
+
+    #[test]
+    fn m11_consolidation_skips_clock_skewed_workflow_and_counts_it() {
+        // rationale: anti-property (F-POVM-07 silent-zero) — a workflow
+        // whose `last_run_ms` is future-dated relative to `now_ms` MUST
+        // be skipped and surfaced in `workflows_clock_skew_skipped`, never
+        // silently rewarded with recency=1.0 via the saturating-sub bug.
+        //
+        // m30's bridge surfaces `last_run_ms = w.last_run_ms.unwrap_or(w.accepted_at_ms)`.
+        // To inject clock skew, record a run with a future timestamp before
+        // the cycle.
+        let now = 1_700_000_000_000_i64;
+        let (mut bank, ids) = build_real_bank(2, now);
+        // Mark id_0 with a future last_run; id_1 stays at accepted_at.
+        bank.record_run(ids[0], now + 1_000_000); // 1000s into the future
+        let (pathways, freq) = make_thriving_readers(&ids);
+        let cfg = DecayConfig::default();
+        let stats = run_consolidation_cycle(&mut bank, &pathways, &freq, &cfg, || Some(now))
+            .expect("cycle ok");
+        assert_eq!(stats.workflows_clock_skew_skipped, 1, "must count clock-skew skip");
+        assert_eq!(stats.workflows_decayed, 1, "non-skewed workflow still decayed");
+    }
+
+    #[test]
+    fn m11_consolidation_emits_prune_pending_at_soft_floor() {
+        // rationale: contract regression — Step 2.5 PrunePending arm fires
+        // when post-decay weight is in `[prune_threshold, sunset_threshold)`.
+        // We pre-drive the workflow into that band, then run the cycle.
+        let now = 1_700_000_000_000_i64;
+        let (mut bank, ids) = build_real_bank(1, now);
+        // Soft floor is sunset_threshold=0.05 (m11 cfg, distinct from m30's
+        // soft DEFAULT_PRUNE_PENDING_THRESHOLD=0.10). Hard floor
+        // prune_threshold=0.01. Drive weight to 0.02 (in m11 soft band).
+        bank.apply_decay(ids[0], 0.02);
+        assert!((bank.get(ids[0]).expect("row").weight - 0.02).abs() < 1e-12);
+        let (pathways, freq) = make_thriving_readers(&ids);
+        let cfg = DecayConfig::default();
+        let stats = run_consolidation_cycle(&mut bank, &pathways, &freq, &cfg, || Some(now))
+            .expect("cycle ok");
+        assert_eq!(
+            stats.workflows_prune_pending, 1,
+            "weight 0.02 is in [prune=0.01, sunset=0.05) — must mark PrunePending"
+        );
+    }
+
+    #[test]
+    fn m11_consolidation_double_count_guard_pruned_not_also_auto_sunset() {
+        // rationale: anti-property (double-count regression) — a workflow
+        // simultaneously below `prune_threshold` AND past its `sunset_at`
+        // MUST be counted in EXACTLY ONE of {workflows_pruned,
+        // workflows_auto_sunset}. m30's `sunset_at` is set at accept-time
+        // to now + 120d; we drive an artificial near-expiry by force-
+        // decaying weight to below prune_threshold AND moving the clock
+        // past the sunset window.
+        let now = 1_700_000_000_000_i64;
+        let (mut bank, ids) = build_real_bank(1, now);
+        bank.apply_decay(ids[0], 0.005); // below prune_threshold 0.01
+        // Advance virtual clock past the sunset window (120d ahead).
+        let later = now + 121 * 86_400_000_i64;
+        let (pathways, freq) = make_thriving_readers(&ids);
+        let cfg = DecayConfig::default();
+        let stats =
+            run_consolidation_cycle(&mut bank, &pathways, &freq, &cfg, || Some(later)).expect("ok");
+        // Exactly one of the two counters must fire — the prune (Step 3
+        // runs before Step 4, and Step 4's guard skips already-pruned).
+        assert_eq!(stats.workflows_pruned, 1);
+        assert_eq!(
+            stats.workflows_auto_sunset, 0,
+            "double-count regression: workflow appears in BOTH pruned + auto_sunset"
+        );
+    }
+
+    #[test]
+    fn m11_consolidation_pre_fetch_short_circuits_on_pathway_read_failure() {
+        // rationale: anti-property (transactional invariant) — a substrate
+        // read failure on workflow #N must NOT leave workflows #1..N-1 in
+        // a half-decayed state. We seed N=2; the SECOND workflow's pathway
+        // is missing from the reader; cycle must return PathwayReadFailed
+        // and the first workflow's weight must remain untouched (1.0).
+        let now = 1_700_000_000_000_i64;
+        let (mut bank, ids) = build_real_bank(2, now);
+        // Only seed id_0's pathway weight; id_1 missing.
+        let mut weights = HashMap::new();
+        weights.insert(ids[0].to_string(), 0.5);
+        let pathways = StubPathways { weights };
+        let counts: HashMap<String, u64> =
+            ids.iter().map(|id| (id.to_string(), 1)).collect();
+        let freq = StubFreq {
+            counts,
+            cohort_max: 1,
+        };
+        let cfg = DecayConfig::default();
+        let err = run_consolidation_cycle(&mut bank, &pathways, &freq, &cfg, || Some(now))
+            .unwrap_err();
+        assert!(matches!(err, DecayError::PathwayReadFailed { .. }));
+        // CRITICAL: both workflows must STILL be at 1.0 — no decay
+        // applied because pre-fetch short-circuited on the second read.
+        for id in &ids {
+            let w = bank.get(*id).expect("row").weight;
+            assert!(
+                (w - 1.0).abs() < 1e-12,
+                "workflow {id} was decayed despite pre-fetch failure — partial-state regression: got {w}"
+            );
+        }
+    }
+
+    #[test]
+    fn m11_consolidation_clockunavailable_skips_entire_cycle() {
+        // rationale: contract regression — `now_ms_fn` returning None must
+        // surface as `DecayError::ClockUnavailable` AND leave the bank
+        // entirely unmutated (no partial-state writes mid-cycle).
+        let now = 1_700_000_000_000_i64;
+        let (mut bank, ids) = build_real_bank(3, now);
+        let weights_before: Vec<f64> = ids.iter().map(|id| bank.get(*id).expect("r").weight).collect();
+        let (pathways, freq) = make_thriving_readers(&ids);
+        let cfg = DecayConfig::default();
+        let err = run_consolidation_cycle(&mut bank, &pathways, &freq, &cfg, || None).unwrap_err();
+        assert!(matches!(err, DecayError::ClockUnavailable));
+        let weights_after: Vec<f64> = ids.iter().map(|id| bank.get(*id).expect("r").weight).collect();
+        assert_eq!(
+            weights_before, weights_after,
+            "ClockUnavailable must leave bank unmutated"
+        );
+    }
+
+    #[test]
+    fn m11_consolidation_recovery_edge_via_weight_rise_phase_for() {
+        // rationale: anti-property (auto-recovery) — m30 derives phase via
+        // `phase_for`, not via stored state. PrunePending → Active is
+        // automatic on weight rise; m11's bridge does NOT need to emit a
+        // transition. Verify by driving weight into PrunePending band,
+        // observing phase_for, then driving it back up.
+        let now = 1_700_000_000_000_i64;
+        let (bank, ids) = build_real_bank(1, now);
+        // Drive weight into m30's PrunePending band ([0.05, 0.10)).
+        bank.apply_decay(ids[0], 0.07);
+        let row_low = bank.get(ids[0]).expect("row");
+        assert_eq!(
+            row_low.phase_for(now + 1, DEFAULT_PRUNE_PENDING_THRESHOLD, DEFAULT_PRUNE_THRESHOLD),
+            SunsetPhase::PrunePending
+        );
+        // Substrate rises (m42 reinforce; here a multiplicative >1 factor
+        // clamped to 1.0 by the bank's apply_decay implementation).
+        bank.apply_decay(ids[0], 100.0); // 0.07 * 100 = 7.0 → clamp to 1.0
+        let row_high = bank.get(ids[0]).expect("row");
+        assert!((row_high.weight - 1.0).abs() < f64::EPSILON);
+        assert_eq!(
+            row_high.phase_for(now + 1, DEFAULT_PRUNE_PENDING_THRESHOLD, DEFAULT_PRUNE_THRESHOLD),
+            SunsetPhase::Active,
+            "recovery edge: phase_for must reclassify to Active automatically"
+        );
+    }
+
+    #[test]
+    fn m11_consolidation_compositional_integrity_high_freq_low_fitness() {
+        // rationale: CC-2 trust invariant — frequency alone never grants
+        // immortality. A workflow with frequency=1.0 and fitness=0.0 must
+        // decay at exactly the base_rate (= 1 - plain_decay_rate = 0.98).
+        // Multiplicative composition is the structural guarantor of this;
+        // the test fires a canary if a future refactor breaks it.
+        let now = 1_700_000_000_000_i64;
+        let (mut bank, ids) = build_real_bank(1, now);
+        // High frequency (max cohort), zero fitness (pathway weight 0.0),
+        // recency = 1.0 (last_run == accepted_at == now).
+        let mut weights = HashMap::new();
+        weights.insert(ids[0].to_string(), 0.0);
+        let pathways = StubPathways { weights };
+        let mut counts = HashMap::new();
+        counts.insert(ids[0].to_string(), 100);
+        let freq = StubFreq {
+            counts,
+            cohort_max: 100,
+        };
+        let cfg = DecayConfig::default();
+        run_consolidation_cycle(&mut bank, &pathways, &freq, &cfg, || Some(now)).expect("ok");
+        let w = bank.get(ids[0]).expect("row").weight;
+        // 1.0 * base_rate (0.98) — multiplicative collapse to base.
+        assert!(
+            (w - 0.98).abs() < 1e-12,
+            "high freq + zero fitness must decay at base_rate 0.98; got {w}"
+        );
+    }
+
+    #[test]
+    fn m11_decay_factor_clamp_safety() {
+        // rationale: adversarial input — non-finite / out-of-range values
+        // MUST be rejected at the typed `DecayFactor::new` boundary so
+        // they never reach the bank's weight field. `compute_decay_factor`
+        // upstream uses `debug_assert!` for [0,1] inputs (release builds
+        // rely on the clamp at composition time + this typed boundary at
+        // the constructor). The bank's `try_apply_decay` additionally
+        // rejects non-finite multipliers; together they enforce the
+        // anti-property "NaN never reaches the weight field".
+        use workflow_core::m11_fitness_weighted_decay::DecayFactor;
+        use workflow_core::m11_fitness_weighted_decay::DecayError;
+        // Non-finite values rejected at the typed boundary.
+        assert!(matches!(DecayFactor::new(f64::NAN), Err(DecayError::OutOfRange { .. })));
+        assert!(matches!(DecayFactor::new(f64::INFINITY), Err(DecayError::OutOfRange { .. })));
+        assert!(matches!(
+            DecayFactor::new(f64::NEG_INFINITY),
+            Err(DecayError::OutOfRange { .. })
+        ));
+        // Out-of-range values rejected.
+        assert!(matches!(DecayFactor::new(-0.5), Err(DecayError::OutOfRange { .. })));
+        assert!(matches!(DecayFactor::new(1.5), Err(DecayError::OutOfRange { .. })));
+        // Boundary values [0.0, 1.0] accepted exactly.
+        assert!((DecayFactor::new(0.0).expect("0").as_f64() - 0.0).abs() < f64::EPSILON);
+        assert!((DecayFactor::new(1.0).expect("1").as_f64() - 1.0).abs() < f64::EPSILON);
+        // Bank-side defense-in-depth: non-finite multiplier rejected by
+        // CuratedBank::try_apply_decay (NaN must never reach `weight`).
+        let now = 1_700_000_000_000_i64;
+        let (bank, ids) = build_real_bank(1, now);
+        assert!(bank.try_apply_decay(ids[0], f64::NAN).is_err());
+        assert!(bank.try_apply_decay(ids[0], f64::INFINITY).is_err());
+        let w = bank.get(ids[0]).expect("row").weight;
+        assert!(w.is_finite() && (w - 1.0).abs() < f64::EPSILON, "weight stayed pristine");
+    }
+
+    #[test]
+    fn m11_stats_serde_round_trip_after_full_cycle() {
+        // rationale: cross-target invariant — locks T1 (serde derive) and
+        // T2 (real-bank integration) together. Run a real cycle, capture
+        // the SunsetStats, serialise to JSON, deserialise, assert
+        // structural equality. If T1's json_safe_float adapter ever
+        // regresses (e.g. INFINITY → null silent loss), the equality
+        // assertion fires the canary on any future stats producer that
+        // happens to ship Default sentinels.
+        let now = 1_700_000_000_000_i64;
+        let (mut bank, ids) = build_real_bank(3, now);
+        let (pathways, freq) = make_thriving_readers(&ids);
+        let cfg = DecayConfig::default();
+        let stats =
+            run_consolidation_cycle(&mut bank, &pathways, &freq, &cfg, || Some(now)).expect("ok");
+        // Round-trip via serde_json.
+        let serialized = serde_json::to_string(&stats).expect("serialize");
+        let round_trip: workflow_core::m11_fitness_weighted_decay::SunsetStats =
+            serde_json::from_str(&serialized).expect("deserialize");
+        assert_eq!(round_trip, stats);
+        assert_eq!(round_trip.workflows_decayed, 3);
+        assert_eq!(round_trip.cycles_run, 1);
+    }
+}

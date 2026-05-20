@@ -4,7 +4,7 @@
 > Mission §8: no unnecessary carry-forward — every deferred item carries a
 > concrete completion plan + the agent's reasoning for not closing it
 > in-session.
-> **Latest update:** 2026-05-20 post-Wave-A + Wave-B (8 HIGH + 7 integration test files closed; 1178 tests passing).
+> **Latest update:** 2026-05-20 post-Wave-A + Wave-B + Wave-C (9 HIGH + T4-SERDE + 14 integration test files closed; 1262 tests passing). Two cross-pane Zen verdicts received: V2 LCM 1A closed by peer (`795e4890`, re-gate requested); V1 Restraint v1.1 BLOCKED-PENDING-LUKE.
 > **Loop entry point:** `/carry-forward` slash command (`.claude/commands/carry-forward.md`).
 
 ## Session-over-session test count trajectory
@@ -18,9 +18,20 @@
 | Wave A3 (C4 + H3 + H4) | `641b51e` | 1103 | +6 (over A2 in worktree) |
 | Wave A4 (H2 + H7) | `4d6e599` | 1127 | +24 cumulative through Wave A |
 | Wave B1 (CC-4 + CC-6 + m30 + m32 integration) | `1c9b809` | 1155 | +28 |
-| Wave B2 (m13 + m40 + m41 integration) | `c4bfed4` | **1178** | +23 |
+| Wave B2 (m13 + m40 + m41 integration) | `c4bfed4` | 1178 | +23 |
+| Wave C1 (T4-SERDE m11 + m11_integration) | `bac98b8` | 1192 | +14 |
+| Wave C2 (m4 + m5 + m6 + m7 + CC-1) | (cherry-picked through `711a662`) | 1227 | +35 |
+| Wave C3 (m14 + m23 + m33 + m42 + CC-3) | `711a662` | **1262** | +35 |
 
-**Total session delta: +98 tests, +9 commits, 4-stage gate green throughout.**
+**Total session delta: +182 tests, +13 commits on workflow-trace main, 4-stage gate green throughout.**
+
+## Cross-pane Zen verdicts (received 2026-05-20)
+
+| Verdict | Codebase | Roll-up | Action |
+|---|---|---|---|
+| **V1 Restraint v1.1-candidate** (`2026-05-20T_zen_verdict_8th_trait_restraint_v1_1_candidate.md`) | synthex-v2 (m47/m51 + FROZEN spec) | **BLOCK** | A1 AMEND (stale 7-trait refs); A2 PASS-WITH-AMEND; A3 BLOCK (B1 m47 Restraint-collapses-into-Diligence; B2 7-trait overlap broken). **Tier-3 BLOCKED-PENDING-LUKE** — FROZEN/AP27/PBFT governance. Will not propose amendment shape without Luke direction. |
+| **V2 LCM Sub-wave 1A** (`2026-05-20T0018Z_zen_audit_verdict_lcm_subwave_1a.md`) | loop-engine-v2 (m53_hook_stop) | **BLOCK→CLOSED** | Peer pane (LCM lane) landed `795e4890` at 10:25 local (23min post-verdict). Sanitiser + 13 new tests; m53 54→67 tests pass. Re-gate requested from Zen (`2026-05-20T_command_zen_v2_lcm_subwave_1a_already_landed_request_regate.md`). |
+| **V4 workflow-trace drift** (12 spec items SD1-SD12) | this repo | **PENDING** | Filed 2026-05-20T08:00Z. No Zen reply yet. workflow-trace is at Day-1 stubs; no live blocker; V4 takes whatever Zen pace is appropriate. |
 
 ## Tier 1 — CRITICAL (all closed)
 
@@ -41,8 +52,9 @@
 | **H4** | m41 | Error-envelope tightened: `error` field treated as error ONLY when it's an object AND has a `code` field. `null` / `{}` parse as non-errors. Commit `641b51e`. +3 tests. |
 | **H6** | m31/m32/m33 | Verifier-gate wired: new `ConductorDispatcher::with_verifiers(Vec<Box<dyn Verifier>>)` builder; dispatch() invokes m33 `aggregate()` BEFORE wire call; new `RefusalReason::VerifierGateBlocked{blocking_kinds}` variant. Routing-method check fires BEFORE verifier-gate (defense-in-depth ordering). Commit `00fa576`. +4 tests covering ordering invariant + empty-verifier-set backward-compat. |
 | **H7** | m22 | k-means tiebreak precision fixed: `(tiebreak as f64).copysign(1.0) * 1e-12` (magnitude ~10^7, dominated `d`) → `(tiebreak % 1024) as f64 * f64::EPSILON * d.max(1.0)` (bounded ≤ d·1024·ε). Commit `4d6e599`. +3 tests including bit-identical determinism. |
-| **H8 (partial)** | tests/ | CC-4 and CC-6 cross-cluster integration suites authored (`tests/cc4_proposal_to_dispatch_pipeline.rs` 6 tests, `tests/cc6_verifier_gated_dispatch.rs` 6 tests). CC-1, CC-2 (partial via existing m13↔m9), CC-3 (const-locked, no functional test), CC-5, CC-7 still missing — see Tier 2 carry-forward below. |
-| **H9 (partial — 5 of 18 modules)** | tests/ | Integration test files added: `m30_integration.rs` (10 tests), `m32_integration.rs` (6 tests), `m13_integration.rs` (9 tests), `m40_integration.rs` (7 tests), `m41_integration.rs` (7 tests). 13 module integration files still missing — see Tier 2 carry-forward. |
+| **H8 (partial)** | tests/ | **Wave-C extension:** CC-4 and CC-6 (Wave-B1) + CC-1 cascade-cost coupling (Wave-C2) + CC-3 evidence iteration (Wave-C3). Remaining: CC-2, CC-5, CC-7. |
+| **H9 (partial — 14 of 26 modules)** | tests/ | **Wave-C extension:** m11/m4/m5/m6/m7/m14/m23/m33/m42 added on top of Wave-B's m13/m30/m32/m40/m41. **Remaining 4 modules:** m12, m21, m22, m31. (m8/m9/m10/m20 had pre-existing integration files from Wave-1.) |
+| **T4-SERDE** | m11 | Wave-C1 — `SunsetStats` + `SunsetPhase` + `AcceptedWorkflowDecay` derive `serde::{Serialize, Deserialize}`. Custom `json_safe_float` adapter maps INFINITY/-INFINITY/NaN sentinels to `"+inf"/"-inf"/"NaN"` JSON strings (preserves public API + lossless round-trip). Commit `bac98b8`. +14 tests including the cross-target invariant locking T4-SERDE to the m11_integration cycle test. |
 
 ## Tier 2 — HIGH carry-forward (open)
 
@@ -97,11 +109,12 @@ Filing: `~/projects/shared-context/agent-cross-talk/2026-05-20T080000Z_command_z
 ## Closed-set summary (this session)
 
 - **Tier 1 CRITICAL:** 1 / 1 (100%)
-- **Tier 2 HIGH:** 9 / 11 closed (82%) — H5 needs Zen, H8/H9 multi-session lift partial-closed
-- **Tier 3 SPEC DRIFT:** 0 / 12 fixed; 12 / 12 filed to Zen (100% of charter-allowed action)
-- **Tier 4 MED/LOW:** 0 / ~22 (next-session candidates, especially T4-SERDE which unblocks m11 telemetry downstream)
-- **Cross-cluster integration tests:** 2 / 7 (CC-4 + CC-6); 4 remaining + H5-dependent CC-7
-- **Module integration files:** 8 / 26 modules (m1/m2/m3/m8/m9/m10/m11/m13/m20/m30/m32/m40/m41 — partial overlap)
+- **Tier 2 HIGH:** 9 / 11 closed (82%) — H5 BLOCKED-PENDING-LUKE/Zen, H8/H9 multi-session lift partial-closed
+- **Tier 3 SPEC DRIFT:** 0 / 12 fixed; 12 / 12 filed to Zen V4 (PENDING Zen reply, no live blocker)
+- **Tier 4 MED/LOW:** 1 / ~22 closed (T4-SERDE)
+- **Cross-cluster integration tests:** 4 / 7 (CC-1 + CC-3 + CC-4 + CC-6); 3 remaining (CC-2, CC-5, CC-7 H5-dependent)
+- **Module integration files:** 18 / 26 modules — only m12/m21/m22/m31 remain
+- **Cross-pane Zen verdicts:** V1 BLOCKED-PENDING-LUKE (FROZEN-spec governance); V2 CLOSED by peer; V4 PENDING Zen reply
 
 ## Next-session entry point
 

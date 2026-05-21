@@ -340,4 +340,215 @@ mod tests {
         b.artefact_key = "k2".into();
         assert_ne!(a, b);
     }
+
+    // ====================================================================
+    // W4 mutation-kill pass (S1003529) — pins surviving cargo-mutants
+    // mutants in allowlist.rs.
+    // ====================================================================
+
+    // rationale: kills `allowlist.rs:77` replace `+` with `*`/`-` in
+    // `let line = idx + 1`. A parse error on the SECOND data row (file
+    // line 3) must report `line == 3`. With `idx * 1` the third line
+    // (idx 2) reports 2; with `idx - 1` it reports 1; only `idx + 1`
+    // reports 3. The header is line 1, first data row line 2, the
+    // malformed row line 3.
+    #[test]
+    fn parse_error_line_number_is_idx_plus_one_not_times_or_minus() {
+        let content = "artefact_key\tapproved_by\tapproved_at\texpiry\n\
+                       m12.report\tluke\t2026-05-17T10:00:00Z\t2026-06-17T10:00:00Z\n\
+                       m13.report\tonly_two_fields\n";
+        let err = parse_tsv(content, "test").expect_err("malformed third line");
+        let EmberGateError::AllowlistParse { line, .. } = err else {
+            panic!("expected AllowlistParse");
+        };
+        // idx of the malformed row is 2 → line must be 3 (2 + 1).
+        assert_eq!(line, 3, "line must be idx + 1, not idx * 1 (=2) or idx - 1 (=1)");
+    }
+
+    // rationale: kills `allowlist.rs:79` replace `||` with `&&` in
+    // `trimmed.is_empty() || trimmed.starts_with('#')`. A blank line is
+    // empty-but-not-#; a comment line is #-but-not-empty. With `&&`,
+    // NEITHER would be skipped — both would fall through to the
+    // field-count check and raise AllowlistParse. With `||`, both are
+    // correctly skipped and parsing succeeds.
+    #[test]
+    fn parse_skips_blank_line_which_is_empty_but_not_hash() {
+        // A lone blank line: is_empty() == true, starts_with('#') == false.
+        // Under `&&` this would NOT be skipped → parse error. Under `||`
+        // it is skipped → Ok.
+        let content = "artefact_key\tapproved_by\tapproved_at\texpiry\n\
+                       \n\
+                       m12.report\tluke\t2026-05-17T10:00:00Z\t2026-06-17T10:00:00Z\n";
+        let rows = parse_tsv(content, "test").expect("blank line must be skipped");
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn parse_skips_comment_line_which_is_hash_but_not_empty() {
+        // A comment line: is_empty() == false, starts_with('#') == true.
+        // Under `&&` this would NOT be skipped → parse error (the comment
+        // text has no tabs). Under `||` it is skipped → Ok.
+        let content = "artefact_key\tapproved_by\tapproved_at\texpiry\n\
+                       # this is a non-empty comment line\n\
+                       m12.report\tluke\t2026-05-17T10:00:00Z\t2026-06-17T10:00:00Z\n";
+        let rows = parse_tsv(content, "test").expect("comment line must be skipped");
+        assert_eq!(rows.len(), 1);
+    }
+
+    // rationale: kills `allowlist.rs:82` replace `&&` with `||` in
+    // `line == 1 && trimmed.starts_with("artefact_key")`. A genuine
+    // DATA row whose artefact_key column literally equals
+    // `artefact_key` (on file line 2, not line 1) must NOT be treated
+    // as a header — it must parse into a row. With `||` the line-1
+    // condition is dropped, so any line starting with "artefact_key"
+    // (including this real data row) is silently skipped → 0 rows.
+    #[test]
+    fn parse_does_not_skip_data_row_keyed_artefact_key_on_line_two() {
+        let content = "artefact_key\tapproved_by\tapproved_at\texpiry\n\
+                       artefact_key\tluke\t2026-05-17T10:00:00Z\t2026-06-17T10:00:00Z\n";
+        let rows = parse_tsv(content, "test").expect("data row must parse");
+        assert_eq!(
+            rows.len(),
+            1,
+            "a data row literally keyed 'artefact_key' on line 2 must NOT be header-skipped"
+        );
+        assert_eq!(rows[0].artefact_key, "artefact_key");
+    }
+
+    // rationale: also pins `allowlist.rs:82` — the header on line 1
+    // that DOESN'T start with "artefact_key" must NOT be skipped (it
+    // would be parsed as data). Under `||` a line-1 non-header would be
+    // skipped by the dropped `line == 1` arm. This complements the
+    // above: header detection requires BOTH conditions.
+    #[test]
+    fn parse_line_one_without_artefact_key_prefix_is_treated_as_data() {
+        // First line does not start with "artefact_key" → it is a data
+        // row, not a header. Under `||`, `line == 1` alone would skip it.
+        let content = "m12.report\tluke\t2026-05-17T10:00:00Z\t2026-06-17T10:00:00Z\n";
+        let rows = parse_tsv(content, "test").expect("line-1 non-header parses as data");
+        assert_eq!(rows.len(), 1, "line-1 non-header row must parse as data");
+        assert_eq!(rows[0].artefact_key, "m12.report");
+    }
+
+    // rationale: kills `allowlist.rs:134` replace `is_approved -> bool`
+    // with `false`. With a future-dated, key-matching approval,
+    // `is_approved` must return TRUE. The `false`-replacement mutant
+    // would fail this; the real code passes.
+    #[test]
+    fn is_approved_returns_true_for_future_dated_matching_row() {
+        let approvals = vec![HeldApproval {
+            artefact_key: "m12.report".into(),
+            approved_by: "luke".into(),
+            approved_at: datetime!(2026-01-01 00:00:00 UTC),
+            // Far-future expiry so the wall-clock `now` is always before it.
+            expiry: datetime!(2999-01-01 00:00:00 UTC),
+        }];
+        assert!(
+            is_approved(&approvals, "m12.report"),
+            "is_approved must return true for a far-future matching approval"
+        );
+    }
+
+    // rationale: kills `allowlist.rs:134` replace `is_approved -> bool`
+    // with `true`. With NO approvals, `is_approved` must return FALSE.
+    // The `true`-replacement mutant would fail this; the real code
+    // (and `is_approved_uses_now_utc_convenience` above for the
+    // expired case) passes.
+    #[test]
+    fn is_approved_returns_false_for_empty_allowlist() {
+        assert!(
+            !is_approved(&[], "m12.report"),
+            "is_approved must return false when the allowlist is empty"
+        );
+    }
+
+    // ====================================================================
+    // W4 FINAL mutation-kill pass (S1003529) — re-verification found
+    // `load_approvals` (64:5) + the NotFound match guard (68:19) still
+    // surviving. The pre-existing `load_approvals_from_temp_file_succeeds`
+    // and `load_approvals_propagates_io_error_other_than_not_found` tests
+    // DO kill them when run against the manually-applied mutations
+    // (verified). They survive in the cargo-mutants report because the
+    // `propagates_io_error` test reads `/`, whose error kind is
+    // environment-dependent (some sandboxes return Ok or NotFound for a
+    // directory read). The replacements below are deterministic: they
+    // trigger a guaranteed non-NotFound `NotADirectory` error by reading
+    // a path whose parent component is a regular file.
+    // ====================================================================
+
+    // rationale: KILLS `allowlist.rs:64:5` replace `load_approvals -> ...`
+    // with `Ok(vec![])`. A real, populated TSV file with exactly two
+    // approval rows must load as TWO `HeldApproval`s with the exact
+    // field values. The `Ok(vec![])` mutant returns an empty Vec and
+    // fails the length assertion; a `Ok(vec![Default::default()])`
+    // mutant (were `HeldApproval: Default`, which it is NOT — no
+    // `Default` derive, `OffsetDateTime` has none) would fail the field
+    // assertions. This pins the function actually parses the file.
+    #[test]
+    fn mutkill_64_final_load_approvals_returns_real_parsed_rows_not_empty() {
+        let f = write_tsv(
+            "artefact_key\tapproved_by\tapproved_at\texpiry\n\
+             m12.report\tluke@0A\t2026-05-17T10:00:00Z\t2026-06-17T10:00:00Z\n\
+             m13.report\tzen@audit\t2026-05-18T09:30:00Z\t2026-07-01T00:00:00Z\n",
+        );
+        let rows = load_approvals(f.path()).expect("populated file must load");
+        // `Ok(vec![])` mutant -> len 0 -> fails here.
+        assert_eq!(rows.len(), 2, "two data rows must parse into two approvals");
+        // Exact field values -> a constant-vec mutant cannot satisfy these.
+        assert_eq!(rows[0].artefact_key, "m12.report");
+        assert_eq!(rows[0].approved_by, "luke@0A");
+        assert_eq!(rows[1].artefact_key, "m13.report");
+        assert_eq!(rows[1].approved_by, "zen@audit");
+        assert_eq!(rows[1].expiry, datetime!(2026-07-01 00:00:00 UTC));
+    }
+
+    // rationale: KILLS `allowlist.rs:68:19` replace the match guard
+    // `e.kind() == io::ErrorKind::NotFound` with `true`. With the guard
+    // forced to `true`, EVERY I/O error — not just file-absent — is
+    // swallowed into `Ok(Vec::new())`, so a genuine read failure is
+    // silently masked as an empty allowlist (the strictest-but-WRONG
+    // configuration: a corrupt/unreadable allowlist would let every
+    // Held verdict CI-FAIL with no error surfaced).
+    //
+    // We trigger a DETERMINISTIC non-NotFound error: read a path whose
+    // parent component is a regular file. `<regular_file>/child.tsv`
+    // yields `io::ErrorKind::NotADirectory` (ENOTDIR) on Unix — which is
+    // NOT `NotFound`. Real code: the guard is false -> propagates
+    // `Err(EmberGateError::AllowlistRead)`. The `true` mutant: guard
+    // true -> returns `Ok(vec![])`.
+    #[test]
+    fn mutkill_68_final_non_notfound_io_error_propagates_not_swallowed() {
+        // A real regular file...
+        let f = write_tsv("artefact_key\tapproved_by\tapproved_at\texpiry\n");
+        // ...used as if it were a directory: ENOTDIR, not NotFound.
+        let not_a_dir = f.path().join("child_allowlist.tsv");
+        let result = load_approvals(&not_a_dir);
+        // Real code: non-NotFound error propagates as a typed error.
+        // `true`-guard mutant: swallowed into Ok(empty).
+        let err = result.expect_err(
+            "a non-NotFound I/O error (ENOTDIR) must propagate as Err, \
+             not be swallowed into Ok(empty) by a `true` match guard",
+        );
+        assert!(
+            matches!(err, EmberGateError::AllowlistRead { .. }),
+            "non-NotFound I/O failure must surface as AllowlistRead, got {err:?}"
+        );
+    }
+
+    // rationale: also pins `allowlist.rs:68:19` from the other side —
+    // a genuinely ABSENT file (NotFound) MUST still be treated as an
+    // empty allowlist (Ok), so the guard is not merely "always false".
+    // Together with the test above this pins the guard to EXACTLY
+    // `kind == NotFound`. (A `false`-guard mutant would fail here by
+    // turning a missing file into an error; the `true`-guard mutant is
+    // killed by the test above.)
+    #[test]
+    fn mutkill_68_final_absent_file_still_yields_empty_ok() {
+        let absent = std::env::temp_dir().join("wf_m10_definitely_absent_a7f3e9c1.tsv");
+        // Make sure it truly does not exist.
+        let _ = std::fs::remove_file(&absent);
+        let rows = load_approvals(&absent)
+            .expect("an absent allowlist file must load as an empty Ok, not Err");
+        assert!(rows.is_empty(), "absent file -> empty allowlist");
+    }
 }

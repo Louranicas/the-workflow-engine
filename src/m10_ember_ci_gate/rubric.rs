@@ -646,6 +646,112 @@ mod tests {
         assert_eq!(v, EmberStatus::Approved);
     }
 
+    // ====================================================================
+    // W4 FINAL mutation-kill pass (S1003529) — `check_warmth` survivors.
+    //
+    // `check_warmth` builds `has_ratification` from a 4-way `||` chain:
+    //   lower.contains("luke")            // line 342
+    //   || lower.contains("approved")     // line 343
+    //   || lower.contains("ratified")     // line 344
+    //   || lower.contains("consent")      // line 345
+    // then `if !has_ratification { ... Warmth finding ... }`  // line 346
+    //
+    // The pre-existing Warmth tests never exercised a SINGLE ratification
+    // keyword in isolation: `warmth_pass_proceeding_with_ratification`
+    // uses "...per Luke approval..." which contains BOTH "luke" AND
+    // "approved", so an `||`->`&&` mutation on any single link still
+    // leaves the chain true (`luke` alone or `approved` alone keeps it
+    // satisfied via the surviving `||`s). That is why 343/344/345 survive.
+    // Each test below uses EXACTLY ONE ratification keyword so the
+    // corresponding `&&` mutation flips `has_ratification` to false ->
+    // the real-Approved string becomes Rejected under the mutant.
+    // ====================================================================
+
+    // rationale: KILLS `rubric.rs:343` `||` -> `&&`.
+    // Text contains ONLY "approved" (no luke / ratified / consent).
+    // Real chain: `luke(F) || approved(T) || ratified(F) || consent(F)`
+    //   = true  -> has_ratification -> no Warmth finding -> Approved.
+    // `343 &&` mutant: `(luke(F) && approved(T)) || ratified(F)
+    //   || consent(F)` = false -> !false -> Warmth Rejected.
+    #[test]
+    fn mutkill_343_final_proceeding_with_only_approved_keyword_passes() {
+        let v = score_against_rubric("proceeding with the rollout, approved.");
+        assert_eq!(
+            v,
+            EmberStatus::Approved,
+            "the lone ratification keyword 'approved' must satisfy \
+             has_ratification; a 343 `||`->`&&` mutant rejects it"
+        );
+    }
+
+    // rationale: KILLS `rubric.rs:344` `||` -> `&&`.
+    // Text contains ONLY "ratified".
+    // Real chain: `luke(F) || approved(F) || ratified(T) || consent(F)`
+    //   = true -> Approved.
+    // `344 &&` mutant: `luke(F) || (approved(F) && ratified(T))
+    //   || consent(F)` = false -> Warmth Rejected.
+    #[test]
+    fn mutkill_344_final_proceeding_with_only_ratified_keyword_passes() {
+        let v = score_against_rubric("proceeding with the rollout, ratified.");
+        assert_eq!(
+            v,
+            EmberStatus::Approved,
+            "the lone ratification keyword 'ratified' must satisfy \
+             has_ratification; a 344 `||`->`&&` mutant rejects it"
+        );
+    }
+
+    // rationale: KILLS `rubric.rs:345` `||` -> `&&`.
+    // Text contains ONLY "consent".
+    // Real chain: `luke(F) || approved(F) || ratified(F) || consent(T)`
+    //   = true -> Approved.
+    // `345 &&` mutant: `luke(F) || approved(F) || (ratified(F)
+    //   && consent(T))` = false -> Warmth Rejected.
+    #[test]
+    fn mutkill_345_final_proceeding_with_only_consent_keyword_passes() {
+        let v = score_against_rubric("proceeding with the rollout, consent.");
+        assert_eq!(
+            v,
+            EmberStatus::Approved,
+            "the lone ratification keyword 'consent' must satisfy \
+             has_ratification; a 345 `||`->`&&` mutant rejects it"
+        );
+    }
+
+    // rationale: KILLS `rubric.rs:346` delete `!` in `if !has_ratification`.
+    // Text has the `proceeding with` trigger but NO ratification keyword.
+    // Real code: `!has_ratification` = `!false` = true -> Warmth finding
+    //   at confidence 0.55 -> Rejected.
+    // `346` `!`-deletion mutant: `if has_ratification` = `if false` ->
+    //   no Warmth finding -> second warmth block (substrate) also misses
+    //   -> Approved.
+    // We BOTH assert Rejected on the un-ratified text AND assert Approved
+    // on a ratified counterpart, so a trivially-inverted gate cannot pass
+    // by accident.
+    #[test]
+    fn mutkill_346_final_unratified_proceeding_is_rejected_ratified_is_approved() {
+        // Un-ratified: real -> Rejected (Warmth); `!`-deletion -> Approved.
+        let unratified = score_against_rubric("proceeding with the substrate rollout.");
+        let EmberStatus::Rejected { trait_name, .. } = unratified else {
+            panic!(
+                "un-ratified 'proceeding with' must be Rejected by Warmth; \
+                 a 346 `!`-deletion mutant would Approve it"
+            );
+        };
+        assert_eq!(trait_name, TraitName::Warmth);
+
+        // Ratified counterpart: real -> Approved (pins the gate is not
+        // simply always-Rejected).
+        let ratified = score_against_rubric(
+            "proceeding with the rollout per Luke approval at 2026-05-17.",
+        );
+        assert_eq!(
+            ratified,
+            EmberStatus::Approved,
+            "a ratified 'proceeding with' must still pass"
+        );
+    }
+
     // ---- F-Property (5) -------------------------------------------------
 
     #[test]
@@ -776,5 +882,278 @@ mod tests {
         // honesty check. Removing dash detection would re-flag the example.
         let v = score_against_rubric("successfully completed:\n- a\n- b");
         assert_eq!(v, EmberStatus::Approved);
+    }
+
+    // ====================================================================
+    // W4 mutation-kill pass (S1003529) — pins surviving cargo-mutants
+    // mutants in rubric.rs. `contains_measurement_anchor`,
+    // `check_diligence`, and `check_honesty` are private; they are
+    // exercised through `score_against_rubric`. Curiosity is the only
+    // trait that consults `contains_measurement_anchor`, so we drive it
+    // via `status: healthy` strings that fail Curiosity UNLESS an
+    // anchor is present.
+    // ====================================================================
+
+    // ---- contains_measurement_anchor (rubric.rs:190-203) ----------------
+
+    // rationale: kills `rubric.rs:191` replace
+    // `contains_measurement_anchor -> bool` with `false`. If the helper
+    // always returned `false`, a `status: healthy` string carrying a
+    // genuine anchor ("scope=") would STILL be rejected by Curiosity.
+    // The real code returns `true` → the string is Approved.
+    #[test]
+    fn measurement_anchor_present_makes_status_healthy_pass() {
+        // "scope=" is one anchor token; without the helper returning true
+        // this would be a Curiosity Rejected.
+        let v = score_against_rubric("status: healthy scope=lib");
+        assert_eq!(
+            v,
+            EmberStatus::Approved,
+            "a real measurement anchor must suppress the Curiosity rejection"
+        );
+    }
+
+    // rationale: kills `rubric.rs:193-197` replace `||` with `&&` in the
+    // anchor-token chain. Each clause must INDEPENDENTLY make the helper
+    // return true. With `&&`, a string carrying only ONE token would no
+    // longer count as anchored → Curiosity would reject it. We test each
+    // of the six tokens in isolation, on a `status: healthy` carrier
+    // that has NO ASCII-digit run (so the digit-count fallback at line
+    // 202 cannot mask the result).
+    #[test]
+    fn measurement_anchor_each_token_independently_satisfies() {
+        // Each carrier: `status: healthy` + exactly one anchor token,
+        // no 8-digit run. Each must independently be Approved.
+        let carriers = [
+            ("status: healthy as of yesterday", "as of "),
+            ("status: healthy at 20zz", " at 20"),
+            ("status: healthy verified by probe run", "probe"),
+            ("status: healthy ts=recent", "ts="),
+            ("status: healthy per rfc3339 stamp", "rfc3339"),
+            ("status: healthy scope=lib", "scope="),
+        ];
+        for (text, token) in carriers {
+            assert_eq!(
+                score_against_rubric(text),
+                EmberStatus::Approved,
+                "anchor token {token:?} alone must satisfy contains_measurement_anchor"
+            );
+        }
+    }
+
+    // rationale: kills `rubric.rs:202` replace `>=` with `<` in
+    // `text.bytes().filter(u8::is_ascii_digit).count() >= 8`. EXACTLY 8
+    // ASCII digits must count as an anchor (boundary). With `< 8` the
+    // 8-digit case would FAIL the anchor check → Curiosity rejects.
+    #[test]
+    fn measurement_anchor_exactly_eight_digits_counts() {
+        // "status: healthy" + exactly 8 digits, no other anchor token.
+        let v = score_against_rubric("status: healthy 12345678");
+        assert_eq!(
+            v,
+            EmberStatus::Approved,
+            "exactly 8 ASCII digits must satisfy the anchor (>= 8 boundary)"
+        );
+    }
+
+    // rationale: complements the above — pins the FALSE side of the
+    // digit-count anchor. SEVEN digits is below the threshold and (with
+    // no token anchor) must NOT count → Curiosity rejects the string.
+    // Guards against a `< 8` mutant masquerading as correct on the
+    // 8-digit case alone, and against the helper being stuck at `true`.
+    #[test]
+    fn measurement_anchor_seven_digits_does_not_count() {
+        let v = score_against_rubric("status: healthy 1234567");
+        let EmberStatus::Rejected { trait_name, .. } = v else {
+            panic!("7 digits must NOT anchor → Curiosity Rejected, got {v:?}");
+        };
+        assert_eq!(trait_name, TraitName::Curiosity);
+    }
+
+    // ---- check_diligence (rubric.rs:207-241) ---------------------------
+
+    // rationale: kills `rubric.rs:208` replace `check_diligence` with
+    // `None`. A `passing` claim with no digit must fire Diligence. If
+    // the whole function returned `None`, this would be Approved.
+    #[test]
+    fn check_diligence_fires_for_passing_without_count() {
+        let v = score_against_rubric("the suite is passing");
+        let EmberStatus::Rejected { trait_name, .. } = v else {
+            panic!("'passing' without count must be Diligence Rejected, got {v:?}");
+        };
+        assert_eq!(trait_name, TraitName::Diligence);
+    }
+
+    // rationale: pins `rubric.rs:209` `&&` and the `!` on the digit
+    // check — `passing` WITH a digit must NOT fire (digits present →
+    // negated clause false → block skipped). Together with the test
+    // above this brackets the Diligence block-1 boolean.
+    #[test]
+    fn check_diligence_passing_with_digit_does_not_fire() {
+        // "412 tests passing" — has a digit; block 1 must not fire.
+        let v = score_against_rubric("412 tests passing");
+        assert_eq!(v, EmberStatus::Approved);
+    }
+
+    // rationale: kills `rubric.rs:217-221` delete `!` in the
+    // `!lower.contains("clippy"/"check"/"test"/"gate")` exception chain
+    // of Diligence block 2. The block fires for a digitless "clean"
+    // string ONLY when NONE of those scope words appear. Deleting any
+    // `!` inverts that clause: a string WITHOUT the word would then be
+    // considered as-if it had the word and the block would not fire.
+    // We test the firing case + one exception word per `!`.
+    #[test]
+    fn check_diligence_block2_fires_for_bare_clean() {
+        // "clean" with no digit and no scope word → block 2 fires.
+        let v = score_against_rubric("the working tree is clean");
+        let EmberStatus::Rejected { trait_name, .. } = v else {
+            panic!("bare 'clean' must be Diligence Rejected, got {v:?}");
+        };
+        assert_eq!(trait_name, TraitName::Diligence);
+    }
+
+    #[test]
+    fn check_diligence_block2_suppressed_by_each_scope_word() {
+        // Each scope word individually suppresses the bare-'clean'
+        // rejection. Deleting the `!` on that word's clause (217-221)
+        // would re-flag the string → Rejected. Real code → Approved.
+        // No digits in any carrier so only block 2 is in play.
+        for scope in ["clippy", "check", "test", "gate"] {
+            let text = format!("the {scope} run came back clean");
+            assert_eq!(
+                score_against_rubric(&text),
+                EmberStatus::Approved,
+                "scope word {scope:?} must suppress the bare-'clean' Diligence rejection"
+            );
+        }
+    }
+
+    // rationale: pins the `!text.bytes().any(...is_ascii_digit)` clause
+    // of Diligence block 2 (line 221's digit guard) — a digit present in
+    // a "clean" string suppresses block 2.
+    #[test]
+    fn check_diligence_block2_suppressed_by_digit() {
+        // "clean" with a digit and no scope word: block 2's digit clause
+        // suppresses it. (No round-number token, so block 3 stays quiet.)
+        let v = score_against_rubric("7 files clean");
+        assert_eq!(v, EmberStatus::Approved);
+    }
+
+    // rationale: kills `rubric.rs:229` replace `||` with `&&` in
+    // `(text.contains("~3000") || text.contains("~1000") ||
+    // text.contains("100%"))`. Each round-number token must
+    // INDEPENDENTLY arm block 3. With `&&` a string carrying only one
+    // token would no longer fire. We test all three in isolation. No
+    // "test"/"sample"/"n=" present so the negated guards stay true.
+    #[test]
+    fn check_diligence_block3_each_round_number_token_fires() {
+        for token in ["~3000", "~1000", "100%"] {
+            let text = format!("about {token} commits this quarter");
+            let v = score_against_rubric(&text);
+            let EmberStatus::Rejected { trait_name, .. } = v else {
+                panic!("round-number token {token:?} must fire Diligence, got {v:?}");
+            };
+            assert_eq!(
+                trait_name,
+                TraitName::Diligence,
+                "round-number token {token:?} alone must arm Diligence block 3"
+            );
+        }
+    }
+
+    // rationale: kills `rubric.rs:230-232` replace `&&` with `||` and
+    // `230:12`/`231:12` delete `!`. Block 3 fires only when a round
+    // number is present AND none of "test"/"sample"/"n=" appear. Each
+    // of those words individually suppresses the rejection. With `&&`→
+    // `||` the chain would collapse; with a deleted `!` the suppression
+    // would invert. Real code → each carrier is Approved.
+    #[test]
+    fn check_diligence_block3_suppressed_by_each_sample_word() {
+        // "~3000" round number + one suppressor word each.
+        let carriers = [
+            "~3000 cases under test",
+            "~3000 rows in the sample",
+            "~3000 events (n=64)",
+        ];
+        for text in carriers {
+            assert_eq!(
+                score_against_rubric(text),
+                EmberStatus::Approved,
+                "a sample-size word must suppress the round-number Diligence rejection: {text:?}"
+            );
+        }
+    }
+
+    // ---- check_honesty (rubric.rs:244-264) -----------------------------
+
+    // rationale: kills `rubric.rs:247` replace `||` with `&&` in
+    // `lower.contains("successfully completed") ||
+    // lower.contains("all systems operational")`. Each totalising
+    // phrase must INDEPENDENTLY arm the Honesty check. With `&&` a
+    // string with only one phrase would no longer be examined.
+    #[test]
+    fn check_honesty_each_totalising_phrase_fires_independently() {
+        for phrase in ["successfully completed", "all systems operational"] {
+            let v = score_against_rubric(phrase);
+            let EmberStatus::Rejected { trait_name, .. } = v else {
+                panic!("totalising phrase {phrase:?} must fire Honesty, got {v:?}");
+            };
+            assert_eq!(
+                trait_name,
+                TraitName::Honesty,
+                "totalising phrase {phrase:?} alone must arm the Honesty check"
+            );
+        }
+    }
+
+    // rationale: kills `rubric.rs:250-254` replace `||` with `&&` in the
+    // `has_enum` chain. Each enumeration marker must INDEPENDENTLY make
+    // `has_enum` true, which SUPPRESSES the Honesty rejection. With `&&`
+    // a string carrying only one marker would still be flagged. Real
+    // code → each carrier is Approved.
+    #[test]
+    fn check_honesty_each_enumeration_marker_suppresses() {
+        // "successfully completed" + exactly one enumeration marker.
+        let carriers = [
+            "successfully completed\n- item one",          // "- "
+            "successfully completed\n* item one",          // "* "
+            "successfully completed\n\u{2022} item one",   // bullet "• "
+            "successfully completed\n1. item one",         // "1."
+            "successfully completed\n1) item one",         // "1)"
+        ];
+        for text in carriers {
+            assert_eq!(
+                score_against_rubric(text),
+                EmberStatus::Approved,
+                "an enumeration marker must suppress the Honesty rejection: {text:?}"
+            );
+        }
+    }
+
+    // rationale: kills `rubric.rs:254` replace `&&` with `||` AND
+    // replace `>=` with `<` in the final `has_enum` clause
+    // `(text.contains(": ") && text.lines().count() >= 2)`. This clause
+    // is true only when a colon-space is present AND the text spans at
+    // least 2 lines. We pin both halves:
+    //  - colon-space + 2 lines → suppressed (Approved). A `>=`→`<`
+    //    mutant would make the 2-line case false → Rejected.
+    //  - colon-space on a SINGLE line → NOT suppressed (Rejected). A
+    //    `&&`→`||` mutant would suppress on the colon alone → Approved.
+    #[test]
+    fn check_honesty_colon_clause_requires_colon_and_two_lines() {
+        // Colon-space + 2 lines → has_enum true → suppressed.
+        let two_line = "successfully completed\nresult: ok";
+        assert_eq!(
+            score_against_rubric(two_line),
+            EmberStatus::Approved,
+            "colon-space across >= 2 lines must suppress the Honesty rejection"
+        );
+        // Colon-space but only ONE line → has_enum false → still flagged.
+        let one_line = "successfully completed: result ok";
+        let v = score_against_rubric(one_line);
+        let EmberStatus::Rejected { trait_name, .. } = v else {
+            panic!("single-line colon must NOT suppress Honesty, got {v:?}");
+        };
+        assert_eq!(trait_name, TraitName::Honesty);
     }
 }

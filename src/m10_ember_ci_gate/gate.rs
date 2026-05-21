@@ -500,6 +500,85 @@ mod tests {
         }
     }
 
+    // ====================================================================
+    // W4 mutation-kill pass (S1003529) — pins surviving cargo-mutants
+    // mutants in gate.rs.
+    // ====================================================================
+
+    // rationale: kills `gate.rs:92` replace `>` with `>=` in the
+    // `a.expiry > now` allowlist predicate. With expiry EXACTLY equal to
+    // `now`, the strict `>` treats the row as EXPIRED → HeldFailed. The
+    // `>=` mutant would treat it as still-active → HeldAllowlisted. Uses
+    // a Held-emitting soft-absolutist string so the allowlist branch is
+    // actually reached.
+    #[test]
+    fn gate_held_allowlist_expiry_exactly_at_now_is_expired_routes_heldfailed() {
+        let now = datetime!(2026-05-20 10:00:00 UTC);
+        let approvals = vec![HeldApproval {
+            artefact_key: "m23.proposal.summary".into(),
+            approved_by: "luke@node.0A".into(),
+            approved_at: datetime!(2026-01-01 00:00:00 UTC),
+            expiry: now, // expiry == now → STRICT `>` rejects (expired)
+        }];
+        let v = evaluate_string_at(
+            "m23.proposal.summary",
+            "This is probably the best path forward.",
+            &approvals,
+            now,
+        );
+        assert!(
+            matches!(v, GateVerdict::HeldFailed { trait_name: TraitName::Humility, .. }),
+            "expiry == now must be EXPIRED (strict >); expected HeldFailed, got {v:?}"
+        );
+    }
+
+    // rationale: kills `gate.rs:92` replace `>` with `<`. With expiry
+    // strictly in the FUTURE relative to `now`, the real `>` predicate
+    // matches the row → HeldAllowlisted. The `<` mutant would invert
+    // this (future expiry < now is false) → HeldFailed. Pins the
+    // active-approval side of the comparison.
+    #[test]
+    fn gate_held_allowlist_future_expiry_routes_heldallowlisted() {
+        let now = datetime!(2026-05-20 10:00:00 UTC);
+        let approvals = vec![HeldApproval {
+            artefact_key: "m23.proposal.summary".into(),
+            approved_by: "luke@node.0A".into(),
+            approved_at: datetime!(2026-01-01 00:00:00 UTC),
+            expiry: datetime!(2026-05-20 10:00:01 UTC), // one second after `now`
+        }];
+        let v = evaluate_string_at(
+            "m23.proposal.summary",
+            "This is probably the best path forward.",
+            &approvals,
+            now,
+        );
+        assert!(
+            matches!(v, GateVerdict::HeldAllowlisted { trait_name: TraitName::Humility, .. }),
+            "future expiry must AUTHORISE (strict >); expected HeldAllowlisted, got {v:?}"
+        );
+    }
+
+    // rationale: hardens `gate.rs:67` `evaluate_string` against a
+    // body-replacement mutant. `evaluate_string` MUST delegate to
+    // `evaluate_string_at` with `OffsetDateTime::now_utc()` — a known
+    // Pass-string returns Pass and a known Rejected-string returns Fail.
+    // A `Default::default()`-style replacement (if it compiled) or any
+    // constant return would fail at least one of these.
+    #[test]
+    fn evaluate_string_returns_real_verdict_not_a_constant() {
+        // Pass branch.
+        assert_eq!(
+            evaluate_string("k", "POVM probe at 2026-05-17T10:00:00Z scope=lib", &[]),
+            GateVerdict::Pass,
+        );
+        // Fail branch — a constant-return mutant cannot satisfy both.
+        let v = evaluate_string("k", "successfully completed", &[]);
+        assert!(
+            matches!(v, GateVerdict::Fail { .. }),
+            "evaluate_string must return a real Fail verdict, got {v:?}"
+        );
+    }
+
     // rationale: Cross-module surface invariant — evaluate_string and
     // evaluate_string_at MUST return semantically identical verdicts for
     // inputs that don't involve allowlist expiry (which is the only

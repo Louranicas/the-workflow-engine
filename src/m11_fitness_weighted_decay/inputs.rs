@@ -161,4 +161,105 @@ mod tests {
         assert!(fitness_factor(f64::NAN).abs() < 1e-12);
         assert!(fitness_factor(f64::NEG_INFINITY).abs() < 1e-12);
     }
+
+    // ====================================================================
+    // W4 FINAL mutation-kill pass (S1003529) — `recency_factor` survivors.
+    //
+    // recency_factor's two early-return guards:
+    //   if !days_since_last_run.is_finite() || days_since_last_run <= 0.0  // L46
+    //       { return 1.0; }
+    //   if !half_life_days.is_finite() || half_life_days <= 0.0            // L49
+    //       { return 1.0; }
+    //
+    // The pre-existing tests only probed the early-return SHAPE (days=0,
+    // NaN-days, negative-days, infinite-half-life) — all of which return
+    // 1.0 under BOTH the real guard and several mutated guards, so the
+    // mutants survive. The kill discriminator is a NORMAL, finite,
+    // positive input (`days = 30`, `half_life = 30`) which the real code
+    // must carry past BOTH guards into the exponential, yielding exactly
+    // 0.5 — a value no early-return-1.0 mutant can produce.
+    // ====================================================================
+
+    // rationale: KILLS `inputs.rs:46:8` delete `!` in the L46 guard.
+    // Real guard: `if !days.is_finite() || days <= 0.0`. For days=30
+    // (finite, positive): `!is_finite(30)`=false, `30<=0`=false -> guard
+    // false -> falls through -> exp -> returns 0.5.
+    // `!`-deletion mutant: `if days.is_finite() || days <= 0.0` ->
+    // `is_finite(30)`=true -> guard true -> `return 1.0` (WRONG).
+    //
+    // ALSO KILLS `inputs.rs:46:64` `<=` -> `>`.
+    // Real guard's second clause `days <= 0.0`: for days=30 it is false.
+    // `>` mutant: `days > 0.0` -> `30 > 0` = true -> guard true ->
+    // `return 1.0` (WRONG). Real code returns 0.5.
+    #[test]
+    fn mutkill_46_final_finite_positive_days_falls_through_to_exp() {
+        // One half-life of elapsed time => exactly 0.5. A guard that
+        // wrongly early-returns 1.0 (either the `!`-deletion or the
+        // `<=`->`>` mutant) fails this exact-value assertion.
+        let r = recency_factor(30.0, 30.0);
+        assert!(
+            (r - 0.5).abs() < 1e-12,
+            "30 days at a 30-day half-life must decay to exactly 0.5; \
+             an L46-guard mutant early-returns 1.0 instead, got {r}"
+        );
+        // Second anchor: a non-half-life positive elapsed must ALSO reach
+        // the exponential (not 1.0). 60 days @ 30-day half-life => 0.25.
+        let r2 = recency_factor(60.0, 30.0);
+        assert!(
+            (r2 - 0.25).abs() < 1e-12,
+            "60 days at a 30-day half-life must decay to 0.25, got {r2}"
+        );
+    }
+
+    // rationale: KILLS `inputs.rs:49:8` delete `!` in the L49 guard.
+    // Real guard: `if !half_life.is_finite() || half_life <= 0.0`. For
+    // half_life=30 (finite, positive): `!is_finite(30)`=false,
+    // `30<=0`=false -> guard false -> falls through -> exp -> 0.5.
+    // `!`-deletion mutant: `if half_life.is_finite() || ...` ->
+    // `is_finite(30)`=true -> guard true -> `return 1.0` (WRONG).
+    #[test]
+    fn mutkill_49_8_final_finite_positive_half_life_falls_through_to_exp() {
+        let r = recency_factor(30.0, 30.0);
+        assert!(
+            (r - 0.5).abs() < 1e-12,
+            "a finite positive half-life must NOT trigger the L49 early \
+             return; deleting `!` makes it early-return 1.0, got {r}"
+        );
+    }
+
+    // rationale: KILLS `inputs.rs:49:36` `||` -> `&&` in the L49 guard.
+    // Real guard: `if !half_life.is_finite() || half_life <= 0.0` returns
+    // 1.0 when half_life is non-finite (NaN/±inf) OR non-positive.
+    // The `&&` mutant returns 1.0 only when half_life is non-finite AND
+    // non-positive. The discriminating input is `half_life = NaN` with a
+    // finite positive `days`:
+    //   real: `!is_finite(NaN)`=true -> guard true -> `return 1.0`.
+    //   `&&` mutant: `!is_finite(NaN)`(true) && `NaN <= 0.0`(false, all
+    //     NaN comparisons are false) = false -> guard false -> falls
+    //     through -> `lambda = LN_2 / NaN = NaN` -> `raw = exp(NaN) =
+    //     NaN` -> `NaN.clamp(0.0, 1.0) = NaN`.
+    // So real=1.0, mutant=NaN. `(NaN - 1.0).abs() < 1e-12` is false, so
+    // the mutant fails this assertion. (`f64::clamp` returns NaN when
+    // `self` is NaN — verified.)
+    #[test]
+    fn mutkill_49_36_final_nan_half_life_short_circuits_to_one_not_nan() {
+        let r = recency_factor(30.0, f64::NAN);
+        assert!(
+            r.is_finite(),
+            "NaN half-life must hit the L49 early return (1.0), not fall \
+             through to a NaN exponential; an `||`->`&&` mutant yields NaN"
+        );
+        assert!(
+            (r - 1.0).abs() < 1e-12,
+            "NaN half-life => degenerate no-decay => exactly 1.0, got {r}"
+        );
+        // Symmetric guard: a NON-positive but FINITE half-life must ALSO
+        // early-return 1.0 (the other `||` arm). Under `&&` this input
+        // (`!is_finite(-5)`=false) would fall through; with a negative
+        // half-life `lambda` is negative so `raw = exp(positive)` > 1 and
+        // clamps to 1.0 — coincidentally still 1.0, so this arm alone is
+        // not discriminating; the NaN case above is the true killer.
+        let neg = recency_factor(30.0, -5.0);
+        assert!((neg - 1.0).abs() < 1e-12, "non-positive half-life => 1.0");
+    }
 }

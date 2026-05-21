@@ -1036,6 +1036,388 @@ mod tests {
         assert!((stats.mean_decay_factor - 0.0).abs() < 1e-12);
     }
 
+    // ====================================================================
+    // W4 mutation-kill pass (S1003529) — targeted tests for cargo-mutants
+    // SURVIVING mutants in run_consolidation_cycle + run_state_machine_
+    // transitions. Each test pins exact arithmetic / comparison behaviour
+    // with hand-computed expectations so a mutated operator fails loudly.
+    // ====================================================================
+
+    // rationale: Arithmetic mutant kill — `consolidation.rs:238` computes
+    // `days = elapsed_ms as f64 / (1000.0 * 86400.0)`. Three surviving
+    // mutants: `/`→`*` (238:38), `*`→`+` and `*`→`/` (238:48). At a known
+    // 30-day elapsed the correct `days` is exactly 30.0 → recency_factor =
+    // 0.5 (one half-life) → with frequency=1, fitness=1 the compound signal
+    // cs = 1×1×0.5 = 0.5 → factor = 0.98 + 0.02×0.5 = 0.99 → post-decay
+    // weight = 1.0 × 0.99 = 0.99. Every mutant inflates `days` enormously
+    // (`/`→`*` multiplies by ~8.6e10; `*`→`+` divides by 87 400 ≈ days
+    // 29 657; `*`→`/` divides by ~0.0116 ≈ days 2.2e11) so recency
+    // collapses to ~0 → cs ≈ 0 → factor = base_rate = 0.98. The exact
+    // 0.99-vs-0.98 split kills all three.
+    #[test]
+    fn decay_at_thirty_day_elapsed_yields_half_life_recency_factor() {
+        // 30 days expressed in ms: 30 * 86_400_000 = 2_592_000_000.
+        let now = 1_700_000_000_000_i64;
+        let last_run = now - 2_592_000_000_i64;
+        let mut bank = MockBank {
+            active: vec![make_active("wf_30d", "pw_30d", last_run)],
+            weights: HashMap::from([(String::from("wf_30d"), 1.0)]),
+            sunsets: HashMap::new(),
+            transitions: vec![],
+            prunes: vec![],
+        };
+        // fitness 1.0 (pathway weight 1.0) and frequency 1.0 (count ==
+        // cohort_max) isolate recency as the only sub-unity signal.
+        let pathways = MockPathways(HashMap::from([(String::from("pw_30d"), 1.0)]));
+        let freq = MockFreq {
+            counts: HashMap::from([(String::from("wf_30d"), 10)]),
+            cohort_max: 10,
+        };
+        let cfg = DecayConfig::default(); // recency_half_life_days = 30.0
+        let stats = run_consolidation_cycle(&mut bank, &pathways, &freq, &cfg, || Some(now))
+            .expect("cycle ok");
+        assert_eq!(stats.workflows_decayed, 1);
+        // CORRECT arithmetic: days = 2_592_000_000 / 86_400_000 = 30.0
+        // exactly = one half-life → recency = 0.5 → cs = 0.5 → factor =
+        // 0.98 + 0.02*0.5 = 0.99. Any 238 mutant drives factor to 0.98.
+        let w = bank.weight_of("wf_30d").expect("weight");
+        assert!(
+            (w - 0.99).abs() < 1e-12,
+            "expected post-decay weight 0.99 (factor 0.99 at 30-day = \
+             one half-life); got {w} — a :238 arithmetic mutant survived",
+        );
+        // Tighten: a 238 mutant produces base_rate 0.98 exactly; assert
+        // the weight is strictly above that floor.
+        assert!(
+            w > 0.985,
+            "weight {w} collapsed toward base_rate 0.98 — recency signal \
+             was lost (`days` mis-computed by a :238 mutant)",
+        );
+    }
+
+    // rationale: Arithmetic mutant kill — second independent witness for
+    // `consolidation.rs:238` at a 60-day elapsed (two half-lives). Correct
+    // `days` = 60.0 → recency = 0.25 → cs = 0.25 → factor = 0.98 +
+    // 0.02*0.25 = 0.985. A distinct expected value from the 30-day test
+    // above guards against a mutant that happens to coincidentally land on
+    // 0.99 for one specific input.
+    #[test]
+    fn decay_at_sixty_day_elapsed_yields_two_half_life_recency_factor() {
+        // 60 days in ms: 60 * 86_400_000 = 5_184_000_000.
+        let now = 1_700_000_000_000_i64;
+        let last_run = now - 5_184_000_000_i64;
+        let mut bank = MockBank {
+            active: vec![make_active("wf_60d", "pw_60d", last_run)],
+            weights: HashMap::from([(String::from("wf_60d"), 1.0)]),
+            sunsets: HashMap::new(),
+            transitions: vec![],
+            prunes: vec![],
+        };
+        let pathways = MockPathways(HashMap::from([(String::from("pw_60d"), 1.0)]));
+        let freq = MockFreq {
+            counts: HashMap::from([(String::from("wf_60d"), 10)]),
+            cohort_max: 10,
+        };
+        let cfg = DecayConfig::default();
+        let stats = run_consolidation_cycle(&mut bank, &pathways, &freq, &cfg, || Some(now))
+            .expect("cycle ok");
+        assert_eq!(stats.workflows_decayed, 1);
+        // days = 5_184_000_000 / 86_400_000 = 60.0 = two half-lives →
+        // recency = 0.25 → cs = 0.25 → factor = 0.985.
+        let w = bank.weight_of("wf_60d").expect("weight");
+        assert!(
+            (w - 0.985).abs() < 1e-9,
+            "expected post-decay weight 0.985 (factor 0.985 at 60-day = \
+             two half-lives); got {w} — a :238 arithmetic mutant survived",
+        );
+    }
+
+    // rationale: Counter mutant kill — `consolidation.rs:243` increments
+    // `stats.workflows_decayed += 1`. The surviving `+=`→`-=` mutant would
+    // make the counter wrap (usize underflow). This test pins the EXACT
+    // count for a three-workflow bank where all three decay: correct =
+    // 3; `-=` yields a wrapped huge value (usize::MAX-class). The strict
+    // `== 3` equality fires the canary.
+    #[test]
+    fn workflows_decayed_counter_increments_exactly_once_per_workflow() {
+        let now = 1_700_000_000_000_i64;
+        let mut bank = MockBank {
+            active: vec![
+                make_active("wf_d1", "pw_d1", now),
+                make_active("wf_d2", "pw_d2", now),
+                make_active("wf_d3", "pw_d3", now),
+            ],
+            weights: HashMap::from([
+                (String::from("wf_d1"), 1.0),
+                (String::from("wf_d2"), 1.0),
+                (String::from("wf_d3"), 1.0),
+            ]),
+            sunsets: HashMap::new(),
+            transitions: vec![],
+            prunes: vec![],
+        };
+        let pathways = MockPathways(HashMap::from([
+            (String::from("pw_d1"), 0.5),
+            (String::from("pw_d2"), 0.5),
+            (String::from("pw_d3"), 0.5),
+        ]));
+        let freq = MockFreq {
+            counts: HashMap::from([
+                (String::from("wf_d1"), 1),
+                (String::from("wf_d2"), 1),
+                (String::from("wf_d3"), 1),
+            ]),
+            cohort_max: 1,
+        };
+        let cfg = DecayConfig::default();
+        let stats = run_consolidation_cycle(&mut bank, &pathways, &freq, &cfg, || Some(now))
+            .expect("cycle ok");
+        // EXACTLY 3 — a `+=`→`-=` mutant wraps to a usize::MAX-class value.
+        assert_eq!(
+            stats.workflows_decayed, 3,
+            "workflows_decayed must equal the number of decayed workflows; \
+             a non-3 value means the :243 += counter was mutated",
+        );
+        // The aggregate factor stats must also reflect 3 non-empty samples.
+        assert!(stats.mean_decay_factor.is_finite());
+        assert!(stats.min_decay_factor.is_finite());
+        assert!(stats.max_decay_factor.is_finite());
+    }
+
+    /// One-workflow bank whose decay is an exact no-op (`factor == 1.0`).
+    /// Pathway weight 1.0 (fitness 1.0) + frequency at cohort_max (1.0) +
+    /// `last_run_ms == now` (recency 1.0) → compound signal 1.0 → decay
+    /// factor 1.0 → post-decay weight EQUALS the supplied pre-decay
+    /// `weight`. This lets a boundary test place the post-decay weight at
+    /// an exact threshold value without a fragile `weight / factor`
+    /// pre-image.
+    fn one_wf_bank_no_decay(weight: f64) -> (MockBank, MockPathways, MockFreq) {
+        let bank = MockBank {
+            active: vec![AcceptedWorkflowDecay {
+                workflow_id: "wf".into(),
+                pathway_id: "pw".into(),
+                last_run_ms: 1_700_000_000_000,
+            }],
+            weights: HashMap::from([(String::from("wf"), weight)]),
+            sunsets: HashMap::new(),
+            transitions: vec![],
+            prunes: vec![],
+        };
+        // pathway weight 1.0 → fitness 1.0.
+        let pathways = MockPathways(HashMap::from([(String::from("pw"), 1.0)]));
+        // count == cohort_max → frequency 1.0.
+        let freq = MockFreq {
+            counts: HashMap::from([(String::from("wf"), 10)]),
+            cohort_max: 10,
+        };
+        (bank, pathways, freq)
+    }
+
+    // rationale: Comparison mutant kill — `consolidation.rs:321` is the
+    // Step 2.5 soft-band gate `weight < sunset_threshold && weight >=
+    // prune_threshold`. Two surviving mutants: `<`→`<=` (321:19) and
+    // `>=`→`<` (321:55). At weight EXACTLY equal to sunset_threshold
+    // (0.10), the correct `<` is FALSE → no PrunePending; a `<=` mutant
+    // makes it TRUE → spurious PrunePending. This boundary test pins the
+    // exclusive upper bound. Decay is a no-op (factor 1.0 via
+    // one_wf_bank_no_decay) so the post-decay weight Step 2.5 reads is
+    // exactly 0.10.
+    #[test]
+    fn soft_band_upper_bound_is_exclusive_at_sunset_threshold() {
+        let now = 1_700_000_000_000_i64;
+        // post-decay weight EXACTLY at the soft floor (0.10, F4).
+        let (mut bank, pathways, freq) = one_wf_bank_no_decay(0.10);
+        let cfg = DecayConfig::default();
+        let stats = run_consolidation_cycle(&mut bank, &pathways, &freq, &cfg, || Some(now))
+            .expect("cycle ok");
+        // Sanity: decay is a no-op, so the weight Step 2.5 reads is 0.10.
+        assert!(
+            (bank.weight_of("wf").unwrap_or(0.0) - 0.10).abs() < 1e-12,
+            "decay must be a no-op for this boundary fixture",
+        );
+        // `weight < sunset_threshold` is FALSE at weight == threshold →
+        // workflow stays Active. A `<`→`<=` mutant fires PrunePending here.
+        assert_eq!(
+            stats.workflows_prune_pending, 0,
+            "weight exactly at sunset_threshold (0.10) must NOT enter the \
+             soft band — the `<` at :321 is strictly exclusive",
+        );
+        assert!(
+            bank.transitions.is_empty(),
+            "no transition expected at the exact soft-floor boundary: {:?}",
+            bank.transitions,
+        );
+    }
+
+    // rationale: Comparison mutant kill — `consolidation.rs:321:55` is the
+    // `weight >= prune_threshold` lower bound of the soft band. At weight
+    // EXACTLY equal to prune_threshold (0.05), the correct `>=` is TRUE →
+    // the workflow IS in the soft band → PrunePending fires. A `>=`→`<`
+    // mutant makes it FALSE → no PrunePending. This boundary test pins the
+    // inclusive lower bound. Decay is a no-op (factor 1.0) so the
+    // post-decay weight Step 2.5 reads is exactly 0.05.
+    #[test]
+    fn soft_band_lower_bound_is_inclusive_at_prune_threshold() {
+        let now = 1_700_000_000_000_i64;
+        // post-decay weight EXACTLY at the hard floor (0.05, F4). No
+        // sunset_at set so Step 3 hard-prune cannot fire (it gates on
+        // sunset_at_of(...).is_some()), isolating the Step 2.5 lower edge.
+        let (mut bank, pathways, freq) = one_wf_bank_no_decay(0.05);
+        let cfg = DecayConfig::default();
+        let stats = run_consolidation_cycle(&mut bank, &pathways, &freq, &cfg, || Some(now))
+            .expect("cycle ok");
+        assert!(
+            (bank.weight_of("wf").unwrap_or(0.0) - 0.05).abs() < 1e-12,
+            "decay must be a no-op for this boundary fixture",
+        );
+        // `weight >= prune_threshold` is TRUE at weight == threshold, and
+        // `weight < sunset_threshold` is TRUE (0.05 < 0.10) → soft band.
+        assert_eq!(
+            stats.workflows_prune_pending, 1,
+            "weight exactly at prune_threshold (0.05) IS inside the soft \
+             band — the `>=` at :321 is inclusive of the lower bound",
+        );
+        assert!(
+            bank.transitions
+                .iter()
+                .any(|(id, p)| id == "wf" && *p == SunsetPhase::PrunePending),
+            "PrunePending transition missing at the prune_threshold edge: {:?}",
+            bank.transitions,
+        );
+    }
+
+    // rationale: Counter mutant kill — `consolidation.rs:323` increments
+    // `stats.workflows_prune_pending += 1`. Surviving mutants `+=`→`-=`
+    // and `+=`→`*=`. With a two-workflow bank both in the soft band the
+    // correct count is 2; `-=` underflow-wraps, `*=` would yield 0 (0*1)
+    // then 0 (0*1) → stays 0. The exact `== 2` kills both.
+    #[test]
+    fn prune_pending_counter_increments_exactly_once_per_soft_band_workflow() {
+        let now = 1_700_000_000_000_i64;
+        let mut bank = MockBank {
+            active: vec![
+                make_active("wf_sb1", "pw1", now),
+                make_active("wf_sb2", "pw2", now),
+            ],
+            // Both in the soft band [0.05, 0.10): 0.07 and 0.08.
+            weights: HashMap::from([
+                (String::from("wf_sb1"), 0.07),
+                (String::from("wf_sb2"), 0.08),
+            ]),
+            sunsets: HashMap::new(),
+            transitions: vec![],
+            prunes: vec![],
+        };
+        let pathways = MockPathways(HashMap::from([
+            (String::from("pw1"), 0.5),
+            (String::from("pw2"), 0.5),
+        ]));
+        let freq = MockFreq {
+            counts: HashMap::new(),
+            cohort_max: 1,
+        };
+        let cfg = DecayConfig::default();
+        let stats = run_consolidation_cycle(&mut bank, &pathways, &freq, &cfg, || Some(now))
+            .expect("cycle ok");
+        // EXACTLY 2 — `+=`→`-=` underflows, `+=`→`*=` stays 0.
+        assert_eq!(
+            stats.workflows_prune_pending, 2,
+            "two soft-band workflows must yield prune_pending == 2; a \
+             non-2 value means the :323 += counter was mutated",
+        );
+    }
+
+    // rationale: Comparison mutant kill — `consolidation.rs:348` is the
+    // Step 4 auto-sunset gate `sunset_at < now_ms`. Surviving mutant
+    // `<`→`<=`. At `sunset_at` EXACTLY equal to `now_ms`, the correct `<`
+    // is FALSE → no SunsetExpired; a `<=` mutant makes it TRUE → spurious
+    // auto-sunset. This boundary test pins the strict-less-than semantics
+    // (a workflow whose sunset boundary is "right now" has not yet
+    // expired — expiry is strictly past-tense).
+    #[test]
+    fn auto_sunset_gate_is_strict_at_exact_sunset_boundary() {
+        let now = 1_700_000_000_000_i64;
+        let mut bank = MockBank {
+            active: vec![make_active("wf_edge", "pw", now)],
+            // Above prune_threshold so Step 3 cannot fire — isolates Step 4.
+            weights: HashMap::from([(String::from("wf_edge"), 0.5)]),
+            // sunset_at EXACTLY == now_ms.
+            sunsets: HashMap::from([(String::from("wf_edge"), now)]),
+            transitions: vec![],
+            prunes: vec![],
+        };
+        let pathways = MockPathways(HashMap::from([(String::from("pw"), 0.5)]));
+        let freq = MockFreq {
+            counts: HashMap::new(),
+            cohort_max: 1,
+        };
+        let cfg = DecayConfig::default();
+        let stats = run_consolidation_cycle(&mut bank, &pathways, &freq, &cfg, || Some(now))
+            .expect("cycle ok");
+        // `sunset_at < now_ms` is FALSE when sunset_at == now_ms → no
+        // auto-sunset. A `<`→`<=` mutant fires SunsetExpired here.
+        assert_eq!(
+            stats.workflows_auto_sunset, 0,
+            "sunset_at exactly equal to now_ms must NOT auto-sunset — the \
+             `<` at :348 is strictly exclusive of the present instant",
+        );
+        assert!(
+            !bank
+                .transitions
+                .iter()
+                .any(|(id, p)| id == "wf_edge" && *p == SunsetPhase::SunsetExpired),
+            "SunsetExpired must not fire at the exact sunset boundary: {:?}",
+            bank.transitions,
+        );
+    }
+
+    // rationale: Counter mutant kill — `consolidation.rs:350` increments
+    // `stats.workflows_auto_sunset += 1`. Surviving mutants `+=`→`-=` and
+    // `+=`→`*=`. With a two-workflow bank both expired the correct count
+    // is 2; `-=` underflow-wraps, `*=` stays 0. The exact `== 2` kills
+    // both. Both workflows are above prune_threshold and have no
+    // sunset-prune interaction, so Step 4 is the only counter touched.
+    #[test]
+    fn auto_sunset_counter_increments_exactly_once_per_expired_workflow() {
+        let now = 1_700_000_000_000_i64;
+        let mut bank = MockBank {
+            active: vec![
+                make_active("wf_e1", "pw1", now),
+                make_active("wf_e2", "pw2", now),
+            ],
+            // Above prune_threshold (0.5) → Step 3 hard-prune skipped.
+            weights: HashMap::from([
+                (String::from("wf_e1"), 0.5),
+                (String::from("wf_e2"), 0.5),
+            ]),
+            // Both expired: sunset_at strictly < now.
+            sunsets: HashMap::from([
+                (String::from("wf_e1"), now - 1),
+                (String::from("wf_e2"), now - 1000),
+            ]),
+            transitions: vec![],
+            prunes: vec![],
+        };
+        let pathways = MockPathways(HashMap::from([
+            (String::from("pw1"), 0.5),
+            (String::from("pw2"), 0.5),
+        ]));
+        let freq = MockFreq {
+            counts: HashMap::new(),
+            cohort_max: 1,
+        };
+        let cfg = DecayConfig::default();
+        let stats = run_consolidation_cycle(&mut bank, &pathways, &freq, &cfg, || Some(now))
+            .expect("cycle ok");
+        assert_eq!(stats.workflows_pruned, 0, "no hard prune expected");
+        // EXACTLY 2 — `+=`→`-=` underflows, `+=`→`*=` stays 0.
+        assert_eq!(
+            stats.workflows_auto_sunset, 2,
+            "two expired workflows must yield auto_sunset == 2; a non-2 \
+             value means the :350 += counter was mutated",
+        );
+    }
+
     // rationale: Resource accounting — pre-fetch buffer uses
     // `with_capacity(workflows.len())` to avoid grow-realloc on hot path.
     // We test the OBSERVABLE behaviour: a bank with N workflows runs N

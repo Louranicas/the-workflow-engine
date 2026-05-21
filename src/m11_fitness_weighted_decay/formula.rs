@@ -472,6 +472,69 @@ mod tests {
         }
     }
 
+    // ====================================================================
+    // W4 mutation-kill pass (S1003529) — `formula.rs:49` is the body of
+    // `DecayFactor::as_f64`, a const accessor returning `self.0`. The
+    // surviving mutant replaces the whole function body with `0.0`. The
+    // tests below pin `as_f64()` to non-zero, distinct values so the
+    // constant-`0.0` mutant fails loudly.
+    // ====================================================================
+
+    #[test]
+    // rationale: Accessor mutant kill — `as_f64()` must return the EXACT
+    // inner value, not the constant `0.0`. Construct a DecayFactor from a
+    // value that is provably non-zero and assert round-trip identity. A
+    // `-> 0.0` body mutant collapses this to 0.0 and fails the `> 0.0`
+    // and the `(v - 0.75)` equality checks.
+    fn as_f64_returns_inner_value_not_constant_zero() {
+        let d = DecayFactor::new(0.75).expect("0.75 in range");
+        let v = d.as_f64();
+        assert!(
+            v > 0.0,
+            "as_f64() returned {v} — a `-> 0.0` body mutant collapsed the \
+             accessor to a constant",
+        );
+        assert!(
+            (v - 0.75).abs() < 1e-12,
+            "as_f64() must round-trip the constructed value 0.75, got {v}",
+        );
+    }
+
+    #[test]
+    // rationale: Accessor mutant kill — second witness at a different
+    // non-zero magnitude (0.5) AND at the upper bound 1.0. Two distinct
+    // expected values guard against any constant-body mutant: a `-> 0.0`
+    // mutant cannot satisfy both `== 0.5` and `== 1.0` simultaneously.
+    fn as_f64_round_trips_distinct_non_zero_magnitudes() {
+        let half = DecayFactor::new(0.5).expect("0.5 in range");
+        assert!((half.as_f64() - 0.5).abs() < 1e-12, "0.5 round-trip");
+        let one = DecayFactor::new(1.0).expect("1.0 in range");
+        assert!((one.as_f64() - 1.0).abs() < 1e-12, "1.0 round-trip");
+        // The two values must differ — a constant-`0.0` mutant makes them
+        // both 0.0, collapsing this inequality.
+        assert!(
+            (half.as_f64() - one.as_f64()).abs() > 0.4,
+            "as_f64() must distinguish 0.5 from 1.0; a constant-body \
+             mutant makes both return the same value",
+        );
+    }
+
+    #[test]
+    // rationale: Accessor mutant kill via the formula path — a healthy
+    // compute_decay_factor result (all signals 1.0 → factor 1.0) read
+    // back through as_f64() MUST be 1.0. The `factor()` helper depends on
+    // as_f64(); a `-> 0.0` mutant would make `factor(1,1,1,0.02)` return
+    // 0.0 instead of 1.0.
+    fn compute_decay_factor_result_read_via_as_f64_is_non_zero() {
+        let df = compute_decay_factor(1.0, 1.0, 1.0, 0.02).expect("happy");
+        let v = df.as_f64();
+        assert!(
+            (v - 1.0).abs() < 1e-12,
+            "all-one signals must yield decay factor 1.0 via as_f64(), \
+             got {v} — a :49 `as_f64 -> 0.0` mutant survived",
+        );
+    }
+
     // ---- F-Regression (4) -----------------------------------------------
 
     #[test]

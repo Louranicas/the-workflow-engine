@@ -710,6 +710,217 @@ mod tests {
         assert_eq!(ids.len(), n, "variant_id collision across distinct mutations");
     }
 
+    // ====================================================================
+    // W4 mutation-kill pass (S1003529) — targeted tests for cargo-mutants
+    // SURVIVING and TIMEOUT mutants in build_variants. Each test pins the
+    // exact output cardinality + step content + mutation-tag emission for
+    // representative pattern lengths so a broken loop bound (wrong count
+    // or hang) or a mutated swap-index arithmetic fails deterministically.
+    // ====================================================================
+
+    #[test]
+    // rationale: Loop-bound mutant kill — `mod.rs:107` is the while-loop
+    // guard `out.len() < MAX && (swap_i < n_swaps || skip_i < n_skips)`.
+    // TIMEOUT mutants 107:59 (`<`→`==`/`>`/`<=`) and 107:79 (`<`→`==`)
+    // either hang the loop or mis-bound it. A deterministic cardinality
+    // assertion across the full representative length range (1..=12) pins
+    // the exact emitted count for every case: a hung loop never returns
+    // (test times out → fails) and a wrong bound yields a wrong count.
+    //
+    // Hand-computed expected counts (identity + min(cap-1, n_swaps+n_skips)
+    // with the round-robin fill; n_swaps = len-1, n_skips = len for len>=2,
+    // else 0; cap = MAX_VARIANTS_PER_PATTERN = 8):
+    //   len 1: 1 (identity only; 0 swaps, 0 skips)
+    //   len 2: 4 (identity + 1 swap + 2 skips)
+    //   len 3: 6 (identity + 2 swaps + 3 skips)
+    //   len 4: 8 (identity + 3 swaps + 4 skips = exactly the cap)
+    //   len 5..=12: 8 (cap-truncated)
+    fn loop_bound_emits_exact_cardinality_across_length_range() {
+        let expected: [(u32, usize); 12] = [
+            (1, 1),
+            (2, 4),
+            (3, 6),
+            (4, 8),
+            (5, 8),
+            (6, 8),
+            (7, 8),
+            (8, 8),
+            (9, 8),
+            (10, 8),
+            (11, 8),
+            (12, 8),
+        ];
+        for (len, want) in expected {
+            let steps: Vec<u32> = (1..=len).collect();
+            let p = pattern(&steps);
+            let v = build_variants(&p).expect("ok");
+            assert_eq!(
+                v.len(),
+                want,
+                "len {len}: build_variants must emit exactly {want} \
+                 variants — a :107 loop-bound mutant changed the count \
+                 (or hung the loop)",
+            );
+        }
+    }
+
+    #[test]
+    // rationale: Loop-bound mutant kill — `mod.rs:120` is the inner skip
+    // guard `skip_i < n_skips && out.len() < MAX`. TIMEOUT/MISSED mutants
+    // 120:19 (`<`→`<=`) and 120:42 (`<`→`>`/`==`/`<=`) either hang the
+    // loop, emit an out-of-bounds skip index, or drop the skip arm. This
+    // test pins the EXACT set of emitted Skip indices for a 4-step pattern
+    // (identity + 3 swaps + 4 skips fills the cap exactly): skips 0,1,2,3
+    // — every index strictly < len, in ascending order, count == 4.
+    fn loop_bound_skip_arm_emits_exact_index_set() {
+        let p = pattern(&[1, 2, 3, 4]);
+        let v = build_variants(&p).expect("ok");
+        assert_eq!(v.len(), 8, "4-step pattern fills the cap exactly");
+        let mut skip_indices: Vec<usize> = v
+            .iter()
+            .filter_map(|x| match x.mutation {
+                MutationKind::Skip { at } => Some(at),
+                MutationKind::Swap { .. } | MutationKind::Identity => None,
+            })
+            .collect();
+        skip_indices.sort_unstable();
+        // A `<`→`<=` mutant on `skip_i < n_skips` (n_skips=4) lets skip_i
+        // reach 4 → `steps.remove(4)` panics OR emits an extra skip; a
+        // `<`→`>` mutant on the cap check drops skips entirely.
+        assert_eq!(
+            skip_indices,
+            vec![0, 1, 2, 3],
+            "4-step pattern must emit exactly skips at indices 0,1,2,3 — \
+             a :120 loop-bound mutant changed the skip emission",
+        );
+    }
+
+    #[test]
+    // rationale: Comparison mutant kill — `mod.rs:108:42` is the inner
+    // swap guard `swap_i < n_swaps`. The MISSED mutant `<`→`<=` lets
+    // swap_i reach n_swaps (== len-1), so `steps.swap(swap_i, swap_i+1)`
+    // indexes element `len` → out of bounds → panic. This test pins the
+    // exact emitted Swap index set for a 3-step pattern: only 0 and 1
+    // (n_swaps=2), both strictly < len-1.
+    fn swap_guard_emits_exact_index_set_no_out_of_bounds() {
+        let p = pattern(&[1, 2, 3]);
+        let v = build_variants(&p).expect("ok");
+        let mut swap_indices: Vec<usize> = v
+            .iter()
+            .filter_map(|x| match x.mutation {
+                MutationKind::Swap { at } => Some(at),
+                MutationKind::Skip { .. } | MutationKind::Identity => None,
+            })
+            .collect();
+        swap_indices.sort_unstable();
+        // n_swaps = 3 - 1 = 2 → swap indices {0, 1}. A `<`→`<=` mutant
+        // would attempt swap_i = 2 → swap(2, 3) → panic (no element 3).
+        assert_eq!(
+            swap_indices,
+            vec![0, 1],
+            "3-step pattern must emit exactly swaps at indices 0,1 — a \
+             :108 `<`→`<=` mutant either panics or emits an extra swap",
+        );
+        // Every emitted swap index must be a valid first-of-adjacent-pair.
+        for at in swap_indices {
+            assert!(
+                at + 1 < p.steps.len(),
+                "swap index {at} indexes a non-existent adjacent pair",
+            );
+        }
+    }
+
+    #[test]
+    // rationale: Swap-index arithmetic mutant kill — `mod.rs:110:39` is
+    // `steps.swap(swap_i, swap_i + 1)`. MISSED mutants `+`→`*` and `+`→`-`:
+    //   - `+`→`*`: `swap_i * 1 == swap_i` → `swap(swap_i, swap_i)` is a
+    //     no-op → the swap variant's steps EQUAL the identity steps.
+    //   - `+`→`-`: `swap_i - 1` → at swap_i=0 underflows (panic); at
+    //     swap_i>=1 swaps the WRONG adjacent pair.
+    // This test pins the exact swapped step content for a 3-step pattern:
+    // Swap{0} → [2,1,3]; Swap{1} → [1,3,2]. The `+`→`*` mutant yields
+    // [1,2,3] for both; the `+`→`-` mutant panics on Swap{0}.
+    fn swap_arithmetic_produces_correct_adjacent_exchange() {
+        let p = pattern(&[1, 2, 3]);
+        let v = build_variants(&p).expect("ok");
+        let swap0 = v
+            .iter()
+            .find(|x| x.mutation == MutationKind::Swap { at: 0 })
+            .expect("swap at 0 must be emitted");
+        let swap1 = v
+            .iter()
+            .find(|x| x.mutation == MutationKind::Swap { at: 1 })
+            .expect("swap at 1 must be emitted");
+        // Swap{0} exchanges steps[0] and steps[1]: [1,2,3] → [2,1,3].
+        assert_eq!(
+            swap0.steps,
+            vec![StepToken(2), StepToken(1), StepToken(3)],
+            "Swap{{0}} must exchange the first adjacent pair; a :110 \
+             `+`→`*` mutant collapses it to a no-op (steps == identity)",
+        );
+        // Swap{1} exchanges steps[1] and steps[2]: [1,2,3] → [1,3,2].
+        assert_eq!(
+            swap1.steps,
+            vec![StepToken(1), StepToken(3), StepToken(2)],
+            "Swap{{1}} must exchange the second adjacent pair; a :110 \
+             `+`→`*` mutant collapses it to a no-op, a `+`→`-` mutant \
+             swaps the wrong pair",
+        );
+        // Belt-and-braces: a swap of distinct tokens must NOT equal the
+        // source — the no-op mutant `+`→`*` makes them identical.
+        assert_ne!(
+            swap0.steps, p.steps,
+            "Swap{{0}} of distinct tokens collapsed to identity steps — \
+             :110 swap-index arithmetic was mutated",
+        );
+        assert_ne!(
+            swap1.steps, p.steps,
+            "Swap{{1}} of distinct tokens collapsed to identity steps — \
+             :110 swap-index arithmetic was mutated",
+        );
+    }
+
+    #[test]
+    // rationale: Counter mutant kill — `mod.rs:118:20` is `swap_i += 1`.
+    // The MISSED mutant `+=`→`-=` makes swap_i never advance (it goes to
+    // usize::MAX on the first iteration, so `swap_i < n_swaps` becomes
+    // false and the swap arm dies after exactly ONE swap). The correct
+    // code emits one swap per index. For a 4-step pattern (n_swaps=3,
+    // cap fills exactly) the correct output is 3 swaps at indices 0,1,2;
+    // the `-=` mutant yields at most 1 swap (Swap{0}) then only skips.
+    // We pin both the swap COUNT and the interleaved emission ORDER.
+    fn swap_counter_advances_one_index_per_iteration() {
+        let p = pattern(&[1, 2, 3, 4]);
+        let v = build_variants(&p).expect("ok");
+        let swaps: Vec<usize> = v
+            .iter()
+            .filter_map(|x| match x.mutation {
+                MutationKind::Swap { at } => Some(at),
+                MutationKind::Skip { .. } | MutationKind::Identity => None,
+            })
+            .collect();
+        // Correct: swaps emitted ascending at 0,1,2. A `+=`→`-=` mutant
+        // stalls swap_i so only Swap{0} ever appears (then it underflows
+        // out of the `< n_swaps` range).
+        assert_eq!(
+            swaps,
+            vec![0, 1, 2],
+            "4-step pattern must emit swaps at 0,1,2 ascending — a :118 \
+             `+=`→`-=` counter mutant stalls swap_i after one swap",
+        );
+        // Full interleaved emission order: identity, swap0, skip0, swap1,
+        // skip1, swap2, skip2, skip3. The `-=` mutant would replace
+        // swap1/swap2 slots with skips, breaking this exact sequence.
+        assert!(matches!(v[0].mutation, MutationKind::Identity));
+        assert_eq!(v[1].mutation, MutationKind::Swap { at: 0 });
+        assert_eq!(v[2].mutation, MutationKind::Skip { at: 0 });
+        assert_eq!(v[3].mutation, MutationKind::Swap { at: 1 });
+        assert_eq!(v[4].mutation, MutationKind::Skip { at: 1 });
+        assert_eq!(v[5].mutation, MutationKind::Swap { at: 2 });
+        assert_eq!(v[6].mutation, MutationKind::Skip { at: 2 });
+        assert_eq!(v[7].mutation, MutationKind::Skip { at: 3 });
+    }
+
     #[test]
     // rationale: KIO — skip on a two-step pattern yields two single-step
     // variants whose lone token is the surviving element.

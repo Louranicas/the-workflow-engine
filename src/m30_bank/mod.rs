@@ -51,25 +51,161 @@ pub const DEFAULT_PRUNE_THRESHOLD: f64 = 0.05;
 pub const MS_PER_DAY: i64 = 86_400_000;
 
 /// An accepted workflow in the bank.
+///
+/// All fields are **private**. `weight` is documented `[0.0, 1.0]` but the
+/// raw field would accept `NaN` / out-of-range values; making it private
+/// forces every mutation through [`AcceptedWorkflow::apply_decay_factor`]
+/// (which re-validates) and every construction through
+/// [`AcceptedWorkflow::accept_new`] (which validates the initial weight).
+/// Post-construction state changes (decay, dispatch recording) route
+/// through the controlled mutators below. Read state through the accessors.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AcceptedWorkflow {
     /// Stable workflow id (FNV-1a of proposal payload).
-    pub workflow_id: u64,
+    workflow_id: u64,
     /// The source proposal.
-    pub proposal: WorkflowProposal,
+    proposal: WorkflowProposal,
     /// Wall-clock acceptance time (ms since UNIX epoch).
-    pub accepted_at_ms: i64,
+    accepted_at_ms: i64,
     /// Hard-sunset boundary (ms since epoch).
-    pub sunset_at_ms: i64,
+    sunset_at_ms: i64,
     /// Current weight in `[0.0, 1.0]`; m11 decay applies multiplicatively.
-    pub weight: f64,
+    weight: f64,
     /// Last dispatch attempt (ms); `None` if never dispatched.
-    pub last_run_ms: Option<i64>,
+    last_run_ms: Option<i64>,
     /// Total dispatch count since acceptance.
-    pub run_count: u32,
+    run_count: u32,
 }
 
 impl AcceptedWorkflow {
+    /// Construct a freshly-accepted workflow row.
+    ///
+    /// `weight` is validated finite and clamped to `[0.0, 1.0]` so an
+    /// `AcceptedWorkflow` can never carry a `NaN` or out-of-range weight.
+    /// [`CuratedBank::accept`] calls this with `weight = 1.0`, `run_count =
+    /// 0`, `last_run_ms = None` — the canonical fresh-acceptance state.
+    fn accept_new(
+        workflow_id: u64,
+        proposal: WorkflowProposal,
+        accepted_at_ms: i64,
+        sunset_at_ms: i64,
+        weight: f64,
+    ) -> Self {
+        // A non-finite weight collapses to 0.0; finite values clamp to the
+        // documented [0,1] interval. The bank's accept() always supplies a
+        // valid 1.0, so this is defence-in-depth, not a live recovery path.
+        let weight = if weight.is_finite() {
+            weight.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        Self {
+            workflow_id,
+            proposal,
+            accepted_at_ms,
+            sunset_at_ms,
+            weight,
+            last_run_ms: None,
+            run_count: 0,
+        }
+    }
+
+    /// Test-only constructor: build an `AcceptedWorkflow` with an explicit
+    /// `run_count` / `last_run_ms`, validating `weight` exactly as
+    /// [`Self::accept_new`] does.
+    ///
+    /// Crate-internal `#[cfg(test)]` fixtures (m31/m32/m33 scorer / dispatch
+    /// / verifier tests) need rows in states the production `accept` path
+    /// cannot reach — e.g. `run_count > 0` with `last_run_ms = None`. This
+    /// constructor is the controlled, weight-validating substitute for the
+    /// old public struct literal; it is NOT compiled into release builds.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn for_test(
+        workflow_id: u64,
+        proposal: WorkflowProposal,
+        accepted_at_ms: i64,
+        sunset_at_ms: i64,
+        weight: f64,
+        last_run_ms: Option<i64>,
+        run_count: u32,
+    ) -> Self {
+        let weight = if weight.is_finite() {
+            weight.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        Self {
+            workflow_id,
+            proposal,
+            accepted_at_ms,
+            sunset_at_ms,
+            weight,
+            last_run_ms,
+            run_count,
+        }
+    }
+
+    /// Stable workflow id (FNV-1a of the proposal payload).
+    #[must_use]
+    pub const fn workflow_id(&self) -> u64 {
+        self.workflow_id
+    }
+
+    /// Borrow the source proposal.
+    #[must_use]
+    pub const fn proposal(&self) -> &WorkflowProposal {
+        &self.proposal
+    }
+
+    /// Wall-clock acceptance time (ms since UNIX epoch).
+    #[must_use]
+    pub const fn accepted_at_ms(&self) -> i64 {
+        self.accepted_at_ms
+    }
+
+    /// Hard-sunset boundary (ms since epoch).
+    #[must_use]
+    pub const fn sunset_at_ms(&self) -> i64 {
+        self.sunset_at_ms
+    }
+
+    /// Current weight, guaranteed finite and in `[0.0, 1.0]`.
+    #[must_use]
+    pub const fn weight(&self) -> f64 {
+        self.weight
+    }
+
+    /// Last dispatch attempt (ms); `None` if never dispatched.
+    #[must_use]
+    pub const fn last_run_ms(&self) -> Option<i64> {
+        self.last_run_ms
+    }
+
+    /// Total dispatch count since acceptance.
+    #[must_use]
+    pub const fn run_count(&self) -> u32 {
+        self.run_count
+    }
+
+    /// Apply a multiplicative decay `factor` to [`Self::weight`], re-clamping
+    /// the result into `[0.0, 1.0]`.
+    ///
+    /// `factor` MUST be finite — [`CuratedBank::try_apply_decay`] gates
+    /// non-finite factors before reaching this method. A negative product
+    /// floors at `0.0`; a `> 1.0` product ceilings at `1.0`. The
+    /// `[0,1]`-finite invariant on `weight` is preserved.
+    pub fn apply_decay_factor(&mut self, factor: f64) {
+        self.weight = (self.weight * factor).clamp(0.0, 1.0);
+    }
+
+    /// Record a dispatch attempt: set [`Self::last_run_ms`] to `now_ms` and
+    /// increment [`Self::run_count`] (saturating at [`u32::MAX`]).
+    pub fn record_dispatch(&mut self, now_ms: i64) {
+        self.last_run_ms = Some(now_ms);
+        self.run_count = self.run_count.saturating_add(1);
+    }
+
     /// `true` if `now_ms` has crossed [`Self::sunset_at_ms`].
     #[must_use]
     pub const fn is_sunset_expired(&self, now_ms: i64) -> bool {
@@ -91,9 +227,9 @@ impl AcceptedWorkflow {
         prune_pending_threshold: f64,
         prune_threshold: f64,
     ) -> SunsetPhase {
-        if self.is_sunset_expired(now_ms) || self.weight < prune_threshold {
+        if self.is_sunset_expired(now_ms) || self.weight() < prune_threshold {
             SunsetPhase::SunsetExpired
-        } else if self.weight < prune_pending_threshold {
+        } else if self.weight() < prune_pending_threshold {
             SunsetPhase::PrunePending
         } else {
             SunsetPhase::Active
@@ -178,21 +314,19 @@ impl CuratedBank {
         now_ms: i64,
     ) -> Result<u64, BankError> {
         let workflow_id = crate::m4_cascade::cluster_id::fnv1a_64(
-            format!("workflow:{}", proposal.proposal_id).as_bytes(),
+            format!("workflow:{}", proposal.proposal_id()).as_bytes(),
         );
         let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if guard.contains_key(&workflow_id) {
             return Err(BankError::AlreadyAccepted(workflow_id));
         }
-        let entry = AcceptedWorkflow {
+        let entry = AcceptedWorkflow::accept_new(
             workflow_id,
             proposal,
-            accepted_at_ms: now_ms,
-            sunset_at_ms: now_ms.saturating_add(DEFAULT_SUNSET_DAYS * MS_PER_DAY),
-            weight: 1.0,
-            last_run_ms: None,
-            run_count: 0,
-        };
+            now_ms,
+            now_ms.saturating_add(DEFAULT_SUNSET_DAYS * MS_PER_DAY),
+            1.0,
+        );
         guard.insert(workflow_id, entry);
         Ok(workflow_id)
     }
@@ -243,7 +377,7 @@ impl CuratedBank {
         let w = g
             .get_mut(&workflow_id)
             .ok_or(BankError::NotFound(workflow_id))?;
-        w.weight = (w.weight * factor).clamp(0.0, 1.0);
+        w.apply_decay_factor(factor);
         Ok(())
     }
 
@@ -284,8 +418,7 @@ impl CuratedBank {
         let w = g
             .get_mut(&workflow_id)
             .ok_or(BankError::NotFound(workflow_id))?;
-        w.last_run_ms = Some(now_ms);
-        w.run_count = w.run_count.saturating_add(1);
+        w.record_dispatch(now_ms);
         Ok(())
     }
 
@@ -315,7 +448,7 @@ impl CuratedBank {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values()
-            .filter(|w| !w.is_sunset_expired(now_ms) && w.weight >= min_weight)
+            .filter(|w| !w.is_sunset_expired(now_ms) && w.weight() >= min_weight)
             .cloned()
             .collect()
     }
@@ -400,10 +533,19 @@ impl CuratedBank {
 //   work but decimal preserves the FNV-1a hash as a single integer literal in
 //   logs without ambiguity.
 // * `pathway_id` does not exist as a distinct field on [`AcceptedWorkflow`]
-//   (proposals do not yet carry pathway lineage). Day-1 synthesis:
-//   `pathway_id = workflow_id.to_string()`. m42 + downstream stcortex writers
-//   own pathway lineage when it lands; the bridge will fold that field in
-//   without changing the trait.
+//   (proposals do not yet carry pathway lineage). It is a DERIVED value: the
+//   bridge synthesises a canonical, namespaced stcortex pathway identifier
+//   from the workflow id via [`workflow_pathway_id`] — a `workflow_trace_`
+//   prefixed, zero-padded lowercase-hex key that lives inside the project's
+//   stcortex namespace (m9 guard). This is the exact key the CC-5
+//   substrate-learning loop (G → H → F) revolves around: m42's
+//   `namespace_key` writes Hebbian reinforcement under it and m11's
+//   `PathwayWeightReader` reads the pathway weight back under it. The loop
+//   closes end-to-end ONLY once the `wf-crystallise` binary wires both m42's
+//   `namespace_key` and m11's `PathwayWeightReader` to this same
+//   [`workflow_pathway_id`] function — that binary-side wiring is a separate,
+//   later task and is NOT done here. This bridge supplies the canonical id;
+//   it does not by itself close the loop.
 // * Recovery edge **PrunePending → Active**: m30 does NOT store
 //   [`SunsetPhase`]; phase is derived per-call via
 //   [`AcceptedWorkflow::phase_for`]. As soon as a workflow's weight rises back
@@ -422,6 +564,16 @@ impl CuratedBank {
 //   methods are blocked by the borrow checker, which matches the design
 //   intent of `run_consolidation_cycle` (one driver, one tick).
 
+/// Canonical stcortex pathway id for a workflow's Hebbian reinforcement
+/// pathway. The CC-5 substrate-learning loop reinforces and reads back
+/// this exact key: m42 writes reinforcement under it, m11's
+/// `PathwayWeightReader` reads the weight under it. The `workflow_trace_`
+/// prefix keeps it inside the project's stcortex namespace (m9 guard).
+#[must_use]
+pub fn workflow_pathway_id(workflow_id: u64) -> String {
+    format!("workflow_trace_pathway_{workflow_id:016x}")
+}
+
 impl crate::m11_fitness_weighted_decay::LifecycleBank for CuratedBank {
     fn iter_active(&self) -> Vec<crate::m11_fitness_weighted_decay::AcceptedWorkflowDecay> {
         // Expose ALL rows (no sunset filter here); m11 sunset-filters via
@@ -436,9 +588,9 @@ impl crate::m11_fitness_weighted_decay::LifecycleBank for CuratedBank {
         guard
             .values()
             .map(|w| crate::m11_fitness_weighted_decay::AcceptedWorkflowDecay {
-                workflow_id: w.workflow_id.to_string(),
-                pathway_id: w.workflow_id.to_string(),
-                last_run_ms: w.last_run_ms.unwrap_or(w.accepted_at_ms),
+                workflow_id: w.workflow_id().to_string(),
+                pathway_id: workflow_pathway_id(w.workflow_id()),
+                last_run_ms: w.last_run_ms().unwrap_or(w.accepted_at_ms()),
             })
             .collect()
     }
@@ -462,7 +614,7 @@ impl crate::m11_fitness_weighted_decay::LifecycleBank for CuratedBank {
 
     fn weight_of(&self, workflow_id: &str) -> Option<f64> {
         let id = workflow_id.parse::<u64>().ok()?;
-        self.get(id).ok().map(|w| w.weight)
+        self.get(id).ok().map(|w| w.weight())
     }
 
     fn mark_for_prune(&mut self, workflow_id: &str) {
@@ -475,7 +627,7 @@ impl crate::m11_fitness_weighted_decay::LifecycleBank for CuratedBank {
 
     fn sunset_at_of(&self, workflow_id: &str) -> Option<i64> {
         let id = workflow_id.parse::<u64>().ok()?;
-        self.get(id).ok().map(|w| w.sunset_at_ms)
+        self.get(id).ok().map(|w| w.sunset_at_ms())
     }
 
     fn transition(
@@ -501,8 +653,8 @@ mod tests {
     use std::time::SystemTime;
 
     use super::{
-        AcceptedWorkflow, BankError, CuratedBank, DEFAULT_PRUNE_PENDING_THRESHOLD,
-        DEFAULT_PRUNE_THRESHOLD, DEFAULT_SUNSET_DAYS, MS_PER_DAY,
+        workflow_pathway_id, AcceptedWorkflow, BankError, CuratedBank,
+        DEFAULT_PRUNE_PENDING_THRESHOLD, DEFAULT_PRUNE_THRESHOLD, DEFAULT_SUNSET_DAYS, MS_PER_DAY,
     };
     use crate::m11_fitness_weighted_decay::sunset::SunsetPhase;
     use crate::m14_lift::LiftSnapshot;
@@ -547,9 +699,9 @@ mod tests {
         let b = CuratedBank::new();
         let id = b.accept(sample_proposal(), 1_700_000_000_000).expect("ok");
         let w = b.get(id).expect("get");
-        assert!((w.weight - 1.0).abs() < 1e-12);
-        assert_eq!(w.run_count, 0);
-        assert!(w.last_run_ms.is_none());
+        assert!((w.weight() - 1.0).abs() < 1e-12);
+        assert_eq!(w.run_count(), 0);
+        assert!(w.last_run_ms().is_none());
     }
 
     #[test]
@@ -572,7 +724,7 @@ mod tests {
         let id = b.accept(sample_proposal(), now).expect("ok");
         let w = b.get(id).expect("get");
         let expected = now + DEFAULT_SUNSET_DAYS * MS_PER_DAY;
-        assert_eq!(w.sunset_at_ms, expected);
+        assert_eq!(w.sunset_at_ms(), expected);
     }
 
     #[test]
@@ -582,10 +734,10 @@ mod tests {
         let id = b.accept(sample_proposal(), 0).expect("ok");
         b.apply_decay(id, 0.5);
         let w = b.get(id).expect("get");
-        assert!((w.weight - 0.5).abs() < 1e-12);
+        assert!((w.weight() - 0.5).abs() < 1e-12);
         b.apply_decay(id, -10.0);
         let w = b.get(id).expect("get");
-        assert!((0.0..=1.0).contains(&w.weight));
+        assert!((0.0..=1.0).contains(&w.weight()));
     }
 
     #[test]
@@ -596,8 +748,8 @@ mod tests {
         b.record_run(id, 1);
         b.record_run(id, 2);
         let w = b.get(id).expect("get");
-        assert_eq!(w.run_count, 2);
-        assert_eq!(w.last_run_ms, Some(2));
+        assert_eq!(w.run_count(), 2);
+        assert_eq!(w.last_run_ms(), Some(2));
     }
 
     #[test]
@@ -608,7 +760,7 @@ mod tests {
         let id = b.accept(sample_proposal(), now).expect("ok");
         let later = now + DEFAULT_SUNSET_DAYS * MS_PER_DAY + 1;
         let actives = b.active(later, 0.01);
-        assert!(actives.iter().all(|w| w.workflow_id != id));
+        assert!(actives.iter().all(|w| w.workflow_id() != id));
     }
 
     #[test]
@@ -674,8 +826,8 @@ mod tests {
         b.apply_decay(id, 0.5);
         b.apply_decay(id, f64::NAN);
         let w = b.get(id).expect("get");
-        assert!(w.weight.is_finite(), "NaN propagated into weight!");
-        assert!((w.weight - 0.5).abs() < 1e-12, "weight mutated by NaN");
+        assert!(w.weight().is_finite(), "NaN propagated into weight!");
+        assert!((w.weight() - 0.5).abs() < 1e-12, "weight mutated by NaN");
     }
 
     #[test]
@@ -698,7 +850,7 @@ mod tests {
         // saturating_add semantics in the impl + this single-step test.
         b.record_run(id, 1);
         let w = b.get(id).expect("get");
-        assert_eq!(w.run_count, 1);
+        assert_eq!(w.run_count(), 1);
         // exercise saturating_add path explicitly
         let saturated = u32::MAX.saturating_add(1);
         assert_eq!(saturated, u32::MAX);
@@ -762,7 +914,7 @@ mod tests {
             DEFAULT_PRUNE_THRESHOLD,
         );
         assert_eq!(phase, SunsetPhase::SunsetExpired);
-        assert!((w.weight - 1.0).abs() < 1e-12, "weight untouched");
+        assert!((w.weight() - 1.0).abs() < 1e-12, "weight untouched");
     }
 
     #[test]
@@ -771,9 +923,9 @@ mod tests {
         let b = CuratedBank::new();
         let id = b.accept(sample_proposal(), 0).expect("ok");
         let w = b.get(id).expect("get");
-        assert!(!w.is_sunset_expired(w.sunset_at_ms - 1));
-        assert!(w.is_sunset_expired(w.sunset_at_ms));
-        assert!(w.is_sunset_expired(w.sunset_at_ms + 1));
+        assert!(!w.is_sunset_expired(w.sunset_at_ms() - 1));
+        assert!(w.is_sunset_expired(w.sunset_at_ms()));
+        assert!(w.is_sunset_expired(w.sunset_at_ms() + 1));
     }
 
     #[test]
@@ -782,7 +934,7 @@ mod tests {
         let b = CuratedBank::new();
         let id = b.accept(sample_proposal(), i64::MAX - 1).expect("ok");
         let w = b.get(id).expect("get");
-        assert_eq!(w.sunset_at_ms, i64::MAX);
+        assert_eq!(w.sunset_at_ms(), i64::MAX);
     }
 
     #[test]
@@ -801,7 +953,7 @@ mod tests {
             DEFAULT_PRUNE_THRESHOLD,
         );
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].workflow_id, id_b);
+        assert_eq!(pending[0].workflow_id(), id_b);
     }
 
     #[test]
@@ -828,7 +980,7 @@ mod tests {
         // FNV-1a of the payload, not a human-derived field.
         let b = CuratedBank::new();
         let p = sample_proposal();
-        let proposal_id = p.proposal_id;
+        let proposal_id = p.proposal_id();
         let id = b.accept(p, 0).expect("ok");
         let expected = crate::m4_cascade::cluster_id::fnv1a_64(
             format!("workflow:{proposal_id}").as_bytes(),
@@ -856,8 +1008,8 @@ mod tests {
         }
         let a1 = b.active(1, 0.0);
         let a2 = b.active(1, 0.0);
-        let order1: Vec<u64> = a1.iter().map(|w| w.workflow_id).collect();
-        let order2: Vec<u64> = a2.iter().map(|w| w.workflow_id).collect();
+        let order1: Vec<u64> = a1.iter().map(super::AcceptedWorkflow::workflow_id).collect();
+        let order2: Vec<u64> = a2.iter().map(super::AcceptedWorkflow::workflow_id).collect();
         assert_eq!(order1, order2);
     }
 
@@ -884,9 +1036,9 @@ mod tests {
         let now = 1_500_000_000_000_i64;
         let id = b.accept(sample_proposal(), now).expect("ok");
         let w: AcceptedWorkflow = b.get(id).expect("get");
-        assert_eq!(w.accepted_at_ms, now);
+        assert_eq!(w.accepted_at_ms(), now);
         assert_eq!(
-            w.sunset_at_ms - w.accepted_at_ms,
+            w.sunset_at_ms() - w.accepted_at_ms(),
             DEFAULT_SUNSET_DAYS * MS_PER_DAY
         );
     }
@@ -990,10 +1142,10 @@ mod tests {
         // be a logged no-op, NOT a panic, NOT silently coerced to id=0.
         let mut bank = CuratedBank::new();
         let id = bank.accept(sample_proposal_with_seed(4001), 0).expect("ok");
-        let pre = bank.get(id).expect("pre").weight;
+        let pre = bank.get(id).expect("pre").weight();
         let factor = DecayFactor::new(0.1).expect("factor");
         LifecycleBank::apply_decay(&mut bank, "not_a_u64", factor);
-        let post = bank.get(id).expect("post").weight;
+        let post = bank.get(id).expect("post").weight();
         assert!((post - pre).abs() < f64::EPSILON,
             "decay must NOT touch any workflow when id is unparseable");
     }
@@ -1007,7 +1159,7 @@ mod tests {
         let id = bank.accept(sample_proposal_with_seed(5001), now).expect("ok");
         let key = id.to_string();
         let via_trait = LifecycleBank::sunset_at_of(&bank, &key).expect("trait");
-        let via_direct = bank.get(id).expect("direct").sunset_at_ms;
+        let via_direct = bank.get(id).expect("direct").sunset_at_ms();
         assert_eq!(via_trait, via_direct);
         assert_eq!(via_trait, now.saturating_add(DEFAULT_SUNSET_DAYS * MS_PER_DAY));
     }
@@ -1031,11 +1183,12 @@ mod tests {
         let id_b = bank.accept(sample_proposal_with_seed(6002), 0).expect("b");
         let id_c = bank.accept(sample_proposal_with_seed(6003), 0).expect("c");
 
-        // Seed pathway weights at the synthetic Day-1 pathway_id = workflow_id.
+        // Seed pathway weights at the canonical pathway id produced by
+        // `workflow_pathway_id` — the key `iter_active` now reports (C8).
         let mut weights = HashMap::new();
-        weights.insert(id_a.to_string(), 0.5);
-        weights.insert(id_b.to_string(), 0.5);
-        weights.insert(id_c.to_string(), 0.5);
+        weights.insert(workflow_pathway_id(id_a), 0.5);
+        weights.insert(workflow_pathway_id(id_b), 0.5);
+        weights.insert(workflow_pathway_id(id_c), 0.5);
         let pathways = StubPathways { weights };
         let freq = StubFreq {
             counts: HashMap::new(),
@@ -1059,7 +1212,7 @@ mod tests {
         let id = bank.accept(sample_proposal_with_seed(7001), 0).expect("ok");
         // Force weight into the PrunePending band.
         bank.apply_decay(id, 0.08 / 1.0); // weight ~ 0.08; soft = 0.10, hard = 0.05
-        let w_low = bank.get(id).expect("low").weight;
+        let w_low = bank.get(id).expect("low").weight();
         assert!(w_low < DEFAULT_PRUNE_PENDING_THRESHOLD);
         assert!(w_low >= DEFAULT_PRUNE_THRESHOLD);
         let phase_low = bank.get(id).expect("p").phase_for(
@@ -1069,7 +1222,7 @@ mod tests {
         // Substrate rises: simulate by force-boosting the weight via a >1
         // factor (multiplicative; clamped to 1.0).
         bank.apply_decay(id, 50.0); // 0.08 * 50 = 4.0, clamped to 1.0
-        let w_high = bank.get(id).expect("high").weight;
+        let w_high = bank.get(id).expect("high").weight();
         assert!((w_high - 1.0).abs() < f64::EPSILON);
         let phase_high = bank.get(id).expect("p").phase_for(
             1, DEFAULT_PRUNE_PENDING_THRESHOLD, DEFAULT_PRUNE_THRESHOLD,
@@ -1097,11 +1250,11 @@ mod tests {
         // (phase is derived, not stored). Must not affect bank state.
         let mut bank = CuratedBank::new();
         let id = bank.accept(sample_proposal_with_seed(9001), 0).expect("ok");
-        let pre_weight = bank.get(id).expect("pre").weight;
+        let pre_weight = bank.get(id).expect("pre").weight();
         let key = id.to_string();
         LifecycleBank::transition(&mut bank, &key, SunsetPhase::PrunePending);
         LifecycleBank::transition(&mut bank, &key, SunsetPhase::SunsetExpired);
-        let post_weight = bank.get(id).expect("post").weight;
+        let post_weight = bank.get(id).expect("post").weight();
         assert!((post_weight - pre_weight).abs() < f64::EPSILON);
     }
 
@@ -1116,7 +1269,7 @@ mod tests {
         let r = b.try_apply_decay(id, 0.25);
         assert!(r.is_ok());
         let w = b.get(id).expect("get");
-        assert!((w.weight - 0.25).abs() < 1e-12);
+        assert!((w.weight() - 0.25).abs() < 1e-12);
     }
 
     #[test]
@@ -1128,7 +1281,7 @@ mod tests {
         b.try_apply_decay(id, 0.5).expect("first");
         b.try_apply_decay(id, 100.0).expect("boost"); // 0.5*100=50 → clamp 1.0
         let w = b.get(id).expect("get");
-        assert!((w.weight - 1.0).abs() < 1e-12, "weight {}", w.weight);
+        assert!((w.weight() - 1.0).abs() < 1e-12, "weight {}", w.weight());
     }
 
     #[test]
@@ -1139,7 +1292,7 @@ mod tests {
         let id = b.accept(sample_proposal(), 0).expect("ok");
         b.try_apply_decay(id, -2.0).expect("neg");
         let w = b.get(id).expect("get");
-        assert!((w.weight - 0.0).abs() < 1e-12, "weight {}", w.weight);
+        assert!((w.weight() - 0.0).abs() < 1e-12, "weight {}", w.weight());
     }
 
     #[test]
@@ -1151,7 +1304,7 @@ mod tests {
         b.try_apply_decay(id, 0.5).expect("d1");
         b.try_apply_decay(id, 0.5).expect("d2");
         let w = b.get(id).expect("get");
-        assert!((w.weight - 0.25).abs() < 1e-12, "weight {}", w.weight);
+        assert!((w.weight() - 0.25).abs() < 1e-12, "weight {}", w.weight());
     }
 
     #[test]
@@ -1203,15 +1356,15 @@ mod tests {
         // rationale: Boundary — phase_for uses strict `<` for the soft floor,
         // so a weight EXACTLY at the soft threshold classifies as Active.
         let now = 1_700_000_000_000_i64;
-        let w = AcceptedWorkflow {
-            workflow_id: 1,
-            proposal: sample_proposal(),
-            accepted_at_ms: now,
-            sunset_at_ms: i64::MAX,
-            weight: DEFAULT_PRUNE_PENDING_THRESHOLD,
-            last_run_ms: None,
-            run_count: 0,
-        };
+        // accept_new validates+clamps weight to [0,1]; the soft threshold
+        // (0.10) is in range so it passes through unchanged.
+        let w = AcceptedWorkflow::accept_new(
+            1,
+            sample_proposal(),
+            now,
+            i64::MAX,
+            DEFAULT_PRUNE_PENDING_THRESHOLD,
+        );
         let phase = w.phase_for(
             now + 1,
             DEFAULT_PRUNE_PENDING_THRESHOLD,
@@ -1226,15 +1379,15 @@ mod tests {
         // `<` so it is NOT SunsetExpired; it falls to the PrunePending band
         // (still below the soft floor).
         let now = 1_700_000_000_000_i64;
-        let w = AcceptedWorkflow {
-            workflow_id: 2,
-            proposal: sample_proposal(),
-            accepted_at_ms: now,
-            sunset_at_ms: i64::MAX,
-            weight: DEFAULT_PRUNE_THRESHOLD,
-            last_run_ms: None,
-            run_count: 0,
-        };
+        // accept_new validates+clamps weight to [0,1]; the hard threshold
+        // (0.05) is in range so it passes through unchanged.
+        let w = AcceptedWorkflow::accept_new(
+            2,
+            sample_proposal(),
+            now,
+            i64::MAX,
+            DEFAULT_PRUNE_THRESHOLD,
+        );
         let phase = w.phase_for(
             now + 1,
             DEFAULT_PRUNE_PENDING_THRESHOLD,
@@ -1271,8 +1424,8 @@ mod tests {
             Err(BankError::AlreadyAccepted(_))
         ));
         let w = b.get(id).expect("still present");
-        assert!((w.weight - 0.3).abs() < 1e-12, "duplicate accept clobbered weight");
-        assert_eq!(w.run_count, 1, "duplicate accept clobbered run_count");
+        assert!((w.weight() - 0.3).abs() < 1e-12, "duplicate accept clobbered weight");
+        assert_eq!(w.run_count(), 1, "duplicate accept clobbered run_count");
     }
 
     #[test]
@@ -1284,8 +1437,8 @@ mod tests {
         b.record_run(id, 100);
         b.record_run(id, 50); // earlier ts, but still "latest call"
         let w = b.get(id).expect("get");
-        assert_eq!(w.last_run_ms, Some(50));
-        assert_eq!(w.run_count, 2);
+        assert_eq!(w.last_run_ms(), Some(50));
+        assert_eq!(w.run_count(), 2);
     }
 
     #[test]
@@ -1300,5 +1453,35 @@ mod tests {
             }
             other => panic!("expected InvalidDecayFactor, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn workflow_pathway_id_is_deterministic_namespaced_and_distinct() {
+        // rationale: CC-5 substrate-learning loop contract — the pathway id
+        // must be (a) deterministic (same input → same key, so m42's write
+        // and m11's read-back land on the same pathway), (b) inside the
+        // project's stcortex namespace (`workflow_trace_` prefix, m9 guard),
+        // and (c) collision-free across distinct workflow ids.
+        let a = workflow_pathway_id(42);
+        let b = workflow_pathway_id(42);
+        assert_eq!(a, b, "must be deterministic for a fixed workflow id");
+
+        assert!(
+            a.starts_with("workflow_trace_"),
+            "must stay inside the project stcortex namespace, got {a}"
+        );
+
+        let c = workflow_pathway_id(43);
+        assert_ne!(a, c, "distinct workflow ids must produce distinct keys");
+
+        // Boundary ids — 0 and u64::MAX — are still distinct and namespaced.
+        let lo = workflow_pathway_id(0);
+        let hi = workflow_pathway_id(u64::MAX);
+        assert_ne!(lo, hi);
+        assert!(lo.starts_with("workflow_trace_"));
+        assert!(hi.starts_with("workflow_trace_"));
+        // Zero-padded lowercase hex: 16 hex digits after the fixed prefix.
+        assert_eq!(lo, "workflow_trace_pathway_0000000000000000");
+        assert_eq!(hi, "workflow_trace_pathway_ffffffffffffffff");
     }
 }

@@ -65,9 +65,9 @@ fn m23_build_proposal_accepts_exactly_at_proposal_f2_threshold() {
     let s = snap(PROPOSAL_F2_THRESHOLD, Some(0.5), Some(0.05));
     let p: WorkflowProposal =
         build_proposal(sample_variant(), &s, None).expect("at threshold must accept");
-    assert_eq!(p.evidence_n, PROPOSAL_F2_THRESHOLD);
-    assert!((p.evidence_lift - 0.5).abs() < 1e-12);
-    assert!((p.evidence_ci_half - 0.05).abs() < 1e-12);
+    assert_eq!(p.evidence_n(), PROPOSAL_F2_THRESHOLD);
+    assert!((p.evidence_lift() - 0.5).abs() < 1e-12);
+    assert!((p.evidence_ci_half() - 0.05).abs() < 1e-12);
 }
 
 // rationale: Determinism — identical (variant, snapshot.n) inputs MUST
@@ -80,8 +80,8 @@ fn m23_proposal_id_is_deterministic_for_same_inputs() {
     let p1 = build_proposal(sample_variant(), &s, None).expect("p1");
     let p2 = build_proposal(sample_variant(), &s, None).expect("p2");
     let p3 = build_proposal(sample_variant(), &s, None).expect("p3");
-    assert_eq!(p1.proposal_id, p2.proposal_id);
-    assert_eq!(p2.proposal_id, p3.proposal_id);
+    assert_eq!(p1.proposal_id(), p2.proposal_id());
+    assert_eq!(p2.proposal_id(), p3.proposal_id());
 }
 
 // rationale: Anti-property (AP-V7-07 no-auto-promote) — m23's public
@@ -143,23 +143,25 @@ fn m23_ap_v7_07_no_auto_promote_public_surface_check() {
 fn m23_compose_proposals_silently_skips_individual_failures_with_tracing() {
     // rationale: Documented behaviour (batched F2 skip-and-trace)
     // Below-threshold snapshot: compose_proposals must return [].
+    // `|_| None` = the m22-clustering-skipped diversity closure; this
+    // test exercises F2 skip-and-trace, not diversity threading.
     let s_below = snap(PROPOSAL_F2_THRESHOLD - 1, Some(0.5), Some(0.05));
-    let batch = compose_proposals(&[sample_pattern()], &s_below);
+    let batch = compose_proposals(&[sample_pattern()], &s_below, |_| None);
     assert!(batch.is_empty(), "below-F2 batch must be empty");
 
     // Sufficient-evidence snapshot but lift=None: also must skip every
     // variant (LiftUnavailable path).
     let s_lift_none = snap(30, None, Some(0.05));
-    let batch_none = compose_proposals(&[sample_pattern()], &s_lift_none);
+    let batch_none = compose_proposals(&[sample_pattern()], &s_lift_none, |_| None);
     assert!(batch_none.is_empty(), "lift=None batch must be empty");
 
     // Mixed: with sufficient evidence, batch is non-empty and every
     // surviving proposal carries n >= PROPOSAL_F2_THRESHOLD.
     let s_ok = snap(30, Some(0.5), Some(0.05));
-    let batch_ok = compose_proposals(&[sample_pattern()], &s_ok);
+    let batch_ok = compose_proposals(&[sample_pattern()], &s_ok, |_| None);
     assert!(!batch_ok.is_empty());
     for p in &batch_ok {
-        assert!(p.evidence_n >= PROPOSAL_F2_THRESHOLD);
+        assert!(p.evidence_n() >= PROPOSAL_F2_THRESHOLD);
     }
 }
 

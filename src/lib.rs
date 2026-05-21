@@ -68,7 +68,7 @@ pub use m6_cost::{
 pub use m7_workflow_runs::{
     close_run, find_by_id, find_by_outcome, find_open, insert_run, merge_observation,
     open_database as open_workflow_runs_database, open_memory as open_workflow_runs_memory,
-    update_cost_tokens, ClusterBObservation, Outcome, StepOutcome, WorkflowError,
+    update_cost_tokens, ClusterBObservation, Outcome, RunState, StepOutcome, WorkflowError,
     WorkflowRunRow,
 };
 pub use m12_cli_reports::{
@@ -105,7 +105,9 @@ pub use m23_proposer::{
     build_proposal, compose_proposals, ProposerError, WorkflowProposal,
     PROPOSAL_F2_THRESHOLD,
 };
-pub use m30_bank::{AcceptedWorkflow, BankError, CuratedBank, DEFAULT_SUNSET_DAYS};
+pub use m30_bank::{
+    workflow_pathway_id, AcceptedWorkflow, BankError, CuratedBank, DEFAULT_SUNSET_DAYS,
+};
 pub use m31_selector::{
     select_top_k, ScoreComponents, ScoredCandidate, SelectorConfig, SelectorError,
     DEFAULT_ALPHA, DEFAULT_BETA, DEFAULT_DELTA, DEFAULT_GAMMA, RECENCY_HALF_LIFE_DAYS,
@@ -120,7 +122,7 @@ pub use m33_verifier::{
 };
 pub use m40_nexus_emit::{
     build_event as build_nexus_event, HttpNexusClient, NexusClient, NexusEmitError,
-    NexusEvent, DEFAULT_NEXUS_URL, DEFAULT_PUSH_TIMEOUT,
+    NexusEvent, NexusEventKind, DEFAULT_NEXUS_URL, DEFAULT_PUSH_TIMEOUT,
 };
 pub use m41_lcm_rpc::{
     HttpLcmClient, LcmClient, LcmLoopCreateParams, LcmLoopCreateResult, LcmRpcError,

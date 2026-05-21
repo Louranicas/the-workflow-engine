@@ -11,9 +11,9 @@
 //! - Contract regression — `MIN_COMPLETE_STEPS` matches the default
 //!   `BatternStepRecordConfig::min_steps`, gating `summarise` semantics.
 //!
-//! Per Wave-A1 scout finding F-A-02, `BatternId(pub String)` exposes its
-//! inner string. We test the AS-IS public surface and do NOT mutate the
-//! type.
+//! Wave-A1 scout finding F-A-02 (`BatternId` exposed its inner string)
+//! is resolved — the inner field is now private; construct via
+//! `BatternId::new` and read via `as_str`.
 
 #![allow(clippy::doc_markdown)]
 

@@ -16,13 +16,17 @@
 5. **50+ tests per module minimum** (KEYSTONE Cluster F: 250+; budget table at [TEST_DISCIPLINE.md](ai_docs/optimisation-v7/STANDARDS/TEST_DISCIPLINE.md))
 6. **Doc comments on all public items** — backticked identifiers (clippy `doc_markdown`)
 7. **Structured tracing emit** — `tracing-subscriber` not `println!`/`eprintln!` (per [m1_foundation/logging.rs](../the_maintenance_engine_v2/src/m1_foundation/logging.rs))
-8. **Newtype discipline** — `SessionId(String)` not raw `String`; per cluster A spec
+8. **Newtype discipline** — `SessionId(String)` not raw `String`; per cluster A spec.
+   **Accessor naming convention:** string-backed newtypes expose `as_str(&self) -> &str`;
+   `Copy` scalar newtypes expose `get(self) -> T`; multi-field domain types expose one
+   accessor per field, named after the field (`Pattern::support()`, `AcceptedWorkflow::weight()`).
+   `as_*` signals a cheap borrow/view; `get`/field-name signals a returned `Copy` value.
 9. **thiserror error enums** — no `Box<dyn Error>` in public APIs
 10. **No `#![allow]` suppressions** — fix the actual code; never suppress pedantic
 11. **`PIPESTATUS[0]` in gate scripts** — never `cargo … | tail` (AP-V7-13 cousin)
 12. **4-stage zero-tolerance gate** — check → clippy → pedantic → test, abort on first failure
 13. **Doc-comment style (//!)**: Layer / Deps / Tests / Features / Platform / Impl Notes / Related Docs (per ME v2 `resources.rs`)
-14. **No `cargo build` until G9** — HOLD-v2 active
+14. **Full 4-stage gate on every change** — G9 fired 2026-05-17; HOLD-v2 lifted; `cargo build` / `cargo test` are authorised and required
 15. **No new pre-existing-project-warnings excuse** — even if the project has pre-existing warnings, new code must be clean (per [feedback_god_tier_no_warnings_at_any_level](../../.claude/projects/-home-louranicas-claude-code-workspace/memory/feedback_god_tier_no_warnings_at_any_level.md))
 
 ---

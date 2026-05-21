@@ -439,13 +439,23 @@ fn sanitise_session_id(raw: &str) -> String {
     }
 }
 
-/// Unix milliseconds since epoch, saturating on overflow / clock skew.
+/// Unix milliseconds since epoch.
+///
+/// Saturates **forward** to `i64::MAX` on the (year-292-million) `i64`
+/// millisecond overflow, and saturates to `0` — with a `tracing::warn!` —
+/// if the host clock is set before the Unix epoch. The pre-epoch arm is an
+/// explicit, observable saturation, not a silent-zero collapse.
 fn unix_ms_now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|d| i64::try_from(d.as_millis()).ok())
-        .unwrap_or(0)
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or_else(
+        |_| {
+            tracing::warn!(
+                "m15: host clock is set before the Unix epoch; \
+                 pressure-event timestamp saturated to 0"
+            );
+            0
+        },
+        |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX),
+    )
 }
 
 /// Pseudo-RFC3339 string — Unix-seconds carried as text (chrono out per

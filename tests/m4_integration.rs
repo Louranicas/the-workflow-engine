@@ -11,9 +11,9 @@
 //! - Determinism: identical input across repeated invocations yields
 //!   identical cluster ids.
 //!
-//! Note: per Wave-A1 scout finding F-A-02, `CascadeClusterId(pub String)`
-//! exposes its inner string. Per the task brief we test the AS-IS public
-//! surface and do NOT mutate the type.
+//! Note: Wave-A1 scout finding F-A-02 (`CascadeClusterId` exposed its
+//! inner string) is resolved — the inner field is now private; construct
+//! via `CascadeClusterId::new` and read via `as_str`.
 
 #![allow(clippy::doc_markdown)]
 

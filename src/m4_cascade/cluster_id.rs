@@ -28,10 +28,26 @@ pub fn fnv1a_64(bytes: &[u8]) -> u64 {
 /// human-meaningful label is embedded. Display emits the prefix-hex
 /// form only; downstream consumers must treat the id as opaque (string
 /// equality only).
+///
+/// The inner field is **private**: opacity is enforced by the type
+/// system, not merely promised in a doc comment. Construct via
+/// [`CascadeClusterId::new`] (or [`assign_cluster_id`]) and read via
+/// [`CascadeClusterId::as_str`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct CascadeClusterId(pub String);
+pub struct CascadeClusterId(String);
 
 impl CascadeClusterId {
+    /// Construct a `CascadeClusterId` wrapping an opaque identifier
+    /// string.
+    ///
+    /// The value is stored verbatim; the `cascade_cluster_<16-hex>`
+    /// shape is a convention of [`assign_cluster_id`], not a type-level
+    /// guarantee.
+    #[must_use]
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
     /// Borrow the opaque string.
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -66,7 +82,7 @@ pub fn assign_cluster_id(
     // habitat scale; fallback to MAX keeps the function panic-free.
     let count_u64 = u64::try_from(step_count).unwrap_or(u64::MAX);
     let id_u64 = hash_a ^ hash_b ^ count_u64;
-    CascadeClusterId(format!("cascade_cluster_{id_u64:016x}"))
+    CascadeClusterId::new(format!("cascade_cluster_{id_u64:016x}"))
 }
 
 #[cfg(test)]
@@ -175,7 +191,7 @@ mod tests {
                 ],
                 usize::try_from(i % 500).unwrap_or(0),
             );
-            if !seen.insert(id.0) {
+            if !seen.insert(id.as_str().to_owned()) {
                 collisions += 1;
             }
         }
@@ -185,7 +201,7 @@ mod tests {
     #[test]
     fn cluster_id_implements_clone_eq_hash() {
         use std::collections::HashSet;
-        let id = CascadeClusterId("cascade_cluster_0000000000000001".into());
+        let id = CascadeClusterId::new("cascade_cluster_0000000000000001");
         let id2 = id.clone();
         let mut s = HashSet::new();
         s.insert(id);

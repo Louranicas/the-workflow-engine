@@ -16,21 +16,103 @@ use crate::m21_variant_builder::WorkflowVariant;
 pub const PROPOSAL_F2_THRESHOLD: usize = MIN_SAMPLE_SIZE;
 
 /// A structured proposal for operator review.
+///
+/// All fields are **private**. A `WorkflowProposal` cannot exist with
+/// `evidence_n` below the F2 floor ([`PROPOSAL_F2_THRESHOLD`]) — the only
+/// constructors ([`WorkflowProposal::new`] and [`build_proposal`]) enforce
+/// it. This hoists the F2 evidence gate into the type system: a hand-built
+/// struct literal can no longer bypass [`build_proposal`]'s check. Read
+/// state through the accessors.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WorkflowProposal {
     /// Opaque identifier.
-    pub proposal_id: u64,
+    proposal_id: u64,
     /// Source variant.
-    pub variant: WorkflowVariant,
+    variant: WorkflowVariant,
     /// Aggregate evidence at proposal time.
-    pub evidence_n: usize,
+    evidence_n: usize,
     /// m14 composite lift.
-    pub evidence_lift: f64,
+    evidence_lift: f64,
     /// Wilson CI half-width.
-    pub evidence_ci_half: f64,
+    evidence_ci_half: f64,
     /// Cluster index assigned by m22 (`None` if feature clustering
     /// skipped).
-    pub diversity_cluster: Option<usize>,
+    diversity_cluster: Option<usize>,
+}
+
+impl WorkflowProposal {
+    /// Construct a `WorkflowProposal`, enforcing the **F2 evidence floor**.
+    ///
+    /// The F2 invariant — a proposal must carry at least
+    /// [`PROPOSAL_F2_THRESHOLD`] evidence samples — is enforced here, so a
+    /// `WorkflowProposal` value cannot exist below the floor regardless of
+    /// the construction site. [`build_proposal`] routes through this
+    /// constructor after its own m14-snapshot checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProposerError::EvidenceBelowThreshold`] if `evidence_n` is
+    /// below [`PROPOSAL_F2_THRESHOLD`].
+    pub fn new(
+        proposal_id: u64,
+        variant: WorkflowVariant,
+        evidence_n: usize,
+        evidence_lift: f64,
+        evidence_ci_half: f64,
+        diversity_cluster: Option<usize>,
+    ) -> Result<Self, ProposerError> {
+        if evidence_n < PROPOSAL_F2_THRESHOLD {
+            return Err(ProposerError::EvidenceBelowThreshold {
+                n: evidence_n,
+                threshold: PROPOSAL_F2_THRESHOLD,
+            });
+        }
+        Ok(Self {
+            proposal_id,
+            variant,
+            evidence_n,
+            evidence_lift,
+            evidence_ci_half,
+            diversity_cluster,
+        })
+    }
+
+    /// Opaque proposal identifier.
+    #[must_use]
+    pub const fn proposal_id(&self) -> u64 {
+        self.proposal_id
+    }
+
+    /// Borrow the source variant.
+    #[must_use]
+    pub const fn variant(&self) -> &WorkflowVariant {
+        &self.variant
+    }
+
+    /// Aggregate evidence sample count at proposal time (always
+    /// `>= PROPOSAL_F2_THRESHOLD`).
+    #[must_use]
+    pub const fn evidence_n(&self) -> usize {
+        self.evidence_n
+    }
+
+    /// m14 composite lift.
+    #[must_use]
+    pub const fn evidence_lift(&self) -> f64 {
+        self.evidence_lift
+    }
+
+    /// Wilson CI half-width.
+    #[must_use]
+    pub const fn evidence_ci_half(&self) -> f64 {
+        self.evidence_ci_half
+    }
+
+    /// Cluster index assigned by m22 (`None` if feature clustering skipped).
+    #[must_use]
+    pub const fn diversity_cluster(&self) -> Option<usize> {
+        self.diversity_cluster
+    }
 }
 
 /// Proposal-builder errors.
@@ -78,14 +160,18 @@ pub fn build_proposal(
     let proposal_id = crate::m4_cascade::cluster_id::fnv1a_64(
         format!("proposal:{}:{}", variant.variant_id, snapshot.n).as_bytes(),
     );
-    Ok(WorkflowProposal {
+    // Route through the F2-enforcing constructor. The `snapshot.n <
+    // PROPOSAL_F2_THRESHOLD` check above already guarantees this succeeds;
+    // `WorkflowProposal::new` re-checks the same floor so the invariant
+    // holds for every construction site, not just this one.
+    WorkflowProposal::new(
         proposal_id,
         variant,
-        evidence_n: snapshot.n,
-        evidence_lift: lift,
-        evidence_ci_half: ci_half,
+        snapshot.n,
+        lift,
+        ci_half,
         diversity_cluster,
-    })
+    )
 }
 
 /// Compose variants from a top-N pattern slice into a proposal batch.
@@ -93,11 +179,22 @@ pub fn build_proposal(
 /// Skips patterns/variants whose evidence fails the F2 gate. The
 /// returned vec preserves source ordering.
 ///
+/// **CC-4 diversity threading:** the `diversity_of` closure maps each
+/// [`WorkflowVariant`] to its m22 K-means cluster index (or `None` when
+/// feature clustering was skipped). Whatever the closure returns is
+/// threaded verbatim into the resulting proposal's
+/// [`WorkflowProposal::diversity_cluster`]. This mirrors how
+/// [`crate::m31_selector::select_top_k`] takes its `diversity_score`
+/// closure. Prior to this wiring `compose_proposals` hard-coded
+/// `diversity_cluster: None` for every variant — the m22 K-means signal
+/// never reached a proposal on the batch path (the only production path).
+/// That was the CC-4 wiring gap, and supplying the closure here fixes it.
+///
 /// **Silent-swallow rationale (AP-V7-13 audit):** the inner `match`
 /// branches deliberately discard two error classes:
 ///
 /// 1. [`crate::m21_variant_builder::VariantBuilderError::EmptyPattern`] —
-///    only fires when `pattern.steps.is_empty()`, which m20's
+///    only fires when `pattern.steps()` is empty, which m20's
 ///    `mine_sequences` cannot produce (every emitted `Pattern` carries
 ///    `support >= MIN_SUPPORT_FLOOR` which requires ≥1 step). The m21
 ///    refusal arm is therefore **unreachable in production** under the m20
@@ -115,6 +212,7 @@ pub fn build_proposal(
 pub fn compose_proposals(
     patterns: &[Pattern],
     snapshot: &LiftSnapshot,
+    diversity_of: impl Fn(&WorkflowVariant) -> Option<usize>,
 ) -> Vec<WorkflowProposal> {
     // Capacity hint: at most MAX_VARIANTS_PER_PATTERN proposals per pattern.
     let mut out: Vec<WorkflowProposal> = Vec::with_capacity(
@@ -139,7 +237,7 @@ pub fn compose_proposals(
                      is unreachable unless the m20 input contract regressed"
                 );
                 tracing::debug!(
-                    pattern_hash = p.canonical_hash,
+                    pattern_hash = p.canonical_hash(),
                     error = %e,
                     "m23::compose_proposals — m21 build_variants refused; m20 contract violation upstream"
                 );
@@ -147,14 +245,18 @@ pub fn compose_proposals(
             }
         };
         for v in variants {
+            // CC-4: capture the m22 K-means cluster for this variant
+            // BEFORE `build_proposal` consumes `v` by value, then thread
+            // it into the proposal.
+            let diversity_cluster = diversity_of(&v);
             // rationale: F2 gate skip-and-trace is the documented batched
             // behaviour for compose_proposals; build_proposal is the
             // strict typed-refusal path.
-            match build_proposal(v, snapshot, None) {
+            match build_proposal(v, snapshot, diversity_cluster) {
                 Ok(proposal) => out.push(proposal),
                 Err(e) => {
                     tracing::debug!(
-                        pattern_hash = p.canonical_hash,
+                        pattern_hash = p.canonical_hash(),
                         error = %e,
                         "m23::compose_proposals — F2 gate skip"
                     );
@@ -225,9 +327,9 @@ mod tests {
     fn proposal_built_when_evidence_sufficient() {
         let s = snap(30, Some(0.6), Some(0.05));
         let p = build_proposal(sample_variant(), &s, Some(0)).expect("ok");
-        assert_eq!(p.evidence_n, 30);
-        assert!((p.evidence_lift - 0.6).abs() < 1e-12);
-        assert_eq!(p.diversity_cluster, Some(0));
+        assert_eq!(p.evidence_n(), 30);
+        assert!((p.evidence_lift() - 0.6).abs() < 1e-12);
+        assert_eq!(p.diversity_cluster(), Some(0));
     }
 
     #[test]
@@ -235,14 +337,14 @@ mod tests {
         let s = snap(30, Some(0.6), Some(0.05));
         let p1 = build_proposal(sample_variant(), &s, None).expect("p1");
         let p2 = build_proposal(sample_variant(), &s, None).expect("p2");
-        assert_eq!(p1.proposal_id, p2.proposal_id);
+        assert_eq!(p1.proposal_id(), p2.proposal_id());
     }
 
     #[test]
     fn compose_proposals_skips_insufficient_evidence() {
         let s = snap(10, Some(0.5), Some(0.05));
         let patterns = vec![sample_pattern()];
-        let p = compose_proposals(&patterns, &s);
+        let p = compose_proposals(&patterns, &s, |_| None);
         assert!(p.is_empty());
     }
 
@@ -250,11 +352,11 @@ mod tests {
     fn compose_proposals_yields_variants_under_sufficient_evidence() {
         let s = snap(30, Some(0.5), Some(0.05));
         let patterns = vec![sample_pattern()];
-        let proposals = compose_proposals(&patterns, &s);
+        let proposals = compose_proposals(&patterns, &s, |_| None);
         assert!(!proposals.is_empty());
         // First proposal should be derived from the identity variant.
         assert!(matches!(
-            proposals[0].variant.mutation,
+            proposals[0].variant().mutation,
             MutationKind::Identity
         ));
     }
@@ -313,7 +415,7 @@ mod tests {
         let s = snap(30, Some(0.5), Some(0.05));
         let p = build_proposal(sample_variant(), &s, None).expect("ok");
         // proposal_id encodes as JSON number; no string content possible.
-        let id_json = serde_json::to_string(&p.proposal_id).expect("ser");
+        let id_json = serde_json::to_string(&p.proposal_id()).expect("ser");
         assert!(id_json.chars().all(|c| c.is_ascii_digit()));
     }
 
@@ -325,7 +427,7 @@ mod tests {
         let mut ids = Vec::new();
         for _ in 0..5_u32 {
             let p = build_proposal(sample_variant(), &s, None).expect("ok");
-            ids.push(p.proposal_id);
+            ids.push(p.proposal_id());
         }
         for w in ids.windows(2) {
             assert_eq!(w[0], w[1]);
@@ -341,11 +443,11 @@ mod tests {
             Pattern::new(vec![StepToken(1), StepToken(2), StepToken(3)], 25, (0, 1)),
             Pattern::new(vec![StepToken(4), StepToken(5)], 22, (0, 0)),
         ];
-        let p = compose_proposals(&patterns, &s);
+        let p = compose_proposals(&patterns, &s, |_| None);
         assert!(!p.is_empty());
         // Every proposal must carry sufficient evidence (compose skips F2).
         for prop in &p {
-            assert!(prop.evidence_n >= PROPOSAL_F2_THRESHOLD);
+            assert!(prop.evidence_n() >= PROPOSAL_F2_THRESHOLD);
         }
     }
 
@@ -365,7 +467,7 @@ mod tests {
     fn adversarial_negative_lift_accepted() {
         let s = snap(50, Some(-0.3), Some(0.05));
         let p = build_proposal(sample_variant(), &s, None).expect("ok");
-        assert!(p.evidence_lift < 0.0);
+        assert!(p.evidence_lift() < 0.0);
     }
 
     #[test]
@@ -373,7 +475,7 @@ mod tests {
     fn boundary_none_diversity_cluster_preserved() {
         let s = snap(30, Some(0.5), Some(0.05));
         let p = build_proposal(sample_variant(), &s, None).expect("ok");
-        assert_eq!(p.diversity_cluster, None);
+        assert_eq!(p.diversity_cluster(), None);
     }
 
     #[test]
@@ -381,7 +483,7 @@ mod tests {
     fn boundary_large_diversity_cluster_preserved() {
         let s = snap(30, Some(0.5), Some(0.05));
         let p = build_proposal(sample_variant(), &s, Some(usize::MAX)).expect("ok");
-        assert_eq!(p.diversity_cluster, Some(usize::MAX));
+        assert_eq!(p.diversity_cluster(), Some(usize::MAX));
     }
 
     #[test]
@@ -398,7 +500,7 @@ mod tests {
     // returns empty for empty input without allocating beyond hint.
     fn resource_accounting_empty_input_returns_empty() {
         let s = snap(30, Some(0.5), Some(0.05));
-        let p = compose_proposals(&[], &s);
+        let p = compose_proposals(&[], &s, |_| None);
         assert!(p.is_empty());
     }
 
@@ -419,12 +521,12 @@ mod tests {
     fn determinism_compose_proposals_output_stable() {
         let s = snap(30, Some(0.5), Some(0.05));
         let patterns = vec![Pattern::new(vec![StepToken(1), StepToken(2)], 25, (0, 0))];
-        let a = compose_proposals(&patterns, &s);
-        let b = compose_proposals(&patterns, &s);
+        let a = compose_proposals(&patterns, &s, |_| None);
+        let b = compose_proposals(&patterns, &s, |_| None);
         assert_eq!(a.len(), b.len());
         for (pa, pb) in a.iter().zip(b.iter()) {
-            assert_eq!(pa.proposal_id, pb.proposal_id);
-            assert_eq!(pa.variant.variant_id, pb.variant.variant_id);
+            assert_eq!(pa.proposal_id(), pb.proposal_id());
+            assert_eq!(pa.variant().variant_id, pb.variant().variant_id);
         }
     }
 
@@ -486,7 +588,7 @@ mod tests {
     fn boundary_n_one_above_threshold_accepted() {
         let s = snap(PROPOSAL_F2_THRESHOLD + 1, Some(0.5), Some(0.05));
         let p = build_proposal(sample_variant(), &s, None).expect("ok");
-        assert_eq!(p.evidence_n, PROPOSAL_F2_THRESHOLD + 1);
+        assert_eq!(p.evidence_n(), PROPOSAL_F2_THRESHOLD + 1);
     }
 
     #[test]
@@ -495,7 +597,7 @@ mod tests {
     fn boundary_max_usize_n_threaded_through() {
         let s = snap(usize::MAX, Some(0.5), Some(0.05));
         let p = build_proposal(sample_variant(), &s, None).expect("ok");
-        assert_eq!(p.evidence_n, usize::MAX);
+        assert_eq!(p.evidence_n(), usize::MAX);
     }
 
     #[test]
@@ -504,8 +606,8 @@ mod tests {
     fn field_fidelity_lift_and_ci_copied_verbatim() {
         let s = snap(30, Some(0.123_456_789), Some(0.009_876_543));
         let p = build_proposal(sample_variant(), &s, None).expect("ok");
-        assert!((p.evidence_lift - 0.123_456_789).abs() < 1e-15);
-        assert!((p.evidence_ci_half - 0.009_876_543).abs() < 1e-15);
+        assert!((p.evidence_lift() - 0.123_456_789).abs() < 1e-15);
+        assert!((p.evidence_ci_half() - 0.009_876_543).abs() < 1e-15);
     }
 
     #[test]
@@ -514,8 +616,8 @@ mod tests {
     fn determinism_proposal_id_changes_with_n() {
         let s_a = snap(30, Some(0.5), Some(0.05));
         let s_b = snap(31, Some(0.5), Some(0.05));
-        let id_a = build_proposal(sample_variant(), &s_a, None).expect("a").proposal_id;
-        let id_b = build_proposal(sample_variant(), &s_b, None).expect("b").proposal_id;
+        let id_a = build_proposal(sample_variant(), &s_a, None).expect("a").proposal_id();
+        let id_b = build_proposal(sample_variant(), &s_b, None).expect("b").proposal_id();
         assert_ne!(id_a, id_b, "proposal_id must fold n into its hash");
     }
 
@@ -527,8 +629,8 @@ mod tests {
         let pattern = Pattern::new(vec![StepToken(1), StepToken(2), StepToken(3)], 25, (0, 0));
         let variants = build_variants(&pattern).expect("v");
         assert!(variants.len() >= 2);
-        let id0 = build_proposal(variants[0].clone(), &s, None).expect("0").proposal_id;
-        let id1 = build_proposal(variants[1].clone(), &s, None).expect("1").proposal_id;
+        let id0 = build_proposal(variants[0].clone(), &s, None).expect("0").proposal_id();
+        let id1 = build_proposal(variants[1].clone(), &s, None).expect("1").proposal_id();
         assert_ne!(id0, id1, "distinct variants must yield distinct proposal_ids");
     }
 
@@ -541,8 +643,8 @@ mod tests {
         let v_id = v.variant_id;
         let v_steps = v.steps.clone();
         let p = build_proposal(v, &s, None).expect("ok");
-        assert_eq!(p.variant.variant_id, v_id);
-        assert_eq!(p.variant.steps, v_steps);
+        assert_eq!(p.variant().variant_id, v_id);
+        assert_eq!(p.variant().steps, v_steps);
     }
 
     #[test]
@@ -552,20 +654,64 @@ mod tests {
     fn compose_first_proposal_per_pattern_is_identity() {
         let s = snap(30, Some(0.5), Some(0.05));
         let patterns = vec![Pattern::new(vec![StepToken(9), StepToken(8)], 25, (0, 0))];
-        let out = compose_proposals(&patterns, &s);
+        let out = compose_proposals(&patterns, &s, |_| None);
         assert!(!out.is_empty());
-        assert!(matches!(out[0].variant.mutation, MutationKind::Identity));
+        assert!(matches!(out[0].variant().mutation, MutationKind::Identity));
     }
 
     #[test]
-    // rationale: compose_proposals — diversity_cluster is always None on the
-    // batched path (compose_proposals calls build_proposal with None).
-    fn compose_proposals_diversity_cluster_always_none() {
+    // rationale: CC-4 wiring — compose_proposals threads the caller-supplied
+    // m22 diversity cluster into every proposal on the batched path. This
+    // replaces the former `compose_proposals_diversity_cluster_always_none`
+    // test, which PINNED the CC-4 wiring gap (hard-coded `None`) as expected
+    // behaviour. The closure here assigns a distinct cluster per variant
+    // (keyed off the variant's mutation kind) and the proposals MUST carry
+    // exactly those clusters.
+    fn compose_proposals_threads_diversity_cluster() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        // Multi-step pattern so m21 emits the full Identity/Swap/Skip set.
+        let patterns =
+            vec![Pattern::new(vec![StepToken(1), StepToken(2), StepToken(3)], 25, (0, 0))];
+        // Cluster assignment by mutation kind: Identity → 0, Swap → 1,
+        // Skip → 2. Mirrors how m22 K-means would partition the variants.
+        let cluster_of = |v: &WorkflowVariant| -> Option<usize> {
+            Some(match v.mutation {
+                MutationKind::Identity => 0,
+                MutationKind::Swap { .. } => 1,
+                MutationKind::Skip { .. } => 2,
+            })
+        };
+        let out = compose_proposals(&patterns, &s, cluster_of);
+        assert!(!out.is_empty());
+        // Every proposal carries the cluster the closure assigned to its
+        // source variant — proof the m22 signal reaches the batch path.
+        for p in &out {
+            let expected = match p.variant().mutation {
+                MutationKind::Identity => Some(0),
+                MutationKind::Swap { .. } => Some(1),
+                MutationKind::Skip { .. } => Some(2),
+            };
+            assert_eq!(
+                p.diversity_cluster(),
+                expected,
+                "compose_proposals must thread the closure's cluster verbatim"
+            );
+        }
+        // The Identity variant is always emitted, so cluster 0 must appear.
+        assert!(out.iter().any(|p| p.diversity_cluster() == Some(0)));
+    }
+
+    #[test]
+    // rationale: compose_proposals — passing the `|_| None` closure (the
+    // legitimate "m22 clustering skipped" case) yields proposals whose
+    // diversity_cluster is None. Complements
+    // `compose_proposals_threads_diversity_cluster`.
+    fn compose_proposals_none_closure_yields_none_clusters() {
         let s = snap(30, Some(0.5), Some(0.05));
         let patterns = vec![Pattern::new(vec![StepToken(1), StepToken(2)], 25, (0, 0))];
-        let out = compose_proposals(&patterns, &s);
+        let out = compose_proposals(&patterns, &s, |_| None);
         assert!(!out.is_empty());
-        assert!(out.iter().all(|p| p.diversity_cluster.is_none()));
+        assert!(out.iter().all(|p| p.diversity_cluster().is_none()));
     }
 
     #[test]
@@ -575,7 +721,7 @@ mod tests {
         let s = snap(30, Some(0.5), Some(0.05));
         let pattern = Pattern::new(vec![StepToken(1), StepToken(2), StepToken(3)], 25, (0, 0));
         let n_variants = build_variants(&pattern).expect("v").len();
-        let out = compose_proposals(&[pattern], &s);
+        let out = compose_proposals(&[pattern], &s, |_| None);
         assert_eq!(out.len(), n_variants);
     }
 
@@ -589,7 +735,7 @@ mod tests {
             Pattern::new(vec![StepToken(3), StepToken(4)], 22, (0, 0)),
             Pattern::new(vec![StepToken(5), StepToken(6)], 30, (0, 0)),
         ];
-        assert!(compose_proposals(&patterns, &s).is_empty());
+        assert!(compose_proposals(&patterns, &s, |_| None).is_empty());
     }
 
     #[test]
@@ -598,7 +744,7 @@ mod tests {
     fn compose_drops_batch_when_lift_none() {
         let s = snap(40, None, Some(0.05));
         let patterns = vec![Pattern::new(vec![StepToken(1), StepToken(2)], 25, (0, 0))];
-        assert!(compose_proposals(&patterns, &s).is_empty());
+        assert!(compose_proposals(&patterns, &s, |_| None).is_empty());
     }
 
     #[test]
@@ -606,7 +752,7 @@ mod tests {
     fn compose_drops_batch_when_ci_none() {
         let s = snap(40, Some(0.5), None);
         let patterns = vec![Pattern::new(vec![StepToken(1), StepToken(2)], 25, (0, 0))];
-        assert!(compose_proposals(&patterns, &s).is_empty());
+        assert!(compose_proposals(&patterns, &s, |_| None).is_empty());
     }
 
     #[test]
@@ -619,12 +765,12 @@ mod tests {
             Pattern::new(vec![StepToken(1), StepToken(2)], 25, (0, 0)),
             Pattern::new(vec![StepToken(3), StepToken(4)], 22, (0, 0)),
         ];
-        let out = compose_proposals(&patterns, &s);
+        let out = compose_proposals(&patterns, &s, |_| None);
         assert!(out.len() >= 2);
         for p in &out {
-            assert_eq!(p.evidence_n, 42);
-            assert!((p.evidence_lift - 0.66).abs() < 1e-12);
-            assert!((p.evidence_ci_half - 0.044).abs() < 1e-12);
+            assert_eq!(p.evidence_n(), 42);
+            assert!((p.evidence_lift() - 0.66).abs() < 1e-12);
+            assert!((p.evidence_ci_half() - 0.044).abs() < 1e-12);
         }
     }
 
@@ -634,8 +780,8 @@ mod tests {
     fn compose_proposal_ids_unique_within_batch() {
         let s = snap(30, Some(0.5), Some(0.05));
         let pattern = Pattern::new(vec![StepToken(1), StepToken(2), StepToken(3)], 25, (0, 0));
-        let out = compose_proposals(&[pattern], &s);
-        let mut ids: Vec<u64> = out.iter().map(|p| p.proposal_id).collect();
+        let out = compose_proposals(&[pattern], &s, |_| None);
+        let mut ids: Vec<u64> = out.iter().map(super::WorkflowProposal::proposal_id).collect();
         let len_before = ids.len();
         ids.sort_unstable();
         ids.dedup();
@@ -648,7 +794,7 @@ mod tests {
     fn adversarial_large_lift_passes_through() {
         let s = snap(30, Some(1e9), Some(0.05));
         let p = build_proposal(sample_variant(), &s, None).expect("ok");
-        assert!((p.evidence_lift - 1e9).abs() < 1.0);
+        assert!((p.evidence_lift() - 1e9).abs() < 1.0);
     }
 
     #[test]
@@ -657,7 +803,7 @@ mod tests {
     fn adversarial_zero_ci_half_accepted() {
         let s = snap(30, Some(0.5), Some(0.0));
         let p = build_proposal(sample_variant(), &s, None).expect("ok");
-        assert!((p.evidence_ci_half - 0.0).abs() < 1e-15);
+        assert!((p.evidence_ci_half() - 0.0).abs() < 1e-15);
     }
 
     #[test]
@@ -717,7 +863,7 @@ mod tests {
         let p = build_proposal(sample_variant(), &s, Some(7)).expect("ok");
         let back: super::WorkflowProposal =
             serde_json::from_str(&serde_json::to_string(&p).expect("ser")).expect("de");
-        assert_eq!(back.diversity_cluster, Some(7));
+        assert_eq!(back.diversity_cluster(), Some(7));
         assert_eq!(back, p);
     }
 
@@ -737,9 +883,9 @@ mod tests {
     fn compose_single_step_pattern_yields_one_proposal() {
         let s = snap(30, Some(0.5), Some(0.05));
         let pattern = Pattern::new(vec![StepToken(42)], 25, (0, 0));
-        let out = compose_proposals(&[pattern], &s);
+        let out = compose_proposals(&[pattern], &s, |_| None);
         assert_eq!(out.len(), 1);
-        assert!(matches!(out[0].variant.mutation, MutationKind::Identity));
+        assert!(matches!(out[0].variant().mutation, MutationKind::Identity));
     }
 
     #[test]
@@ -749,12 +895,12 @@ mod tests {
         let s = snap(30, Some(0.5), Some(0.05));
         let pat_a = Pattern::new(vec![StepToken(100)], 25, (0, 0));
         let pat_b = Pattern::new(vec![StepToken(200)], 25, (0, 0));
-        let hash_a = pat_a.canonical_hash;
-        let hash_b = pat_b.canonical_hash;
-        let out = compose_proposals(&[pat_a, pat_b], &s);
+        let hash_a = pat_a.canonical_hash();
+        let hash_b = pat_b.canonical_hash();
+        let out = compose_proposals(&[pat_a, pat_b], &s, |_| None);
         assert_eq!(out.len(), 2);
-        assert_eq!(out[0].variant.source_pattern_hash, hash_a);
-        assert_eq!(out[1].variant.source_pattern_hash, hash_b);
+        assert_eq!(out[0].variant().source_pattern_hash, hash_a);
+        assert_eq!(out[1].variant().source_pattern_hash, hash_b);
     }
 
     #[test]
@@ -763,8 +909,8 @@ mod tests {
     fn determinism_proposal_id_stable_under_variant_clone() {
         let s = snap(30, Some(0.5), Some(0.05));
         let v = sample_variant();
-        let id_orig = build_proposal(v.clone(), &s, None).expect("orig").proposal_id;
-        let id_clone = build_proposal(v, &s, None).expect("clone").proposal_id;
+        let id_orig = build_proposal(v.clone(), &s, None).expect("orig").proposal_id();
+        let id_clone = build_proposal(v, &s, None).expect("clone").proposal_id();
         assert_eq!(id_orig, id_clone);
     }
 }

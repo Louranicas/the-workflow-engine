@@ -48,13 +48,13 @@ fn mined_pattern() -> Pattern {
     let patterns = mine_sequences(
         &seqs,
         MinSupport::new(2).expect("min_support >= floor"),
-        MaxGap(5),
+        MaxGap::new(5),
         8,
     )
     .expect("mine ok");
     patterns
         .into_iter()
-        .find(|p| p.steps.len() >= 2)
+        .find(|p| p.steps().len() >= 2)
         .expect("at least one multi-step mined pattern")
 }
 
@@ -136,7 +136,7 @@ fn m21_single_step_pattern_yields_identity_only() {
         MutationKind::Identity,
         "the sole variant must be the identity"
     );
-    assert_eq!(v[0].steps, p.steps, "identity variant preserves the steps");
+    assert_eq!(v[0].steps, p.steps(), "identity variant preserves the steps");
 }
 
 // rationale: Adversarial input — an empty `Pattern` (zero steps) MUST be
@@ -175,7 +175,7 @@ fn m21_distinct_patterns_yield_distinct_variant_provenance() {
     // provenance — the m20→m21 link is intact.
     for var in &mined_variants {
         assert_eq!(
-            var.source_pattern_hash, mined.canonical_hash,
+            var.source_pattern_hash, mined.canonical_hash(),
             "variant provenance must equal the source Pattern canonical_hash"
         );
     }

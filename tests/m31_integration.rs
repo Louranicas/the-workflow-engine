@@ -253,7 +253,10 @@ fn m31_excludes_prune_pending_workflows_when_caller_filters() {
     bank.apply_decay(id_pending, 0.08);
     // active() with the soft threshold filters PrunePending rows out.
     let active = bank.active(1, DEFAULT_PRUNE_PENDING_THRESHOLD);
-    let active_ids: Vec<u64> = active.iter().map(|w| w.workflow_id).collect();
+    let active_ids: Vec<u64> = active
+        .iter()
+        .map(workflow_core::AcceptedWorkflow::workflow_id)
+        .collect();
     assert!(
         active_ids.contains(&id_active),
         "the healthy workflow must remain in the active slice"
@@ -329,7 +332,7 @@ fn m31_diversity_enforcement_prevents_monoculture_top_k() {
         &active,
         &SelectorConfig::default(),
         |w| {
-            if w.workflow_id == id_repeat {
+            if w.workflow_id() == id_repeat {
                 0.0
             } else {
                 1.0

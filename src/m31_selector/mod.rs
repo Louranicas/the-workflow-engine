@@ -161,18 +161,23 @@ pub fn select_top_k(
     if k == 0 || workflows.is_empty() {
         return Ok(Vec::new());
     }
+    // rationale: `workflows` is non-empty here — the `is_empty()` early
+    // return above guarantees it — so `max()` is always `Some` and the
+    // `unwrap_or(0)` fallback is unreachable. The `.max(1)` floor then
+    // guards the legitimate all-zero-`run_count` case: `max_run_count` is
+    // a normalisation denominator below and must never be 0.
     let max_run_count = workflows
         .iter()
-        .map(|w| w.run_count)
+        .map(AcceptedWorkflow::run_count)
         .max()
         .unwrap_or(0)
         .max(1);
     let max_run_count_f = f64::from(max_run_count);
     let mut scored: Vec<ScoredCandidate> = Vec::with_capacity(workflows.len());
     for w in workflows {
-        let fitness = sanitise(w.weight);
-        let recency = recency_factor(w.last_run_ms, now_ms);
-        let frequency = f64::from(w.run_count) / max_run_count_f;
+        let fitness = sanitise(w.weight());
+        let recency = recency_factor(w.last_run_ms(), now_ms);
+        let frequency = f64::from(w.run_count()) / max_run_count_f;
         let diversity = sanitise(diversity_score(w));
         let score = config.alpha.mul_add(
             fitness,
@@ -187,7 +192,7 @@ pub fn select_top_k(
         // exactly).
         let score = score.clamp(0.0, 1.0);
         scored.push(ScoredCandidate {
-            workflow_id: w.workflow_id,
+            workflow_id: w.workflow_id(),
             score,
             components: ScoreComponents {
                 fitness,
@@ -283,15 +288,7 @@ mod tests {
             computed_at: SystemTime::now(),
         };
         let proposal = build_proposal(v, &s, None).expect("p");
-        AcceptedWorkflow {
-            workflow_id: id,
-            proposal,
-            accepted_at_ms: 0,
-            sunset_at_ms: i64::MAX,
-            weight,
-            last_run_ms,
-            run_count,
-        }
+        AcceptedWorkflow::for_test(id, proposal, 0, i64::MAX, weight, last_run_ms, run_count)
     }
 
     // --- Pre-existing tests preserved verbatim ---
@@ -496,7 +493,7 @@ mod tests {
                 )
             })
             .collect();
-        let r = select_top_k(&workflows, &cfg, |w| f64::from(w.run_count) / 50.0, 100_000, 50)
+        let r = select_top_k(&workflows, &cfg, |w| f64::from(w.run_count()) / 50.0, 100_000, 50)
             .expect("ok");
         for c in &r {
             assert!(c.score >= 0.0 && c.score <= 1.0, "score out of [0,1]: {}", c.score);
@@ -525,7 +522,7 @@ mod tests {
         let cfg = SelectorConfig::default();
         let a = workflow(1, 0.5, 5, Some(0));
         let b = workflow(2, 0.5, 5, Some(0));
-        let r = select_top_k(&[a, b], &cfg, |w| if w.workflow_id == 1 { 0.0 } else { 1.0 }, 0, 2)
+        let r = select_top_k(&[a, b], &cfg, |w| if w.workflow_id() == 1 { 0.0 } else { 1.0 }, 0, 2)
             .expect("ok");
         assert_eq!(r[0].workflow_id, 2);
         assert_eq!(r[1].workflow_id, 1);
@@ -842,7 +839,7 @@ mod tests {
         let r = select_top_k(
             &[a, b],
             &cfg,
-            |w| if w.workflow_id == 2 { 1.0 } else { 0.2 },
+            |w| if w.workflow_id() == 2 { 1.0 } else { 0.2 },
             0,
             2,
         )
@@ -964,7 +961,7 @@ mod tests {
                 )
             })
             .collect();
-        let r = select_top_k(&ws, &cfg, |w| f64::from(w.run_count) / 15.0, 50_000_000, 15)
+        let r = select_top_k(&ws, &cfg, |w| f64::from(w.run_count()) / 15.0, 50_000_000, 15)
             .expect("ok");
         for c in &r {
             let recomposed = cfg.alpha * c.components.fitness

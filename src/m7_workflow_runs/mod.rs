@@ -16,7 +16,8 @@ use rusqlite::{params, Connection};
 pub use error::WorkflowError;
 
 /// Outcome of a completed workflow run (closed enum mirrors DB CHECK).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Outcome {
     /// Workflow completed successfully.
     Ok,
@@ -53,6 +54,59 @@ impl Outcome {
             "unknown" => Ok(Self::Unknown),
             other => Err(WorkflowError::InvalidOutcome(other.to_owned())),
         }
+    }
+}
+
+/// Lifecycle state of a workflow run. Replaces the previously-coupled
+/// `ended_at` + `outcome` optionals: an open run has neither, a closed
+/// run has both, and the illegal `(Some, None)` / `(None, Some)` mixed
+/// states are now unrepresentable.
+///
+/// Closed 2-state lifecycle — deliberately NOT `#[non_exhaustive]`
+/// (mirrors the closed-enum style of `EscapeSurfaceProfile` in m32).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunState {
+    /// Run in progress — no end time, no outcome yet.
+    Open,
+    /// Run finished.
+    Closed {
+        /// RFC3339 end timestamp.
+        ended_at: String,
+        /// Typed terminal outcome.
+        outcome: Outcome,
+    },
+}
+
+impl RunState {
+    /// End timestamp as the old optional shape — `None` while open.
+    ///
+    /// Lets read-only call sites that previously inspected
+    /// `WorkflowRunRow::ended_at` stay short.
+    #[must_use]
+    pub fn ended_at(&self) -> Option<&str> {
+        match self {
+            Self::Open => None,
+            Self::Closed { ended_at, .. } => Some(ended_at.as_str()),
+        }
+    }
+
+    /// Terminal outcome as the old optional shape — `None` while open.
+    ///
+    /// Lets read-only call sites that previously inspected
+    /// `WorkflowRunRow::outcome` stay short.
+    #[must_use]
+    pub fn outcome(&self) -> Option<Outcome> {
+        match self {
+            Self::Open => None,
+            Self::Closed { outcome, .. } => Some(*outcome),
+        }
+    }
+
+    /// `true` once the run has finished (i.e. [`RunState::Closed`]).
+    #[must_use]
+    pub const fn is_closed(&self) -> bool {
+        matches!(self, Self::Closed { .. })
     }
 }
 
@@ -135,10 +189,10 @@ pub struct WorkflowRunRow {
     pub id: i64,
     /// Started at (RFC3339 string).
     pub started_at: String,
-    /// Ended at; `None` while the run is open.
-    pub ended_at: Option<String>,
-    /// Outcome wire-form; `None` while the run is open.
-    pub outcome: Option<String>,
+    /// Lifecycle state — `Open` while running, `Closed { ended_at, outcome }`
+    /// once finished. Replaces the previously-coupled `ended_at` + `outcome`
+    /// optionals so the illegal mixed states are unrepresentable.
+    pub run_state: RunState,
     /// JSONB blob: stable CC-1 join surface.
     pub consumer_inputs: String,
     /// Token cost; `None` until m6 records.
@@ -292,11 +346,30 @@ pub fn close_run(
 }
 
 fn parse_row(row: &rusqlite::Row<'_>) -> Result<WorkflowRunRow, WorkflowError> {
+    let id: i64 = row.get(0)?;
+    let ended_at: Option<String> = row.get(2)?;
+    let outcome: Option<String> = row.get(3)?;
+    // The lifecycle is coupled: both NULL → Open, both present → Closed.
+    // A mismatched pair is DB corruption — surface a typed error rather
+    // than panicking or silently coercing.
+    let run_state = match (ended_at, outcome) {
+        (None, None) => RunState::Open,
+        (Some(ended_at), Some(outcome)) => RunState::Closed {
+            ended_at,
+            outcome: Outcome::parse(&outcome)?,
+        },
+        (ended_at, outcome) => {
+            return Err(WorkflowError::InconsistentRunState {
+                id,
+                ended_at_present: ended_at.is_some(),
+                outcome_present: outcome.is_some(),
+            });
+        }
+    };
     Ok(WorkflowRunRow {
-        id: row.get(0)?,
+        id,
         started_at: row.get(1)?,
-        ended_at: row.get(2)?,
-        outcome: row.get(3)?,
+        run_state,
         consumer_inputs: row.get(4)?,
         cost_tokens: row.get(5)?,
         fitness_dimension: row.get(6)?,
@@ -364,7 +437,7 @@ pub fn find_by_id(conn: &Connection, id: i64) -> Result<WorkflowRunRow, Workflow
 mod tests {
     use super::{
         close_run, find_by_id, find_by_outcome, find_open, insert_run, merge_observation,
-        open_memory, update_cost_tokens, ClusterBObservation, Outcome, StepOutcome,
+        open_memory, update_cost_tokens, ClusterBObservation, Outcome, RunState, StepOutcome,
         WorkflowError,
     };
 
@@ -469,8 +542,8 @@ mod tests {
         let id = insert_run(&conn, "2026-05-17T00:00:00Z").expect("insert");
         close_run(&conn, id, "2026-05-17T01:00:00Z", "ok").expect("close");
         let row = find_by_id(&conn, id).expect("find");
-        assert_eq!(row.outcome.as_deref(), Some("ok"));
-        assert!(row.ended_at.is_some());
+        assert_eq!(row.run_state.outcome(), Some(Outcome::Ok));
+        assert!(row.run_state.ended_at().is_some());
     }
 
     #[test]
@@ -623,8 +696,15 @@ mod tests {
         .expect("merge");
         update_cost_tokens(&conn, id, 500).expect("cost");
         let row = find_by_id(&conn, id).expect("find");
-        assert!(row.ended_at.is_none(), "F9: ended_at must stay None");
-        assert!(row.outcome.is_none(), "F9: outcome must stay None");
+        assert!(
+            row.run_state.ended_at().is_none(),
+            "F9: ended_at must stay None"
+        );
+        assert!(
+            row.run_state.outcome().is_none(),
+            "F9: outcome must stay None"
+        );
+        assert_eq!(row.run_state, RunState::Open);
         assert_eq!(row.cost_tokens, Some(500));
     }
 
@@ -721,7 +801,7 @@ mod tests {
         let c: WorkflowRunRow = serde_json::from_str(&j).expect("de");
         assert_eq!(a.id, c.id);
         assert_eq!(a.cost_tokens, c.cost_tokens);
-        assert_eq!(a.outcome, c.outcome);
+        assert_eq!(a.run_state, c.run_state);
         assert!((a.fitness_dimension - c.fitness_dimension).abs() < f64::EPSILON);
     }
 
@@ -755,8 +835,8 @@ mod tests {
         close_run(&conn, id, "2026-05-17T01:00:00Z", "ok").expect("close 1");
         close_run(&conn, id, "2026-05-17T02:00:00Z", "fail").expect("close 2");
         let row = find_by_id(&conn, id).expect("find");
-        assert_eq!(row.outcome.as_deref(), Some("fail"));
-        assert_eq!(row.ended_at.as_deref(), Some("2026-05-17T02:00:00Z"));
+        assert_eq!(row.run_state.outcome(), Some(Outcome::Fail));
+        assert_eq!(row.run_state.ended_at(), Some("2026-05-17T02:00:00Z"));
     }
 
     // rationale: Anti-property / contract regression — close_run with
@@ -769,8 +849,15 @@ mod tests {
         let id = insert_run(&conn, "2026-05-17T00:00:00Z").expect("ins");
         close_run(&conn, id, "", "ok").expect("close");
         let row = find_by_id(&conn, id).expect("find");
-        assert_eq!(row.ended_at.as_deref(), Some(""));
-        assert_eq!(row.outcome.as_deref(), Some("ok"));
+        assert_eq!(row.run_state.ended_at(), Some(""));
+        assert_eq!(row.run_state.outcome(), Some(Outcome::Ok));
+        assert_eq!(
+            row.run_state,
+            RunState::Closed {
+                ended_at: String::new(),
+                outcome: Outcome::Ok,
+            }
+        );
     }
 
     // ====================================================================
@@ -935,6 +1022,71 @@ mod tests {
         assert!(res.is_err(), "SQL CHECK must reject out-of-set outcome");
     }
 
+    // rationale: Adversarial input / corruption detection — a row with
+    // `ended_at` present but `outcome` NULL is an illegal mixed lifecycle
+    // state. parse_row MUST surface a typed InconsistentRunState error
+    // rather than panic or silently coerce. The SQL CHECK permits NULL
+    // outcome, so this corrupt shape is reachable via a raw UPDATE.
+    #[test]
+    fn parse_row_rejects_ended_at_present_outcome_null_as_inconsistent() {
+        let conn = mem();
+        let id = insert_run(&conn, "2026-05-17T00:00:00Z").expect("ins");
+        conn.execute(
+            "UPDATE workflow_runs SET ended_at = ?1 WHERE id = ?2",
+            rsq_params!["2026-05-17T01:00:00Z", id],
+        )
+        .expect("manual corrupt");
+        let err = find_by_id(&conn, id).unwrap_err();
+        assert!(matches!(
+            err,
+            WorkflowError::InconsistentRunState {
+                id: corrupt_id,
+                ended_at_present: true,
+                outcome_present: false,
+            } if corrupt_id == id
+        ));
+    }
+
+    // rationale: Adversarial input / corruption detection — the mirror
+    // case: `outcome` present but `ended_at` NULL is equally illegal and
+    // must surface InconsistentRunState.
+    #[test]
+    fn parse_row_rejects_outcome_present_ended_at_null_as_inconsistent() {
+        let conn = mem();
+        let id = insert_run(&conn, "2026-05-17T00:00:00Z").expect("ins");
+        conn.execute(
+            "UPDATE workflow_runs SET outcome = ?1 WHERE id = ?2",
+            rsq_params!["ok", id],
+        )
+        .expect("manual corrupt");
+        let err = find_by_id(&conn, id).unwrap_err();
+        assert!(matches!(
+            err,
+            WorkflowError::InconsistentRunState {
+                ended_at_present: false,
+                outcome_present: true,
+                ..
+            }
+        ));
+    }
+
+    // rationale: Type-design invariant — RunState::ended_at() / outcome()
+    // helpers return the old optional shape; Open → None on both, Closed
+    // → Some on both. The coupled-optional invariant is now structural.
+    #[test]
+    fn run_state_helpers_return_old_optional_shape() {
+        assert_eq!(RunState::Open.ended_at(), None);
+        assert_eq!(RunState::Open.outcome(), None);
+        assert!(!RunState::Open.is_closed());
+        let closed = RunState::Closed {
+            ended_at: "2026-05-17T01:00:00Z".into(),
+            outcome: Outcome::Fail,
+        };
+        assert_eq!(closed.ended_at(), Some("2026-05-17T01:00:00Z"));
+        assert_eq!(closed.outcome(), Some(Outcome::Fail));
+        assert!(closed.is_closed());
+    }
+
     // rationale: Core correctness — the SQL CHECK constraint explicitly
     // permits NULL outcome (`outcome IS NULL OR outcome IN (...)`); a run
     // can be left open indefinitely.
@@ -943,7 +1095,11 @@ mod tests {
         let conn = mem();
         let id = insert_run(&conn, "2026-05-17T00:00:00Z").expect("ins");
         let row = find_by_id(&conn, id).expect("find");
-        assert!(row.outcome.is_none(), "open run outcome is NULL — allowed");
+        assert!(
+            row.run_state.outcome().is_none(),
+            "open run outcome is NULL — allowed"
+        );
+        assert_eq!(row.run_state, RunState::Open);
     }
 
     // rationale: Core correctness — find_by_outcome orders completed runs
@@ -981,8 +1137,8 @@ mod tests {
         let row = find_by_id(&conn, id).expect("find");
         assert_eq!(row.id, id);
         assert_eq!(row.started_at, "2026-05-17T08:15:30Z");
-        assert_eq!(row.ended_at.as_deref(), Some("2026-05-17T09:00:00Z"));
-        assert_eq!(row.outcome.as_deref(), Some("abort"));
+        assert_eq!(row.run_state.ended_at(), Some("2026-05-17T09:00:00Z"));
+        assert_eq!(row.run_state.outcome(), Some(Outcome::Abort));
         assert_eq!(row.cost_tokens, Some(4096));
         assert!(row.consumer_inputs.contains("cascade_cluster_full"));
         assert!(row.fitness_dimension.abs() < f64::EPSILON);

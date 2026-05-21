@@ -23,8 +23,29 @@ use super::enums::{parse_chain_type, parse_consent, ChainType, ConsentLevel};
 use super::error::InjectionDbError;
 
 /// Primary-key newtype for `causal_chain.id`.
+///
+/// The inner value is **private**: the newtype's opacity is enforced by
+/// the type system. Construct via [`ChainId::new`] and read via
+/// [`ChainId::get`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ChainId(pub i64);
+pub struct ChainId(i64);
+
+impl ChainId {
+    /// Construct a `ChainId` from a `causal_chain.id` primary key.
+    ///
+    /// The value is stored verbatim; `causal_chain.id` is
+    /// `INTEGER PRIMARY KEY AUTOINCREMENT`, so no invariant is enforced.
+    #[must_use]
+    pub const fn new(value: i64) -> Self {
+        Self(value)
+    }
+
+    /// Return the inner primary-key value.
+    #[must_use]
+    pub const fn get(self) -> i64 {
+        self.0
+    }
+}
 
 impl std::fmt::Display for ChainId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -186,7 +207,7 @@ pub fn parse_causal_chain_row(row: &Row<'_>) -> Result<CausalChainRow, Injection
             })?;
     let consent = parse_consent(&consent_str)?;
     Ok(CausalChainRow {
-        id: ChainId(id),
+        id: ChainId::new(id),
         origin_session,
         resolved_session,
         chain_type,
@@ -207,12 +228,12 @@ mod tests {
 
     #[test]
     fn chain_id_display_emits_integer() {
-        assert_eq!(format!("{}", ChainId(42)), "42");
+        assert_eq!(format!("{}", ChainId::new(42)), "42");
     }
 
     #[test]
     fn chain_id_implements_copy_eq_hash() {
-        let a = ChainId(1);
+        let a = ChainId::new(1);
         let b = a;
         let mut s = HashSet::new();
         s.insert(a);
@@ -239,7 +260,7 @@ mod tests {
     #[test]
     fn causal_chain_row_clone_preserves_all_fields() {
         let r = CausalChainRow {
-            id: ChainId(7),
+            id: ChainId::new(7),
             origin_session: 100,
             resolved_session: Some(110),
             chain_type: ChainType::Bug,

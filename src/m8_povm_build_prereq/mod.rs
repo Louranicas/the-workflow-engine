@@ -28,10 +28,15 @@
 //! POVM coupling ever be reintroduced; it is a `rustc-cfg` flag, never a
 //! Cargo `[features]` flag (F7 / AP-V7-09 defense).
 //!
-//! **Open architecture decision (node 0.A):** post-m42-pivot m8's POVM
-//! gate is dormant by construction. Whether to keep the machinery dormant,
-//! wire it if a POVM coupling returns, or retire m8 is a decision for the
-//! charter owner — it is NOT a hardening fix and is deliberately left open.
+//! **Architecture decision — RESOLVED (node 0.A, S1003733): KEEP-DORMANT.**
+//! Post-m42-pivot m8's POVM gate is dormant by construction. The decision
+//! is to retain the machinery as a dormant tripwire: the `build.rs`
+//! `rustc-cfg` path is ready, so if a POVM coupling is ever reintroduced
+//! the compile-time gate and band classification activate without new
+//! design work. Retiring m8 was rejected — it is structurally the floor of
+//! Cluster D's trust regime, the machinery is small and fully tested, and
+//! deleting it would discard the ready-made tripwire. Wiring it now would
+//! gate nothing (there are no POVM read sites). No further action required.
 
 pub mod cfg;
 pub mod error;

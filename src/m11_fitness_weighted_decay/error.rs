@@ -8,11 +8,9 @@
 //! - [`DecayError::PathwayReadFailed`]  = `E5004`
 //! - [`DecayError::CycleAborted`]       = `E5099`
 //!
-//! The spec § 4 also lists `M7ReadFailed` / `StcortexReadFailed` /
-//! `M14ReadFailed` variants that wrap `workflow_core::errors::WorkflowError`.
-//! For Day-1 the source modules (m7, m14, m42) don't exist yet; we use the
-//! generic [`DecayError::PathwayReadFailed`] / [`DecayError::CycleAborted`]
-//! variants and tighten when m7/m14/m42 land.
+//! Read failures from the source modules (m7, m14, m42) are surfaced through
+//! the generic [`DecayError::PathwayReadFailed`] variant; [`DecayError::CycleAborted`]
+//! covers an aborted decay cycle.
 
 use thiserror::Error;
 

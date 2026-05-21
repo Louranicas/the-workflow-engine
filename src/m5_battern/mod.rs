@@ -25,10 +25,25 @@ use crate::m4_cascade::{cluster_id::fnv1a_64, AtuinStep};
 pub const MIN_COMPLETE_STEPS: usize = 2;
 
 /// Opaque identifier for one Battern execution.
+///
+/// The inner string is **private**: opacity is enforced by the type
+/// system, not merely promised in a doc comment. Construct via
+/// [`BatternId::new`] (or [`derive_battern_id`]) and read via
+/// [`BatternId::as_str`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct BatternId(pub String);
+pub struct BatternId(String);
 
 impl BatternId {
+    /// Construct a `BatternId` wrapping an opaque identifier string.
+    ///
+    /// The value is stored verbatim; no invariant is enforced (the
+    /// opaque-hex shape is a convention of [`derive_battern_id`], not a
+    /// type-level guarantee).
+    #[must_use]
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
     /// Borrow the inner opaque string.
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -47,7 +62,7 @@ impl std::fmt::Display for BatternId {
 #[must_use]
 pub fn derive_battern_id(first_dispatch_ts_ns: i64) -> BatternId {
     let h = fnv1a_64(first_dispatch_ts_ns.to_string().as_bytes());
-    BatternId(format!("battern_{h:016x}"))
+    BatternId::new(format!("battern_{h:016x}"))
 }
 
 /// One observed step within a Battern execution.
@@ -261,7 +276,7 @@ impl BatternStepRecord {
     pub fn summarise(observations: &[BatternStepObservation]) -> BatternRecord {
         if observations.is_empty() {
             return BatternRecord {
-                battern_id: BatternId("battern_empty".into()),
+                battern_id: BatternId::new("battern_empty"),
                 total_steps: 0,
                 labelled_steps: 0,
                 failed_steps: 0,
@@ -455,7 +470,7 @@ mod tests {
 
     #[test]
     fn summarise_counts_labelled_steps() {
-        let bid = BatternId("battern_test".into());
+        let bid = BatternId::new("battern_test");
         let obs = vec![
             BatternStepObservation {
                 battern_id: bid.clone(),
@@ -749,8 +764,8 @@ mod tests {
     // the FIRST observation (documented behaviour, not validated).
     #[test]
     fn summarise_uses_first_observations_battern_id() {
-        let id_a = BatternId("battern_aaaa".into());
-        let id_b = BatternId("battern_bbbb".into());
+        let id_a = BatternId::new("battern_aaaa");
+        let id_b = BatternId::new("battern_bbbb");
         let obs = vec![
             BatternStepObservation {
                 battern_id: id_a.clone(),
@@ -781,7 +796,7 @@ mod tests {
     // any observation is partial, even if total_steps clears the floor.
     #[test]
     fn summarise_is_not_complete_when_any_observation_is_partial() {
-        let bid = BatternId("battern_partial".into());
+        let bid = BatternId::new("battern_partial");
         let obs = vec![
             BatternStepObservation {
                 battern_id: bid.clone(),
@@ -815,7 +830,7 @@ mod tests {
     #[test]
     fn summarise_single_step_is_not_complete_below_min_floor() {
         let obs = vec![BatternStepObservation {
-            battern_id: BatternId("battern_one".into()),
+            battern_id: BatternId::new("battern_one"),
             step_index: 0,
             step_label: Some(BatternStepLabel::Design),
             duration_ms: 5,
@@ -953,7 +968,7 @@ mod tests {
         let mut collisions = 0_usize;
         for i in 0..10_000_i64 {
             let id = derive_battern_id(1_700_000_000_000_000_000 + i * 13);
-            if !seen.insert(id.0) {
+            if !seen.insert(id.as_str().to_owned()) {
                 collisions += 1;
             }
         }

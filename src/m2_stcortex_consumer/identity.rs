@@ -168,12 +168,11 @@ pub struct ConsumerIdentity {
 /// "read `./.git/HEAD`" would silently yield the `unknown` fallback.
 /// A correct hand-rolled walk is ~100 LOC of fragile path logic for a
 /// LOW-severity cosmetic string — a poor trade. Instead we keep the
-/// subprocess but resolve `git` via these fixed absolute paths first,
-/// which removes the `$PATH`-hijack vector entirely on a standard
-/// Linux host. The bare `"git"` name is retained only as the last
-/// resort (non-standard install layout); that residual `$PATH` trust
-/// is documented and accepted because the output cannot escape the
-/// `ConsumerName` validator.
+/// subprocess but resolve `git` **exclusively** via these fixed
+/// absolute paths — no `$PATH` lookup ever occurs, which removes the
+/// `$PATH`-hijack vector entirely. On a non-standard host where `git`
+/// is at none of these paths, SHA resolution fails cleanly and the
+/// identity falls back to `workflow-trace-unknown`.
 const GIT_ABSOLUTE_PATHS: &[&str] = &["/usr/bin/git", "/bin/git", "/usr/local/bin/git"];
 
 impl ConsumerIdentity {
@@ -181,9 +180,9 @@ impl ConsumerIdentity {
     /// falls back to `"workflow-trace-unknown"` if `git` is absent or
     /// fails. The resulting name always starts with `workflow-trace-`.
     ///
-    /// The `git` executable is resolved via the fixed absolute paths in
-    /// [`GIT_ABSOLUTE_PATHS`] before falling back to a `$PATH` lookup —
-    /// see that constant's docs for the SEC3 `$PATH`-hijack rationale.
+    /// The `git` executable is resolved exclusively via the fixed absolute
+    /// paths in [`GIT_ABSOLUTE_PATHS`] (no `$PATH` lookup) — see that
+    /// constant's docs for the SEC3 `$PATH`-hijack rationale.
     #[must_use]
     pub fn from_git_sha(namespace: Namespace) -> Self {
         let sha = Self::resolve_git_short_sha().unwrap_or_else(|| "unknown".to_owned());
@@ -214,20 +213,16 @@ impl ConsumerIdentity {
     /// or `None` if `git` is unavailable / the command fails / the
     /// output is empty.
     ///
-    /// SEC3: `git` is resolved via the absolute paths in
-    /// [`GIT_ABSOLUTE_PATHS`] first; the bare `"git"` name is tried only
-    /// as a last resort. This eliminates the `$PATH`-hijack vector on a
-    /// standard host while keeping `git`'s own (correct) repository
-    /// discovery — `the-workflow-engine/` is a subdirectory of the
-    /// workspace repo, so `git` must walk up to find `.git`.
+    /// SEC3: `git` is resolved exclusively via the absolute paths in
+    /// [`GIT_ABSOLUTE_PATHS`] — no `$PATH` lookup. This eliminates the
+    /// `$PATH`-hijack vector entirely while keeping `git`'s own (correct)
+    /// repository discovery — `the-workflow-engine/` is a subdirectory of
+    /// the workspace repo, so `git` must walk up to find `.git`.
     fn resolve_git_short_sha() -> Option<String> {
-        // Try each fixed absolute path, then the bare name as a final
-        // fallback. The first program that both spawns AND exits 0 wins.
-        let candidates = GIT_ABSOLUTE_PATHS
-            .iter()
-            .copied()
-            .chain(std::iter::once("git"));
-        for program in candidates {
+        // Try each fixed absolute path. No `$PATH` lookup (SEC3): the bare
+        // `"git"` name is intentionally NOT tried. The first program that
+        // both spawns AND exits 0 wins.
+        for program in GIT_ABSOLUTE_PATHS.iter().copied() {
             let output = std::process::Command::new(program)
                 .args(["rev-parse", "--short", "HEAD"])
                 .output();

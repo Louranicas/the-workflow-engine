@@ -25,7 +25,7 @@
 
 use std::fmt::Write;
 
-use crate::m7_workflow_runs::WorkflowRunRow;
+use crate::m7_workflow_runs::{Outcome, WorkflowRunRow};
 
 /// CLI output format selector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -99,9 +99,9 @@ pub fn render_outcome_timeline(runs: &[WorkflowRunRow]) -> String {
     let _ = writeln!(out, "workflow-trace timeline (last {} runs)", runs.len());
     let _ = writeln!(out, "---------------------------------------");
     for r in runs {
-        let outcome = r.outcome.as_deref().unwrap_or("open");
+        let outcome = r.run_state.outcome().map_or("open", Outcome::as_str);
         let cost = r.cost_tokens.map_or("---".to_owned(), |c| format!("{c} tok"));
-        let ts = r.ended_at.as_deref().unwrap_or(&r.started_at);
+        let ts = r.run_state.ended_at().unwrap_or(&r.started_at);
         let _ = writeln!(out, "{ts:<22}  {outcome:<7}  {cost:>10}");
     }
     out
@@ -188,12 +188,12 @@ pub fn render_summary_line(runs: &[WorkflowRunRow]) -> String {
     let mut unknown = 0_usize;
     let mut open = 0_usize;
     for r in runs {
-        match r.outcome.as_deref() {
-            Some("ok") => ok += 1,
-            Some("fail") => fail += 1,
-            Some("abort") => abort += 1,
-            Some("unknown") => unknown += 1,
-            _ => open += 1,
+        match r.run_state.outcome() {
+            Some(Outcome::Ok) => ok += 1,
+            Some(Outcome::Fail) => fail += 1,
+            Some(Outcome::Abort) => abort += 1,
+            Some(Outcome::Unknown) => unknown += 1,
+            None => open += 1,
         }
     }
     let (median, _) = median_and_p95_cost(runs);
@@ -274,14 +274,20 @@ mod tests {
         render_cluster_cost_table, render_cost_histogram, render_machine,
         render_outcome_timeline, render_summary_line, OutputFormat,
     };
-    use crate::m7_workflow_runs::WorkflowRunRow;
+    use crate::m7_workflow_runs::{Outcome, RunState, WorkflowRunRow};
 
     fn run(id: i64, cost: Option<i64>, outcome: Option<&str>, consumer_inputs: &str) -> WorkflowRunRow {
+        let run_state = match outcome {
+            None => RunState::Open,
+            Some(o) => RunState::Closed {
+                ended_at: format!("2026-05-17T01:{:02}:00Z", id % 60),
+                outcome: Outcome::parse(o).expect("test outcome must be a valid CHECK value"),
+            },
+        };
         WorkflowRunRow {
             id,
             started_at: format!("2026-05-17T00:{:02}:00Z", id % 60),
-            ended_at: outcome.map(|_| format!("2026-05-17T01:{:02}:00Z", id % 60)),
-            outcome: outcome.map(str::to_owned),
+            run_state,
             consumer_inputs: consumer_inputs.to_owned(),
             cost_tokens: cost,
             fitness_dimension: 0.0,
@@ -883,15 +889,24 @@ mod tests {
         assert!(s.contains("open=1"), "None outcome counted as open: {s}");
     }
 
-    // rationale: Adversarial input — an unrecognised outcome string
-    // (future m7 variant) collapses to the `open` bucket via the `_`
-    // match arm; it is NOT counted as ok/fail/abort/unknown.
+    // rationale: Type-design invariant — an unrecognised outcome string is
+    // now structurally unrepresentable: `WorkflowRunRow::run_state` carries
+    // a typed `Outcome`, and `Outcome::parse` rejects any non-CHECK value.
+    // render_summary_line can therefore only ever see the four valid
+    // variants or `None` (open). The former `_`-arm collapse case is dead.
     #[test]
-    fn summary_line_unrecognised_outcome_collapses_to_open() {
-        let runs = vec![run(1, Some(10), Some("future_variant_q"), "{}")];
+    fn summary_line_only_sees_typed_outcomes() {
+        assert!(Outcome::parse("future_variant_q").is_err());
+        // Every representable run is counted in exactly one bucket.
+        let runs = vec![
+            run(1, Some(10), Some("ok"), "{}"),
+            run(2, Some(10), Some("unknown"), "{}"),
+            run(3, Some(10), None, "{}"),
+        ];
         let s = render_summary_line(&runs);
-        assert!(s.contains("open=1"), "unknown variant → open: {s}");
-        assert!(s.contains("ok=0 fail=0 abort=0 unknown=0"), "{s}");
+        assert!(s.contains("ok=1"), "{s}");
+        assert!(s.contains("unknown=1"), "{s}");
+        assert!(s.contains("open=1"), "{s}");
     }
 
     // rationale: Boundary — empty summary line still has the canonical
@@ -1007,8 +1022,15 @@ mod tests {
         let parsed: Vec<WorkflowRunRow> = serde_json::from_str(&s).expect("parse");
         assert_eq!(parsed.len(), 1);
         assert!(parsed[0].cost_tokens.is_none(), "None cost preserved");
-        assert!(parsed[0].outcome.is_none(), "None outcome preserved");
-        assert!(parsed[0].ended_at.is_none(), "None ended_at preserved");
+        assert_eq!(parsed[0].run_state, RunState::Open, "Open state preserved");
+        assert!(
+            parsed[0].run_state.outcome().is_none(),
+            "None outcome preserved"
+        );
+        assert!(
+            parsed[0].run_state.ended_at().is_none(),
+            "None ended_at preserved"
+        );
     }
 
     // ====================================================================

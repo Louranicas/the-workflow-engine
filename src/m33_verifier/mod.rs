@@ -204,15 +204,15 @@ mod tests {
             latest_ts_ms: 0,
             computed_at: SystemTime::now(),
         };
-        AcceptedWorkflow {
-            workflow_id: 1,
-            proposal: build_proposal(v, &s, None).expect("ok"),
-            accepted_at_ms: 0,
-            sunset_at_ms: i64::MAX,
-            weight: 1.0,
-            last_run_ms: None,
-            run_count: 0,
-        }
+        AcceptedWorkflow::for_test(
+            1,
+            build_proposal(v, &s, None).expect("ok"),
+            0,
+            i64::MAX,
+            1.0,
+            None,
+            0,
+        )
     }
 
     struct ApproveAll {
@@ -650,7 +650,7 @@ mod tests {
             self.seen
                 .lock()
                 .expect("lock")
-                .push((self.kind, workflow.workflow_id));
+                .push((self.kind, workflow.workflow_id()));
             VerifierVerdict::Approve
         }
     }
@@ -721,7 +721,7 @@ mod tests {
         let refs: Vec<&dyn Verifier> =
             v.iter().map(std::convert::AsRef::as_ref).collect();
         let wf = sample();
-        let expected_id = wf.workflow_id;
+        let expected_id = wf.workflow_id();
         let r = aggregate(&refs, &wf).expect("ok");
         assert_eq!(r, AggregateVerdict::AllApprove);
         let mut seen = log.lock().expect("lock").clone();

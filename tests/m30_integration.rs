@@ -69,11 +69,15 @@ impl FrequencyReader for StubFreq {
 }
 
 fn seed_readers(bank: &CuratedBank) -> (StubPathways, StubFreq) {
-    // pathway_id = workflow_id (Day-1 convention per m30 bridge docs).
+    // Pathway weights keyed by the canonical `workflow_pathway_id` — the key
+    // `LifecycleBank::iter_active` reports (C8).
     let mut weights = HashMap::new();
     let actives = bank.active(0, 0.0);
     for w in &actives {
-        weights.insert(w.workflow_id.to_string(), 0.5);
+        weights.insert(
+            workflow_core::m30_bank::workflow_pathway_id(w.workflow_id()),
+            0.5,
+        );
     }
     let pw = StubPathways { weights };
     let freq = StubFreq {
@@ -104,7 +108,7 @@ fn m30_accept_then_consolidation_cycle_decays_weight() {
     assert!(stats.workflows_decayed >= 3);
 
     for id in [id_a, id_b, id_c] {
-        let w = bank.get(id).expect("g").weight;
+        let w = bank.get(id).expect("g").weight();
         assert!(w < 1.0, "weight must decay below 1.0; got {w}");
         assert!(w > 0.0, "weight must remain positive; got {w}");
     }
@@ -120,7 +124,7 @@ fn m30_consolidation_cycle_skips_clock_skew_workflows() {
     // Force last_run_ms into the future via record_run(now=BIG).
     let future = i64::from(i32::MAX) * 1000;
     bank.record_run(id, future);
-    assert_eq!(bank.get(id).expect("g").last_run_ms, Some(future));
+    assert_eq!(bank.get(id).expect("g").last_run_ms(), Some(future));
 
     let (pw, freq) = seed_readers(&bank);
     let cfg = DecayConfig::default();
@@ -130,7 +134,7 @@ fn m30_consolidation_cycle_skips_clock_skew_workflows() {
     assert_eq!(stats.workflows_clock_skew_skipped, 1);
     // Weight UNCHANGED because the row was skipped pre-decay.
     assert!(
-        (bank.get(id).expect("g").weight - 1.0).abs() < f64::EPSILON,
+        (bank.get(id).expect("g").weight() - 1.0).abs() < f64::EPSILON,
         "clock-skewed row must not have decayed"
     );
 }
@@ -192,7 +196,7 @@ fn m30_recovery_edge_via_phase_for_after_weight_rise() {
     // Multiplicative boost — fitness recovery substrate event.
     bank.apply_decay(id, 50.0); // 0.08 * 50 = 4.0 → clamped to 1.0
     let w_high = bank.get(id).expect("high");
-    assert!((w_high.weight - 1.0).abs() < f64::EPSILON);
+    assert!((w_high.weight() - 1.0).abs() < f64::EPSILON);
     assert_eq!(
         w_high.phase_for(1, DEFAULT_PRUNE_PENDING_THRESHOLD, DEFAULT_PRUNE_THRESHOLD),
         SunsetPhase::Active,
@@ -207,7 +211,7 @@ fn m30_accept_with_far_future_now_saturates_sunset() {
     let bank = CuratedBank::new();
     let id = bank.accept(proposal_with_seed(61), i64::MAX - 1).expect("ok");
     let w = bank.get(id).expect("get");
-    assert_eq!(w.sunset_at_ms, i64::MAX, "saturating_add did not saturate");
+    assert_eq!(w.sunset_at_ms(), i64::MAX, "saturating_add did not saturate");
 }
 
 #[test]
@@ -221,7 +225,10 @@ fn m30_active_excludes_prune_pending_workflows_for_m31_input() {
     bank.apply_decay(id_pending, 0.08); // PrunePending band
 
     let actives = bank.active(1, DEFAULT_PRUNE_PENDING_THRESHOLD);
-    let ids: Vec<u64> = actives.iter().map(|w| w.workflow_id).collect();
+    let ids: Vec<u64> = actives
+        .iter()
+        .map(workflow_core::AcceptedWorkflow::workflow_id)
+        .collect();
     assert!(ids.contains(&id_active));
     assert!(!ids.contains(&id_pending));
 }
@@ -250,7 +257,7 @@ fn m30_concurrent_apply_decay_under_arc_is_serialized() {
         h.join().expect("join");
     }
     for id in ids {
-        let w = bank.get(id).expect("g").weight;
+        let w = bank.get(id).expect("g").weight();
         assert!(
             (w - 0.25).abs() < 1e-12,
             "expected 0.25 after two 0.5 decays, got {w}"
@@ -281,7 +288,7 @@ fn m30_sunset_window_invariant_through_trait_surface() {
     let id = bank.accept(proposal_with_seed(95), now).expect("ok");
     let key = id.to_string();
     let via_trait = LifecycleBank::sunset_at_of(&bank, &key).expect("trait");
-    let via_direct = bank.get(id).expect("direct").sunset_at_ms;
+    let via_direct = bank.get(id).expect("direct").sunset_at_ms();
     assert_eq!(via_trait, via_direct);
     assert_eq!(via_trait, now.saturating_add(DEFAULT_SUNSET_DAYS * MS_PER_DAY));
 }

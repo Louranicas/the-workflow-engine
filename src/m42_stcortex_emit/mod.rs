@@ -54,7 +54,8 @@ pub fn signal_for_outcome(outcome: Option<&str>) -> HebbianSignal {
 ///   downstream auditors / future Phase B fitness-tensor wiring can land
 ///   without an API break.
 /// - `signal`: the Hebbian polarity is currently *derived* by m13 from
-///   [`WorkflowRunRow::outcome`] via the static relevance heuristic
+///   the run's [`WorkflowRunRow::run_state`] outcome via the static
+///   relevance heuristic
 ///   (ok=1.0 / fail=0.5 / abort=0.3 / unknown=0.1). The explicit `signal`
 ///   arg is the call-site self-check: callers must already know whether
 ///   they are reinforcing or depressing the pathway, even though the
@@ -173,7 +174,7 @@ mod tests {
         CorrelationMemory, LtpDensityReader, StcortexWriter, SubstrateWriter,
     };
     use crate::m23_proposer::WorkflowProposal;
-    use crate::m7_workflow_runs::WorkflowRunRow;
+    use crate::m7_workflow_runs::{Outcome, RunState, WorkflowRunRow};
 
     // -- Mock LTP reader / substrate writer (test-only) -------------------
     struct StaticDensity(Option<f64>);
@@ -252,16 +253,22 @@ mod tests {
     ) {
         let mock = SharedRecordingWriter::new();
         let handle = StdArc::clone(&mock.written);
-        let writer = StcortexWriter::new(StaticDensity(density), mock, temp_outbox());
+        let writer = StcortexWriter::new_unchecked(StaticDensity(density), mock, temp_outbox());
         (writer, handle)
     }
 
     fn run_row(outcome: Option<&str>) -> WorkflowRunRow {
+        let run_state = match outcome {
+            None => RunState::Open,
+            Some(o) => RunState::Closed {
+                ended_at: "2026-05-17T01:00:00Z".into(),
+                outcome: Outcome::parse(o).expect("test outcome must be a valid CHECK value"),
+            },
+        };
         WorkflowRunRow {
             id: 42,
             started_at: "2026-05-17T00:00:00Z".into(),
-            ended_at: Some("2026-05-17T01:00:00Z".into()),
-            outcome: outcome.map(str::to_owned),
+            run_state,
             consumer_inputs: "{}".into(),
             cost_tokens: Some(100),
             fitness_dimension: 0.0,
@@ -405,7 +412,7 @@ mod tests {
     #[test]
     fn emit_feedback_routes_through_m13_to_recorded_write() {
         // rationale: Cross-module surface (m42 → m13 → m9)
-        let writer = StcortexWriter::new(
+        let writer = StcortexWriter::new_unchecked(
             StaticDensity(Some(0.20)),
             RecordingWriter {
                 next_id: StdMutex::new(0),
@@ -435,7 +442,7 @@ mod tests {
     #[test]
     fn emit_feedback_rejects_foreign_namespace_prefix_via_m9() {
         // rationale: Anti-property (AP30 m42→m13→m9 chain)
-        let writer = StcortexWriter::new(
+        let writer = StcortexWriter::new_unchecked(
             StaticDensity(Some(0.20)),
             RecordingWriter {
                 next_id: StdMutex::new(0),
@@ -467,7 +474,7 @@ mod tests {
     #[test]
     fn emit_feedback_defers_to_outbox_on_orac_unreachable() {
         // rationale: Cross-module surface (m13 outbox-first behaviour)
-        let writer = StcortexWriter::new(
+        let writer = StcortexWriter::new_unchecked(
             StaticDensity(None), // ORAC unreachable sentinel
             RecordingWriter {
                 next_id: StdMutex::new(0),
@@ -499,7 +506,7 @@ mod tests {
     #[test]
     fn emit_feedback_transitively_munges_hyphens_via_m9() {
         // rationale: Cross-module surface (m9 hyphen-munge transitive)
-        let writer = StcortexWriter::new(
+        let writer = StcortexWriter::new_unchecked(
             StaticDensity(Some(0.20)),
             RecordingWriter {
                 next_id: StdMutex::new(0),
@@ -928,7 +935,7 @@ mod tests {
         // rationale: Cross-module surface (outbox durability)
         let mock = SharedRecordingWriter::new();
         let outbox = temp_outbox();
-        let writer = StcortexWriter::new(StaticDensity(None), mock, outbox.clone());
+        let writer = StcortexWriter::new_unchecked(StaticDensity(None), mock, outbox.clone());
         let workflow = accepted_workflow_fixture();
         let run = run_row(Some("ok"));
         let _ = super::emit_feedback(
@@ -955,7 +962,7 @@ mod tests {
         // rationale: Cross-module surface (append-only outbox)
         let mock = SharedRecordingWriter::new();
         let outbox = temp_outbox();
-        let writer = StcortexWriter::new(StaticDensity(None), mock, outbox.clone());
+        let writer = StcortexWriter::new_unchecked(StaticDensity(None), mock, outbox.clone());
         let workflow = accepted_workflow_fixture();
         let run = run_row(Some("ok"));
         for _ in 0..3 {
@@ -983,7 +990,7 @@ mod tests {
         // rationale: Adversarial input (outbox JSONL shape)
         let mock = SharedRecordingWriter::new();
         let outbox = temp_outbox();
-        let writer = StcortexWriter::new(StaticDensity(None), mock, outbox.clone());
+        let writer = StcortexWriter::new_unchecked(StaticDensity(None), mock, outbox.clone());
         let workflow = accepted_workflow_fixture();
         let run = run_row(Some("ok"));
         let _ = super::emit_feedback(
@@ -1200,7 +1207,7 @@ mod tests {
             }
         }
         let writer =
-            StcortexWriter::new(StaticDensity(Some(0.20)), FailingWriter, temp_outbox());
+            StcortexWriter::new_unchecked(StaticDensity(Some(0.20)), FailingWriter, temp_outbox());
         let workflow = accepted_workflow_fixture();
         let run = run_row(Some("ok"));
         let err = super::emit_feedback(

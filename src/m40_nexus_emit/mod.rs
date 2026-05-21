@@ -19,13 +19,43 @@ pub const DEFAULT_PUSH_TIMEOUT: Duration = Duration::from_secs(5);
 /// from forcing an unbounded allocation in [`HttpNexusClient::push`].
 pub const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 
+/// The closed set of NexusEvent kinds.
+///
+/// `kind` is a closed wire vocabulary, not free-form text: a typo in a
+/// stringly-typed kind is a silent wire-contract drift that synthex-v2's
+/// `/v3/nexus/push` handler can only discover at runtime. Modelling it as
+/// an enum makes an invalid kind unrepresentable at the type layer.
+///
+/// Each variant carries an explicit `#[serde(rename = "...")]` so the wire
+/// form is byte-for-byte the historical dotted string (e.g.
+/// `workflow.dispatched`) — `rename_all = "snake_case"` cannot produce a
+/// dot, so the rename is mandatory, not cosmetic.
+///
+/// This enum is deliberately **not** `#[non_exhaustive]`: it is a closed
+/// wire vocabulary (mirroring the closed-set style of `EscapeSurfaceProfile`
+/// in m32). Adding a variant is a deliberate wire-contract extension that
+/// every match site should be forced to acknowledge.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
+pub enum NexusEventKind {
+    /// A workflow was dispatched (wire form: `workflow.dispatched`).
+    #[serde(rename = "workflow.dispatched")]
+    WorkflowDispatched,
+    /// A workflow ran to completion (wire form: `workflow.completed`).
+    #[serde(rename = "workflow.completed")]
+    WorkflowCompleted,
+}
+
 /// A typed NexusEvent payload.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NexusEvent {
     /// Source service identifier.
     pub source: String,
-    /// Event kind (e.g. `workflow.dispatched`, `workflow.completed`).
-    pub kind: String,
+    /// Event kind — a closed [`NexusEventKind`] vocabulary, not free-form
+    /// text. An invalid kind is unrepresentable; the wire form is the
+    /// historical dotted string (e.g. `workflow.dispatched`).
+    pub kind: NexusEventKind,
     /// Free-form JSON payload.
     pub payload: serde_json::Value,
     /// Wall-clock ms.
@@ -174,16 +204,18 @@ fn read_capped_body(
 }
 
 /// Build a NexusEvent from primitive parts.
+///
+/// `kind` is a typed [`NexusEventKind`]; an invalid kind cannot be passed.
 #[must_use]
 pub fn build_event(
     source: impl Into<String>,
-    kind: impl Into<String>,
+    kind: NexusEventKind,
     payload: serde_json::Value,
     ts_ms: i64,
 ) -> NexusEvent {
     NexusEvent {
         source: source.into(),
-        kind: kind.into(),
+        kind,
         payload,
         ts_ms,
     }
@@ -194,8 +226,8 @@ mod tests {
     use std::sync::Mutex;
 
     use super::{
-        build_event, NexusClient, NexusEmitError, NexusEvent, DEFAULT_NEXUS_URL,
-        DEFAULT_PUSH_TIMEOUT,
+        build_event, NexusClient, NexusEmitError, NexusEvent, NexusEventKind,
+        DEFAULT_NEXUS_URL, DEFAULT_PUSH_TIMEOUT,
     };
 
     #[test]
@@ -212,7 +244,7 @@ mod tests {
     fn build_event_roundtrip_via_serde() {
         let e = build_event(
             "workflow-trace",
-            "workflow.dispatched",
+            NexusEventKind::WorkflowDispatched,
             serde_json::json!({"id": 42}),
             1_700_000_000_000,
         );
@@ -237,11 +269,16 @@ mod tests {
         let c = RecordingClient {
             events: Mutex::new(Vec::new()),
         };
-        let e = build_event("src", "kind", serde_json::json!(null), 0);
+        let e = build_event(
+            "src",
+            NexusEventKind::WorkflowDispatched,
+            serde_json::json!(null),
+            0,
+        );
         c.push(&e).expect("push");
         let recorded = c.events.lock().expect("lock").clone();
         assert_eq!(recorded.len(), 1);
-        assert_eq!(recorded[0].kind, "kind");
+        assert_eq!(recorded[0].kind, NexusEventKind::WorkflowDispatched);
     }
 
     #[test]
@@ -294,7 +331,7 @@ mod tests {
         // rationale: Contract regression (NexusEvent JSON schema snapshot)
         let e = build_event(
             "workflow-trace",
-            "workflow.dispatched",
+            NexusEventKind::WorkflowDispatched,
             serde_json::json!({"workflow_id": 7}),
             1_700_000_000_000,
         );
@@ -323,7 +360,7 @@ mod tests {
         for i in 0..1_000_i64 {
             let e = build_event(
                 "src",
-                "kind",
+                NexusEventKind::WorkflowDispatched,
                 serde_json::json!({"i": i, "tag": "test"}),
                 i,
             );
@@ -349,7 +386,7 @@ mod tests {
     #[test]
     fn nexus_event_rejects_missing_ts_ms_field() {
         // rationale: Adversarial input (F-POVM-07 silent-zero-fill check)
-        let s = r#"{"source":"a","kind":"b","payload":null}"#;
+        let s = r#"{"source":"a","kind":"workflow.dispatched","payload":null}"#;
         let r: Result<NexusEvent, _> = serde_json::from_str(s);
         assert!(r.is_err(), "missing ts_ms must NOT zero-fill silently");
     }
@@ -373,7 +410,7 @@ mod tests {
                 for i in 0..pushes_per_thread {
                     let e = build_event(
                         format!("t{t}"),
-                        "k",
+                        NexusEventKind::WorkflowDispatched,
                         serde_json::json!(null),
                         i64::try_from(i).expect("i fits"),
                     );
@@ -411,7 +448,12 @@ mod tests {
         // unreachable host so the client must use the URL it was given.
         // We tolerate either Transport or NonSuccess; what we assert is
         // that .push() does NOT panic and DOES return a typed error.
-        let e = build_event("src", "k", serde_json::json!(null), 0);
+        let e = build_event(
+            "src",
+            NexusEventKind::WorkflowDispatched,
+            serde_json::json!(null),
+            0,
+        );
         let r = c.push(&e);
         assert!(r.is_err(), "unreachable URL must yield a typed error");
         match r.unwrap_err() {
@@ -421,16 +463,45 @@ mod tests {
         }
     }
 
-    // rationale: Anti-property — empty `kind` is permitted at the type
-    // layer (no validator). This test pins the current behaviour so a
-    // future tightening (e.g., reject empty kind) is a deliberate change,
-    // not an accidental drift.
+    // rationale: Contract regression — `kind` is now a closed
+    // `NexusEventKind` enum; an empty / invalid kind is unrepresentable at
+    // the type layer (C17). This test pins the serde wire form: each
+    // variant MUST serialize to EXACTLY the historical dotted string, and
+    // each string MUST deserialize back to its variant. A rename drift is
+    // a wire-contract break against synthex-v2's /v3/nexus/push handler.
     #[test]
-    fn empty_kind_permitted_at_type_layer() {
-        // rationale: Anti-property (current-behaviour regression anchor)
-        let e = build_event("src", "", serde_json::json!(null), 0);
-        let s = serde_json::to_string(&e).expect("ser");
-        assert!(s.contains("\"kind\":\"\""));
+    fn nexus_event_kind_wire_form_stable() {
+        // rationale: Contract regression (closed-enum wire form round-trip)
+        for (variant, wire) in [
+            (NexusEventKind::WorkflowDispatched, "workflow.dispatched"),
+            (NexusEventKind::WorkflowCompleted, "workflow.completed"),
+        ] {
+            // Serialize: variant -> exact dotted wire string.
+            let json = serde_json::to_string(&variant).expect("ser kind");
+            assert_eq!(
+                json,
+                format!("\"{wire}\""),
+                "NexusEventKind wire-form drift — synthex-v2 contract break"
+            );
+            // Deserialize: exact dotted wire string -> variant.
+            let back: NexusEventKind =
+                serde_json::from_str(&json).expect("de kind");
+            assert_eq!(back, variant, "kind round-trip drift");
+            // The whole event carries the exact dotted string on the wire.
+            let e = build_event("src", variant, serde_json::json!(null), 0);
+            let s = serde_json::to_string(&e).expect("ser event");
+            assert!(
+                s.contains(&format!("\"kind\":\"{wire}\"")),
+                "event must carry exact dotted kind on the wire, got {s}"
+            );
+        }
+        // An unknown / empty kind string is NOT representable: it must fail
+        // to deserialize rather than silently producing an invalid variant.
+        let bad: Result<NexusEventKind, _> =
+            serde_json::from_str("\"workflow.bogus\"");
+        assert!(bad.is_err(), "unknown kind must not deserialize");
+        let empty: Result<NexusEventKind, _> = serde_json::from_str("\"\"");
+        assert!(empty.is_err(), "empty kind must not deserialize");
     }
 
     // rationale: Resource accounting — error variants are NOT Clone
@@ -452,7 +523,12 @@ mod tests {
     fn build_event_preserves_payload_verbatim() {
         // rationale: Determinism (no payload normalization)
         let p = serde_json::json!({"nested": {"k": [1, 2, 3]}});
-        let e = build_event("src", "kind", p.clone(), 0);
+        let e = build_event(
+            "src",
+            NexusEventKind::WorkflowDispatched,
+            p.clone(),
+            0,
+        );
         assert_eq!(e.payload, p);
     }
 
@@ -503,7 +579,7 @@ mod tests {
         let r = tokio::task::spawn_blocking(move || {
             let c =
                 super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
-            let e = build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            let e = build_event("workflow-trace", NexusEventKind::WorkflowDispatched, serde_json::json!({}), 0);
             c.push(&e)
         })
         .await
@@ -538,7 +614,7 @@ mod tests {
         let r = tokio::task::spawn_blocking(move || {
             let c =
                 super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
-            let e = build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            let e = build_event("workflow-trace", NexusEventKind::WorkflowDispatched, serde_json::json!({}), 0);
             c.push(&e)
         })
         .await
@@ -571,7 +647,7 @@ mod tests {
         let r = tokio::task::spawn_blocking(move || {
             let c =
                 super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
-            let e = build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            let e = build_event("workflow-trace", NexusEventKind::WorkflowDispatched, serde_json::json!({}), 0);
             c.push(&e)
         })
         .await
@@ -605,7 +681,7 @@ mod tests {
         let r = tokio::task::spawn_blocking(move || {
             let c =
                 super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
-            let e = build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            let e = build_event("workflow-trace", NexusEventKind::WorkflowDispatched, serde_json::json!({}), 0);
             c.push(&e)
         })
         .await
@@ -637,7 +713,7 @@ mod tests {
     #[test]
     fn nexus_event_tolerates_unknown_extra_field() {
         // rationale: Anti-property (current-behaviour regression anchor)
-        let s = r#"{"source":"a","kind":"b","payload":null,"ts_ms":1,"extra":99}"#;
+        let s = r#"{"source":"a","kind":"workflow.dispatched","payload":null,"ts_ms":1,"extra":99}"#;
         let r: Result<NexusEvent, _> = serde_json::from_str(s);
         assert!(r.is_ok(), "extra field should not break deserialization");
         assert_eq!(r.expect("ok").ts_ms, 1);
@@ -648,7 +724,7 @@ mod tests {
     #[test]
     fn nexus_event_rejects_missing_source_field() {
         // rationale: Adversarial input (silent-fill guard)
-        let s = r#"{"kind":"b","payload":null,"ts_ms":1}"#;
+        let s = r#"{"kind":"workflow.dispatched","payload":null,"ts_ms":1}"#;
         let r: Result<NexusEvent, _> = serde_json::from_str(s);
         assert!(r.is_err(), "missing source must NOT zero-fill silently");
     }
@@ -667,7 +743,7 @@ mod tests {
     #[test]
     fn nexus_event_rejects_missing_payload_field() {
         // rationale: Adversarial input (silent-fill guard)
-        let s = r#"{"source":"a","kind":"b","ts_ms":1}"#;
+        let s = r#"{"source":"a","kind":"workflow.dispatched","ts_ms":1}"#;
         let r: Result<NexusEvent, _> = serde_json::from_str(s);
         assert!(r.is_err(), "missing payload must NOT zero-fill silently");
     }
@@ -677,7 +753,7 @@ mod tests {
     #[test]
     fn nexus_event_rejects_string_typed_ts_ms() {
         // rationale: Adversarial input (type-mismatch)
-        let s = r#"{"source":"a","kind":"b","payload":null,"ts_ms":"123"}"#;
+        let s = r#"{"source":"a","kind":"workflow.dispatched","payload":null,"ts_ms":"123"}"#;
         let r: Result<NexusEvent, _> = serde_json::from_str(s);
         assert!(r.is_err(), "string ts_ms must not coerce to i64");
     }
@@ -688,7 +764,12 @@ mod tests {
     fn ts_ms_round_trips_at_i64_extremes() {
         // rationale: Boundary (i64 min/max)
         for &ts in &[i64::MIN, i64::MAX, 0_i64, -1_i64] {
-            let e = build_event("src", "kind", serde_json::json!(null), ts);
+            let e = build_event(
+                "src",
+                NexusEventKind::WorkflowDispatched,
+                serde_json::json!(null),
+                ts,
+            );
             let s = serde_json::to_string(&e).expect("ser");
             let back: NexusEvent = serde_json::from_str(&s).expect("de");
             assert_eq!(back.ts_ms, ts, "ts_ms drift at {ts}");
@@ -700,7 +781,12 @@ mod tests {
     #[test]
     fn build_event_accepts_negative_ts_ms() {
         // rationale: Boundary (no ts validator)
-        let e = build_event("src", "kind", serde_json::json!(null), -42);
+        let e = build_event(
+            "src",
+            NexusEventKind::WorkflowDispatched,
+            serde_json::json!(null),
+            -42,
+        );
         assert_eq!(e.ts_ms, -42);
     }
 
@@ -711,22 +797,28 @@ mod tests {
         // rationale: Determinism (constructor identity)
         let e = build_event(
             "workflow-trace",
-            "workflow.completed",
+            NexusEventKind::WorkflowCompleted,
             serde_json::json!({"k": "v"}),
             999_999,
         );
         assert_eq!(e.source, "workflow-trace");
-        assert_eq!(e.kind, "workflow.completed");
+        assert_eq!(e.kind, NexusEventKind::WorkflowCompleted);
         assert_eq!(e.ts_ms, 999_999);
         assert_eq!(e.payload, serde_json::json!({"k": "v"}));
     }
 
     // rationale: Boundary — an empty `source` string is accepted at the type
-    // layer (mirrors empty_kind_permitted_at_type_layer for symmetry).
+    // layer (`source` is still free-form `String`; only `kind` was closed
+    // into the `NexusEventKind` enum by C17).
     #[test]
     fn empty_source_permitted_at_type_layer() {
         // rationale: Boundary (no source validator)
-        let e = build_event("", "kind", serde_json::json!(null), 0);
+        let e = build_event(
+            "",
+            NexusEventKind::WorkflowDispatched,
+            serde_json::json!(null),
+            0,
+        );
         let s = serde_json::to_string(&e).expect("ser");
         assert!(s.contains("\"source\":\"\""));
     }
@@ -738,7 +830,12 @@ mod tests {
     fn payload_can_be_array_value() {
         // rationale: Determinism (payload is arbitrary JSON)
         let p = serde_json::json!([1, "two", {"three": 3}, null]);
-        let e = build_event("src", "kind", p.clone(), 0);
+        let e = build_event(
+            "src",
+            NexusEventKind::WorkflowDispatched,
+            p.clone(),
+            0,
+        );
         let back: NexusEvent =
             serde_json::from_str(&serde_json::to_string(&e).expect("ser"))
                 .expect("de");
@@ -756,7 +853,12 @@ mod tests {
             serde_json::json!(true),
             serde_json::json!(std::f64::consts::PI),
         ] {
-            let e = build_event("src", "kind", p.clone(), 0);
+            let e = build_event(
+                "src",
+                NexusEventKind::WorkflowDispatched,
+                p.clone(),
+                0,
+            );
             let back: NexusEvent =
                 serde_json::from_str(&serde_json::to_string(&e).expect("ser"))
                     .expect("de");
@@ -764,14 +866,15 @@ mod tests {
         }
     }
 
-    // rationale: Adversarial input — a unicode-heavy source/kind/payload
-    // must round-trip byte-for-byte (no escaping corruption).
+    // rationale: Adversarial input — a unicode-heavy source/payload must
+    // round-trip byte-for-byte (no escaping corruption). `kind` is now the
+    // closed `NexusEventKind` enum and cannot carry arbitrary unicode.
     #[test]
     fn unicode_fields_round_trip() {
         // rationale: Adversarial input (unicode integrity)
         let e = build_event(
             "工作流-trace ☤",
-            "workflow.dispatched·完了",
+            NexusEventKind::WorkflowDispatched,
             serde_json::json!({"note": "émigré — naïve \u{1F600}"}),
             1,
         );
@@ -786,7 +889,12 @@ mod tests {
     #[test]
     fn nexus_event_clone_is_independent() {
         // rationale: Anti-property (deep clone)
-        let original = build_event("src", "kind", serde_json::json!({"n": 1}), 7);
+        let original = build_event(
+            "src",
+            NexusEventKind::WorkflowDispatched,
+            serde_json::json!({"n": 1}),
+            7,
+        );
         let cloned = original.clone();
         assert_eq!(original, cloned);
         // Mutating one does not affect the other.
@@ -800,8 +908,18 @@ mod tests {
     #[test]
     fn nexus_events_differing_in_ts_ms_are_unequal() {
         // rationale: Anti-property (full-field equality)
-        let a = build_event("s", "k", serde_json::json!(null), 1);
-        let b = build_event("s", "k", serde_json::json!(null), 2);
+        let a = build_event(
+            "s",
+            NexusEventKind::WorkflowDispatched,
+            serde_json::json!(null),
+            1,
+        );
+        let b = build_event(
+            "s",
+            NexusEventKind::WorkflowDispatched,
+            serde_json::json!(null),
+            2,
+        );
         assert_ne!(a, b);
     }
 
@@ -810,8 +928,18 @@ mod tests {
     #[test]
     fn nexus_events_differing_in_payload_are_unequal() {
         // rationale: Anti-property (full-field equality)
-        let a = build_event("s", "k", serde_json::json!({"x": 1}), 0);
-        let b = build_event("s", "k", serde_json::json!({"x": 2}), 0);
+        let a = build_event(
+            "s",
+            NexusEventKind::WorkflowDispatched,
+            serde_json::json!({"x": 1}),
+            0,
+        );
+        let b = build_event(
+            "s",
+            NexusEventKind::WorkflowDispatched,
+            serde_json::json!({"x": 2}),
+            0,
+        );
         assert_ne!(a, b);
     }
 
@@ -846,15 +974,21 @@ mod tests {
         }
     }
 
-    // rationale: Boundary — the build_event source argument accepts both
+    // rationale: Boundary — the build_event `source` argument accepts both
     // &str and String (impl Into<String>); both must produce equal events.
+    // (`kind` is the closed `NexusEventKind` enum — no generic surface.)
     #[test]
     fn build_event_accepts_str_and_string_args_equivalently() {
-        // rationale: Boundary (generic Into<String> surface)
-        let from_str = build_event("src", "kind", serde_json::json!(null), 0);
+        // rationale: Boundary (generic Into<String> surface on source)
+        let from_str = build_event(
+            "src",
+            NexusEventKind::WorkflowDispatched,
+            serde_json::json!(null),
+            0,
+        );
         let from_string = build_event(
             String::from("src"),
-            String::from("kind"),
+            NexusEventKind::WorkflowDispatched,
             serde_json::json!(null),
             0,
         );
@@ -886,7 +1020,7 @@ mod tests {
         let r = tokio::task::spawn_blocking(move || {
             let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
             let e =
-                build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+                build_event("workflow-trace", NexusEventKind::WorkflowDispatched, serde_json::json!({}), 0);
             c.push(&e)
         })
         .await
@@ -919,7 +1053,7 @@ mod tests {
         let r = tokio::task::spawn_blocking(move || {
             let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
             let e =
-                build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+                build_event("workflow-trace", NexusEventKind::WorkflowDispatched, serde_json::json!({}), 0);
             c.push(&e)
         })
         .await
@@ -951,7 +1085,7 @@ mod tests {
         let r = tokio::task::spawn_blocking(move || {
             let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
             let e =
-                build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+                build_event("workflow-trace", NexusEventKind::WorkflowDispatched, serde_json::json!({}), 0);
             c.push(&e)
         })
         .await
@@ -984,7 +1118,7 @@ mod tests {
         let r = tokio::task::spawn_blocking(move || {
             let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
             let e =
-                build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+                build_event("workflow-trace", NexusEventKind::WorkflowDispatched, serde_json::json!({}), 0);
             c.push(&e)
         })
         .await
@@ -1016,7 +1150,7 @@ mod tests {
         let r = tokio::task::spawn_blocking(move || {
             let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
             let e =
-                build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+                build_event("workflow-trace", NexusEventKind::WorkflowDispatched, serde_json::json!({}), 0);
             c.push(&e)
         })
         .await
@@ -1049,7 +1183,7 @@ mod tests {
         let r = tokio::task::spawn_blocking(move || {
             let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
             let e =
-                build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+                build_event("workflow-trace", NexusEventKind::WorkflowDispatched, serde_json::json!({}), 0);
             c.push(&e)
         })
         .await
@@ -1074,7 +1208,7 @@ mod tests {
                 std::time::Duration::from_secs(2),
             );
             let e =
-                build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+                build_event("workflow-trace", NexusEventKind::WorkflowDispatched, serde_json::json!({}), 0);
             c.push(&e)
         })
         .await
@@ -1094,7 +1228,12 @@ mod tests {
             "not-a-valid-url",
             std::time::Duration::from_secs(1),
         );
-        let e = build_event("src", "k", serde_json::json!(null), 0);
+        let e = build_event(
+            "src",
+            NexusEventKind::WorkflowDispatched,
+            serde_json::json!(null),
+            0,
+        );
         let r = c.push(&e);
         assert!(
             matches!(r, Err(NexusEmitError::Transport(_))),
@@ -1126,7 +1265,7 @@ mod tests {
             let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
             let e = build_event(
                 "workflow-trace",
-                "workflow.dispatched",
+                NexusEventKind::WorkflowDispatched,
                 serde_json::json!({"workflow_id": 7}),
                 1_700_000_000_000,
             );
@@ -1158,7 +1297,7 @@ mod tests {
         let r = tokio::task::spawn_blocking(move || {
             let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
             let e =
-                build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+                build_event("workflow-trace", NexusEventKind::WorkflowDispatched, serde_json::json!({}), 0);
             c.push(&e)
         })
         .await
@@ -1176,7 +1315,7 @@ mod tests {
         };
         let e = build_event(
             "workflow-trace",
-            "workflow.completed",
+            NexusEventKind::WorkflowCompleted,
             serde_json::json!({"nested": [1, 2]}),
             1_700_000_123_456,
         );
@@ -1215,7 +1354,7 @@ mod tests {
         let url = format!("{}/v3/nexus/push", server.uri());
         let r = tokio::task::spawn_blocking(move || {
             let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
-            let e = build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            let e = build_event("workflow-trace", NexusEventKind::WorkflowDispatched, serde_json::json!({}), 0);
             c.push(&e)
         })
         .await
@@ -1247,7 +1386,7 @@ mod tests {
         let url = format!("{}/v3/nexus/push", server.uri());
         let r = tokio::task::spawn_blocking(move || {
             let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
-            let e = build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            let e = build_event("workflow-trace", NexusEventKind::WorkflowDispatched, serde_json::json!({}), 0);
             c.push(&e)
         })
         .await
@@ -1278,7 +1417,7 @@ mod tests {
         let url = format!("{}/v3/nexus/push", server.uri());
         let r = tokio::task::spawn_blocking(move || {
             let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
-            let e = build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            let e = build_event("workflow-trace", NexusEventKind::WorkflowDispatched, serde_json::json!({}), 0);
             c.push(&e)
         })
         .await
@@ -1310,7 +1449,7 @@ mod tests {
         let url = format!("{}/v3/nexus/push", server.uri());
         let r = tokio::task::spawn_blocking(move || {
             let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
-            let e = build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            let e = build_event("workflow-trace", NexusEventKind::WorkflowDispatched, serde_json::json!({}), 0);
             c.push(&e)
         })
         .await
@@ -1344,7 +1483,7 @@ mod tests {
         let url = format!("{}/v3/nexus/push", server.uri());
         let r = tokio::task::spawn_blocking(move || {
             let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
-            let e = build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            let e = build_event("workflow-trace", NexusEventKind::WorkflowDispatched, serde_json::json!({}), 0);
             c.push(&e)
         })
         .await
@@ -1378,7 +1517,7 @@ mod tests {
         let url = format!("{}/v3/nexus/push", server.uri());
         let r = tokio::task::spawn_blocking(move || {
             let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
-            let e = build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            let e = build_event("workflow-trace", NexusEventKind::WorkflowDispatched, serde_json::json!({}), 0);
             c.push(&e)
         })
         .await
@@ -1410,7 +1549,7 @@ mod tests {
         let url = format!("{}/v3/nexus/push", server.uri());
         let r = tokio::task::spawn_blocking(move || {
             let c = super::HttpNexusClient::new(url, std::time::Duration::from_millis(500));
-            let e = build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            let e = build_event("workflow-trace", NexusEventKind::WorkflowDispatched, serde_json::json!({}), 0);
             c.push(&e)
         })
         .await
@@ -1442,7 +1581,7 @@ mod tests {
         let url = format!("{}/v3/nexus/push", server.uri());
         let r = tokio::task::spawn_blocking(move || {
             let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
-            let e = build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            let e = build_event("workflow-trace", NexusEventKind::WorkflowDispatched, serde_json::json!({}), 0);
             c.push(&e)
         })
         .await
@@ -1461,7 +1600,12 @@ mod tests {
         let client: Box<dyn NexusClient> = Box::new(RecordingClient {
             events: Mutex::new(Vec::new()),
         });
-        let e = build_event("src", "kind", serde_json::json!(null), 1);
+        let e = build_event(
+            "src",
+            NexusEventKind::WorkflowDispatched,
+            serde_json::json!(null),
+            1,
+        );
         client.push(&e).expect("boxed dyn push must succeed");
         client.push(&e).expect("second boxed dyn push must succeed");
     }
@@ -1478,7 +1622,12 @@ mod tests {
             }
         }
         let client = FailingClient;
-        let e = build_event("src", "kind", serde_json::json!(null), 1);
+        let e = build_event(
+            "src",
+            NexusEventKind::WorkflowDispatched,
+            serde_json::json!(null),
+            1,
+        );
         match client.push(&e) {
             Err(NexusEmitError::NonSuccess(code)) => assert_eq!(code, 503),
             other => panic!("expected NonSuccess(503) through the trait, got {other:?}"),
@@ -1522,7 +1671,7 @@ mod tests {
         let url = format!("{}/v3/nexus/push", server.uri());
         let r = tokio::task::spawn_blocking(move || {
             let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(3));
-            let e = build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            let e = build_event("workflow-trace", NexusEventKind::WorkflowDispatched, serde_json::json!({}), 0);
             c.push(&e)
         })
         .await
@@ -1563,7 +1712,7 @@ mod tests {
         let url = format!("{}/v3/nexus/push", server.uri());
         let r = tokio::task::spawn_blocking(move || {
             let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(3));
-            let e = build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            let e = build_event("workflow-trace", NexusEventKind::WorkflowDispatched, serde_json::json!({}), 0);
             c.push(&e)
         })
         .await
@@ -1597,7 +1746,7 @@ mod tests {
         let url = format!("{}/v3/nexus/push", server.uri());
         let r = tokio::task::spawn_blocking(move || {
             let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(3));
-            let e = build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            let e = build_event("workflow-trace", NexusEventKind::WorkflowDispatched, serde_json::json!({}), 0);
             c.push(&e)
         })
         .await

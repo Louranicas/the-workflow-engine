@@ -62,12 +62,15 @@ In-session `/loop` self-pacing between waves; TaskList (#1–#6) = goal tracker;
 | W1 | Quality floor — all 26 modules to ≥50 meaningful tests | `dc25335` | 1310 → 1782 |
 | W2 | 19 security findings resolved — KEYSTONE `project_after_prefix` correctness bug, 9 lock-poison panics, LIKE-injection, error-swallow, m9 namespace boundary, m8 false-gate docstrings, HTTP body caps | `c662b2d` + `5cb4822` | → 1834 |
 | W3 | Type-design — `#[non_exhaustive]` ×24, `WorkflowId` + `MinSupport` encapsulation, 5 comment-accuracy fixes | `2e3113d` | → 1835 |
-| W4 | `cargo-mutants` — 412 mutants, 80.6% baseline kill rate; 68 mutant-killing tests resolve every surviving non-timeout mutant in m10/m11/m21/m22 (67 killed + 1 proven-equivalent) | `5de71ac` | → 1903 |
+| W4 | `cargo-mutants` scoped to m10/m11/m21/m22. Committed baseline run (`mutants.out.old`, 2026-05-21T14:37–16:09Z): **319 mutants** — 240 caught / 20 missed / 20 timeout / 39 unviable (**85.7%** caught of 280 viable). 68 mutant-killing tests authored against the 20 missed mutants. The 20 m21 `build_variants` timeout mutants remain unscored. A post-fix verification run (S1003733) is in progress; verified kill-rate folded in on completion. *(Prior wording — "412 mutants, 80.6%" — did not reconcile with any committed artifact; corrected S1003733.)* | `5de71ac` | → 1903 |
 | W5 | Docs reconciliation (CLAUDE.md charter + project & workspace CLAUDE.local.md) · 4-surface persistence · commit + push both remotes | (W5 commit) | 1903 |
 
 Gate green every wave: `cargo check` + `clippy -D warnings` + `clippy -D clippy::pedantic` +
 `cargo test --all-targets --all-features --release`. Zen audit packets W1/W2/W3 filed in
 `~/projects/shared-context/agent-cross-talk/`. W1 incident (shared-tree parallel-agent file
-reverts) was disclosed and fully reconciled. Open for node 0.A: the **F2 m8-gate architecture
-decision** and the **W3 #5–#10 core-type-encapsulation portfolio**
-([HARDENING_W3_TYPE_DESIGN_PORTFOLIO.md](HARDENING_W3_TYPE_DESIGN_PORTFOLIO.md)).
+reverts) was disclosed and fully reconciled. **Resolved S1003733** (assessment-driven
+remediation): the **F2 m8-gate architecture decision** → KEEP-DORMANT (m8 retained as a
+dormant tripwire; see `src/m8_povm_build_prereq/mod.rs` module doc); the **W3 #5–#10
+core-type-encapsulation portfolio**
+([HARDENING_W3_TYPE_DESIGN_PORTFOLIO.md](HARDENING_W3_TYPE_DESIGN_PORTFOLIO.md)) → completed
+in remediation Wave C (6 representable-illegal-state holes closed).

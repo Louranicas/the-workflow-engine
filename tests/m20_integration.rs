@@ -30,12 +30,12 @@ fn public_api_round_trip_with_defaults() {
     let p = mine_sequences(
         &seqs,
         MinSupport::new(MIN_SUPPORT_FLOOR).expect("at floor"),
-        MaxGap(DEFAULT_MAX_GAP),
+        MaxGap::new(DEFAULT_MAX_GAP),
         DEFAULT_MAX_LENGTH,
     )
     .expect("ok");
     assert!(!p.is_empty());
-    assert!(p.iter().any(|pat| pat.steps == seq(&[1, 2])));
+    assert!(p.iter().any(|pat| pat.steps() == seq(&[1, 2])));
 }
 
 #[test]
@@ -44,7 +44,7 @@ fn public_api_round_trip_with_defaults() {
 fn pipeline_m20_to_m21_to_m23_yields_proposals() {
     // 30 sequences each carrying [1,2,3] — well above PROPOSAL_F2_THRESHOLD.
     let seqs: Vec<Vec<StepToken>> = (0..30).map(|_| seq(&[1, 2, 3])).collect();
-    let patterns = mine_sequences(&seqs, MinSupport::new(2).expect("min_support >= floor"), MaxGap(5), 8).expect("mine");
+    let patterns = mine_sequences(&seqs, MinSupport::new(2).expect("min_support >= floor"), MaxGap::new(5), 8).expect("mine");
     assert!(!patterns.is_empty());
 
     let snapshot = LiftSnapshot {
@@ -54,10 +54,12 @@ fn pipeline_m20_to_m21_to_m23_yields_proposals() {
         latest_ts_ms: 1_000_000,
         computed_at: std::time::SystemTime::now(),
     };
-    let proposals = compose_proposals(&patterns, &snapshot);
+    // `|_| None` = m22 clustering skipped (this test exercises the
+    // m20 → m21 → m23 chain, not diversity).
+    let proposals = compose_proposals(&patterns, &snapshot, |_| None);
     assert!(!proposals.is_empty());
     for p in &proposals {
-        assert!(p.evidence_n >= PROPOSAL_F2_THRESHOLD);
+        assert!(p.evidence_n() >= PROPOSAL_F2_THRESHOLD);
     }
 }
 
@@ -67,7 +69,7 @@ fn pipeline_m20_to_m21_to_m23_yields_proposals() {
 // human-readable substrate label in their serde JSON.
 fn integration_f11_full_pipeline_opacity() {
     let seqs = vec![seq(&[10, 20]), seq(&[10, 20]), seq(&[10, 20, 30])];
-    let patterns = mine_sequences(&seqs, MinSupport::new(2).expect("min_support >= floor"), MaxGap(5), 8).expect("mine");
+    let patterns = mine_sequences(&seqs, MinSupport::new(2).expect("min_support >= floor"), MaxGap::new(5), 8).expect("mine");
     for p in &patterns {
         let s = serde_json::to_string(p).expect("ser");
         for forbidden in ["pane", "tab", "cluster_pane", "workflow_trace_"] {
@@ -101,9 +103,9 @@ fn integration_variant_cap_propagates_through_compose() {
 // rationale: Integration — m20 below-support pattern never leaks to m23.
 fn integration_below_support_filtered() {
     let seqs = vec![seq(&[1, 2]), seq(&[3, 4])];
-    let p = mine_sequences(&seqs, MinSupport::new(2).expect("min_support >= floor"), MaxGap(5), 8).expect("ok");
+    let p = mine_sequences(&seqs, MinSupport::new(2).expect("min_support >= floor"), MaxGap::new(5), 8).expect("ok");
     // No pattern present in BOTH sequences — output may be empty or trivial.
     for pat in &p {
-        assert!(pat.support >= 2, "below-support leak: {pat:?}");
+        assert!(pat.support() >= 2, "below-support leak: {pat:?}");
     }
 }

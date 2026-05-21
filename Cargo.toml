@@ -64,6 +64,15 @@ proptest = "1"
 wiremock = "0.6"
 
 [features]
+# `default = ["full"]` enables every reserved feature. The four sub-features
+# below are RESERVED per `plan.toml` (`feature_gate` declarations — m14/m15 +
+# m20-m23 → `intelligence`, m32 dispatch CLI → `api`, monitoring modules →
+# `monitoring`). They are NOT yet wired as `#[cfg(feature = ...)]` in source:
+# the 26 modules form an interdependent graph that does not partition cleanly,
+# so module-level feature-gating is deferred pending an explicit architecture
+# decision. Until then they intentionally enable nothing. `cfg!(feature =
+# "full")` is also a fixture used by `tests/m8_integration.rs` to confirm
+# `--all-features` does NOT activate the m8 `povm_calibrated` rustc-cfg.
 default = ["full"]
 full = ["api", "intelligence", "monitoring", "evolution"]
 api = []

@@ -18,8 +18,8 @@ use std::time::SystemTime;
 
 use workflow_core::m14_lift::LiftSnapshot;
 use workflow_core::m20_prefixspan::{Pattern, StepToken};
-use workflow_core::m21_variant_builder::build_variants;
-use workflow_core::m23_proposer::{build_proposal, WorkflowProposal};
+use workflow_core::m21_variant_builder::{build_variants, MutationKind, WorkflowVariant};
+use workflow_core::m23_proposer::{build_proposal, compose_proposals, WorkflowProposal};
 use workflow_core::m30_bank::{CuratedBank, DEFAULT_PRUNE_PENDING_THRESHOLD};
 use workflow_core::m31_selector::{select_top_k, SelectorConfig};
 use workflow_core::m32_dispatcher::{
@@ -271,7 +271,10 @@ fn pipeline_m31_selects_only_active_workflows_from_bank() {
     // id_a + id_c untouched (weight = 1.0).
 
     let actives = bank.active(1, DEFAULT_PRUNE_PENDING_THRESHOLD);
-    let active_ids: Vec<u64> = actives.iter().map(|w| w.workflow_id).collect();
+    let active_ids: Vec<u64> = actives
+        .iter()
+        .map(workflow_core::AcceptedWorkflow::workflow_id)
+        .collect();
     assert!(active_ids.contains(&id_a));
     assert!(active_ids.contains(&id_c));
     assert!(!active_ids.contains(&id_b), "PrunePending row leaked into actives");
@@ -322,25 +325,26 @@ fn pipeline_m11_consolidation_against_bank_then_m31_selection() {
     let id_a = bank.accept(proposal_with_seed(201), now).expect("a");
     let id_b = bank.accept(proposal_with_seed(202), now).expect("b");
 
-    // Seed pathway weights at the bridge convention pathway_id = workflow_id.
+    // Pathway weights keyed by the canonical `workflow_pathway_id` — the key
+    // `LifecycleBank::iter_active` reports (C8).
     let mut pw = HashMap::new();
-    pw.insert(id_a.to_string(), 0.5);
-    pw.insert(id_b.to_string(), 0.5);
+    pw.insert(workflow_core::m30_bank::workflow_pathway_id(id_a), 0.5);
+    pw.insert(workflow_core::m30_bank::workflow_pathway_id(id_b), 0.5);
     let pathways = Pw { w: pw };
     let freq = Fr;
     let cfg = DecayConfig::default();
 
     // Pre-cycle weights.
-    let pre_a = bank.get(id_a).expect("pre_a").weight;
-    let pre_b = bank.get(id_b).expect("pre_b").weight;
+    let pre_a = bank.get(id_a).expect("pre_a").weight();
+    let pre_b = bank.get(id_b).expect("pre_b").weight();
 
     let stats =
         run_consolidation_cycle(&mut bank, &pathways, &freq, &cfg, || Some(now)).expect("cycle");
     assert_eq!(stats.cycles_run, 1);
     assert!(stats.workflows_decayed >= 2);
 
-    let post_a = bank.get(id_a).expect("post_a").weight;
-    let post_b = bank.get(id_b).expect("post_b").weight;
+    let post_a = bank.get(id_a).expect("post_a").weight();
+    let post_b = bank.get(id_b).expect("post_b").weight();
     // Decay is multiplicative; post-weights must be strictly less than pre.
     assert!(post_a < pre_a, "id_a weight {pre_a} → {post_a}");
     assert!(post_b < pre_b, "id_b weight {pre_b} → {post_b}");
@@ -353,7 +357,7 @@ fn pipeline_m11_consolidation_against_bank_then_m31_selection() {
     let ranked = select_top_k(&actives, &scfg, |_| 0.5, now + 1, 2).expect("rank");
     assert_eq!(ranked.len(), 2);
     for cand in &ranked {
-        let bank_w = bank.get(cand.workflow_id).expect("g").weight;
+        let bank_w = bank.get(cand.workflow_id).expect("g").weight();
         assert!(
             (cand.components.fitness - bank_w).abs() < 1e-12,
             "score fitness {} != bank weight {}",
@@ -369,7 +373,7 @@ fn pipeline_m23_proposal_id_round_trips_through_bank_to_dispatch() {
     // (m30 FNV-1a hash) → ScoredCandidate.workflow_id (m31) → dispatch
     // workflow_id (m32 wire); identity preserved across cluster boundaries.
     let proposal = proposal_with_seed(77);
-    let proposal_id = proposal.proposal_id;
+    let proposal_id = proposal.proposal_id();
     let bank = CuratedBank::new();
     let workflow_id = bank.accept(proposal.clone(), 0).expect("accept");
 
@@ -397,4 +401,86 @@ fn pipeline_m23_proposal_id_round_trips_through_bank_to_dispatch() {
     let calls = log.lock().expect("log").clone();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].0, workflow_id);
+}
+
+#[test]
+fn pipeline_compose_proposals_threads_m22_diversity_cluster_end_to_end() {
+    // rationale: CC-4 end-to-end proof — `compose_proposals` is the only
+    // production batch path from m20/m21 patterns to m23 proposals. Before
+    // the diversity-closure wiring it hard-coded `diversity_cluster: None`,
+    // so the m22 K-means signal NEVER reached a proposal. This test passes
+    // a real diversity closure (cluster keyed off the variant's mutation
+    // kind, exactly as m22 K-means would partition the variant set) and
+    // asserts every emitted `WorkflowProposal` carries the expected
+    // `diversity_cluster()` — the load-bearing proof that CC-4 now works.
+    let snapshot = LiftSnapshot {
+        lift: Some(0.6),
+        ci_half: Some(0.05),
+        // Comfortably above the F2 floor so no variant is dropped.
+        n: 50,
+        latest_ts_ms: 0,
+        computed_at: SystemTime::now(),
+    };
+    // Multi-step pattern → m21 emits the full Identity/Swap/Skip set.
+    let pattern = Pattern::new(
+        vec![StepToken(1), StepToken(2), StepToken(3)],
+        25,
+        (0, 0),
+    );
+
+    // m22-style cluster assignment: Identity → 0, Swap → 1, Skip → 2.
+    let cluster_of = |v: &WorkflowVariant| -> Option<usize> {
+        Some(match v.mutation {
+            MutationKind::Identity => 0,
+            MutationKind::Swap { .. } => 1,
+            MutationKind::Skip { .. } => 2,
+        })
+    };
+
+    let proposals = compose_proposals(&[pattern], &snapshot, cluster_of);
+    assert!(
+        !proposals.is_empty(),
+        "sufficient-evidence batch must yield proposals"
+    );
+
+    // Every proposal must carry the cluster the closure assigned to its
+    // source variant — the diversity signal reached the production path.
+    for p in &proposals {
+        let expected = match p.variant().mutation {
+            MutationKind::Identity => Some(0),
+            MutationKind::Swap { .. } => Some(1),
+            MutationKind::Skip { .. } => Some(2),
+        };
+        assert_eq!(
+            p.diversity_cluster(),
+            expected,
+            "compose_proposals must thread the m22 cluster into every proposal"
+        );
+    }
+    // The Identity variant is always emitted — cluster 0 must be present.
+    assert!(
+        proposals.iter().any(|p| p.diversity_cluster() == Some(0)),
+        "Identity variant's cluster (0) missing from the batch"
+    );
+    // The multi-step pattern also yields Swap and/or Skip variants, so at
+    // least one non-zero cluster must appear — proving distinct m22
+    // clusters survive the batch path, not just a single broadcast value.
+    assert!(
+        proposals
+            .iter()
+            .any(|p| matches!(p.diversity_cluster(), Some(c) if c > 0)),
+        "expected at least one non-Identity variant carrying cluster > 0"
+    );
+
+    // The `|_| None` closure (m22 clustering skipped) yields None clusters
+    // — the legitimate complement of the threaded-cluster case above.
+    let pattern_none = Pattern::new(vec![StepToken(7), StepToken(8)], 25, (0, 0));
+    let none_proposals = compose_proposals(&[pattern_none], &snapshot, |_| None);
+    assert!(!none_proposals.is_empty());
+    assert!(
+        none_proposals
+            .iter()
+            .all(|p| p.diversity_cluster().is_none()),
+        "the |_| None closure must yield proposals with no diversity cluster"
+    );
 }

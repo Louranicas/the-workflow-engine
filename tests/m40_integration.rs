@@ -28,12 +28,13 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 use workflow_core::m40_nexus_emit::{
     build_event, HttpNexusClient, NexusClient, NexusEmitError, NexusEvent,
+    NexusEventKind,
 };
 
 fn fixture_event(i: i64) -> NexusEvent {
     build_event(
         "workflow-trace",
-        "workflow.dispatched",
+        NexusEventKind::WorkflowDispatched,
         serde_json::json!({"workflow_id": i, "tag": "wave-b2"}),
         1_700_000_000_000 + i,
     )

@@ -437,7 +437,13 @@ mod m30_real_bank {
     /// (preserves weight under decay → exercise other invariants without
     /// fitness-side perturbation unless a test overrides).
     fn make_thriving_readers(ids: &[u64]) -> (StubPathways, StubFreq) {
-        let weights: HashMap<String, f64> = ids.iter().map(|id| (id.to_string(), 1.0)).collect();
+        // Pathway weights keyed by the canonical `workflow_pathway_id` (C8 —
+        // the key `CuratedBank::iter_active` reports); frequency counts stay
+        // keyed by the `workflow_id` decimal (unchanged).
+        let weights: HashMap<String, f64> = ids
+            .iter()
+            .map(|id| (workflow_core::m30_bank::workflow_pathway_id(*id), 1.0))
+            .collect();
         let counts: HashMap<String, u64> = ids.iter().map(|id| (id.to_string(), 1)).collect();
         (
             StubPathways { weights },
@@ -468,7 +474,7 @@ mod m30_real_bank {
         assert_eq!(stats.cycles_run, 1);
         // Thriving signals → factor 1.0 → weights stay at 1.0.
         for id in &ids {
-            let w = bank.get(*id).expect("row").weight;
+            let w = bank.get(*id).expect("row").weight();
             assert!(
                 (w - 1.0).abs() < 1e-12,
                 "thriving workflow {id} should stay at 1.0, got {w}"
@@ -511,7 +517,7 @@ mod m30_real_bank {
         // PrunePending soft band is therefore [0.05, 0.10). Drive weight
         // to 0.07 (inside it).
         bank.apply_decay(ids[0], 0.07);
-        assert!((bank.get(ids[0]).expect("row").weight - 0.07).abs() < 1e-12);
+        assert!((bank.get(ids[0]).expect("row").weight() - 0.07).abs() < 1e-12);
         let (pathways, freq) = make_thriving_readers(&ids);
         let cfg = DecayConfig::default();
         let stats = run_consolidation_cycle(&mut bank, &pathways, &freq, &cfg, || Some(now))
@@ -560,7 +566,7 @@ mod m30_real_bank {
         let (mut bank, ids) = build_real_bank(2, now);
         // Only seed id_0's pathway weight; id_1 missing.
         let mut weights = HashMap::new();
-        weights.insert(ids[0].to_string(), 0.5);
+        weights.insert(workflow_core::m30_bank::workflow_pathway_id(ids[0]), 0.5);
         let pathways = StubPathways { weights };
         let counts: HashMap<String, u64> =
             ids.iter().map(|id| (id.to_string(), 1)).collect();
@@ -575,7 +581,7 @@ mod m30_real_bank {
         // CRITICAL: both workflows must STILL be at 1.0 — no decay
         // applied because pre-fetch short-circuited on the second read.
         for id in &ids {
-            let w = bank.get(*id).expect("row").weight;
+            let w = bank.get(*id).expect("row").weight();
             assert!(
                 (w - 1.0).abs() < 1e-12,
                 "workflow {id} was decayed despite pre-fetch failure — partial-state regression: got {w}"
@@ -590,12 +596,12 @@ mod m30_real_bank {
         // entirely unmutated (no partial-state writes mid-cycle).
         let now = 1_700_000_000_000_i64;
         let (mut bank, ids) = build_real_bank(3, now);
-        let weights_before: Vec<f64> = ids.iter().map(|id| bank.get(*id).expect("r").weight).collect();
+        let weights_before: Vec<f64> = ids.iter().map(|id| bank.get(*id).expect("r").weight()).collect();
         let (pathways, freq) = make_thriving_readers(&ids);
         let cfg = DecayConfig::default();
         let err = run_consolidation_cycle(&mut bank, &pathways, &freq, &cfg, || None).unwrap_err();
         assert!(matches!(err, DecayError::ClockUnavailable));
-        let weights_after: Vec<f64> = ids.iter().map(|id| bank.get(*id).expect("r").weight).collect();
+        let weights_after: Vec<f64> = ids.iter().map(|id| bank.get(*id).expect("r").weight()).collect();
         assert_eq!(
             weights_before, weights_after,
             "ClockUnavailable must leave bank unmutated"
@@ -622,7 +628,7 @@ mod m30_real_bank {
         // clamped to 1.0 by the bank's apply_decay implementation).
         bank.apply_decay(ids[0], 100.0); // 0.07 * 100 = 7.0 → clamp to 1.0
         let row_high = bank.get(ids[0]).expect("row");
-        assert!((row_high.weight - 1.0).abs() < f64::EPSILON);
+        assert!((row_high.weight() - 1.0).abs() < f64::EPSILON);
         assert_eq!(
             row_high.phase_for(now + 1, DEFAULT_PRUNE_PENDING_THRESHOLD, DEFAULT_PRUNE_THRESHOLD),
             SunsetPhase::Active,
@@ -642,7 +648,7 @@ mod m30_real_bank {
         // High frequency (max cohort), zero fitness (pathway weight 0.0),
         // recency = 1.0 (last_run == accepted_at == now).
         let mut weights = HashMap::new();
-        weights.insert(ids[0].to_string(), 0.0);
+        weights.insert(workflow_core::m30_bank::workflow_pathway_id(ids[0]), 0.0);
         let pathways = StubPathways { weights };
         let mut counts = HashMap::new();
         counts.insert(ids[0].to_string(), 100);
@@ -652,7 +658,7 @@ mod m30_real_bank {
         };
         let cfg = DecayConfig::default();
         run_consolidation_cycle(&mut bank, &pathways, &freq, &cfg, || Some(now)).expect("ok");
-        let w = bank.get(ids[0]).expect("row").weight;
+        let w = bank.get(ids[0]).expect("row").weight();
         // 1.0 * base_rate (0.98) — multiplicative collapse to base.
         assert!(
             (w - 0.98).abs() < 1e-12,
@@ -691,7 +697,7 @@ mod m30_real_bank {
         let (bank, ids) = build_real_bank(1, now);
         assert!(bank.try_apply_decay(ids[0], f64::NAN).is_err());
         assert!(bank.try_apply_decay(ids[0], f64::INFINITY).is_err());
-        let w = bank.get(ids[0]).expect("row").weight;
+        let w = bank.get(ids[0]).expect("row").weight();
         assert!(w.is_finite() && (w - 1.0).abs() < f64::EPSILON, "weight stayed pristine");
     }
 

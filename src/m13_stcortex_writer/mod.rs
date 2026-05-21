@@ -24,9 +24,9 @@
 //! instead of writing — this is the sole production constructor of that
 //! variant. A [`RegistrationHandle`](crate::m2_stcortex_consumer::RegistrationHandle)
 //! satisfies [`FreshnessGate`] directly (its `is_fresh()` is the gate
-//! signal). When no gate is injected (`StcortexWriter::new`), the gate is
-//! treated as always-fresh — preserving the legacy signature for the
-//! 3-band-only call sites.
+//! signal). When no gate is injected (`StcortexWriter::new_unchecked`),
+//! the gate is treated as always-fresh — preserving the legacy signature
+//! for the 3-band-only call sites.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -36,7 +36,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::m7_workflow_runs::WorkflowRunRow;
+use crate::m7_workflow_runs::{Outcome, WorkflowRunRow};
 use crate::m9_watcher_namespace_guard::{
     assert_workflow_trace_namespace, NamespaceViolation, ValidatedNamespace,
 };
@@ -109,16 +109,18 @@ impl CorrelationMemory {
         namespace: &ValidatedNamespace,
         under_pressure: bool,
     ) -> Self {
-        let outcome = row.outcome.as_deref().unwrap_or("unknown");
+        // An open run (no outcome yet) is treated as `unknown` for both the
+        // relevance heuristic and the persisted content digest.
+        let outcome = row.run_state.outcome().unwrap_or(Outcome::Unknown);
         let relevance = match outcome {
-            "ok" => 1.0_f32,
-            "fail" => 0.5,
-            "abort" => 0.3,
-            _ => 0.1,
+            Outcome::Ok => 1.0_f32,
+            Outcome::Fail => 0.5,
+            Outcome::Abort => 0.3,
+            Outcome::Unknown => 0.1,
         };
         let content = serde_json::json!({
             "run_id": row.id,
-            "outcome": outcome,
+            "outcome": outcome.as_str(),
             "cost_tokens": row.cost_tokens,
             "consumer_inputs_digest": &row.consumer_inputs,
         });
@@ -324,13 +326,17 @@ where
     R: LtpDensityReader,
     W: SubstrateWriter,
 {
-    /// Construct with explicit reader / writer / outbox path.
+    /// Construct **without** a consumer-freshness gate (SEC1 disabled).
     ///
-    /// No consumer-freshness gate is installed — the writer treats the
-    /// stcortex consumer as always-fresh and the 3-band LTP gate is the
-    /// sole admission control. Use [`Self::with_freshness_gate`] to
-    /// enforce the SEC1 refuse-write-on-stale invariant.
-    pub fn new(reader: R, writer: W, outbox_path: PathBuf) -> Self {
+    /// ⚠️ This is the *unchecked* constructor: no consumer-freshness gate is
+    /// installed, so the writer treats the stcortex consumer as always-fresh
+    /// and the 3-band LTP gate is the sole admission control. The
+    /// `_unchecked` suffix makes that opt-out **loud at the call site** —
+    /// production wiring should prefer [`Self::with_freshness_gate`], which
+    /// enforces the SEC1 refuse-write-on-stale invariant. This constructor
+    /// exists for tests and for callers that deliberately want 3-band-only
+    /// admission control.
+    pub fn new_unchecked(reader: R, writer: W, outbox_path: PathBuf) -> Self {
         Self {
             reader,
             writer,
@@ -592,7 +598,7 @@ mod tests {
         CorrelationMemory, DeferReason, LtpDensityReader, PromoteOutcome, StcortexWriter,
         StcortexWriterError, SubstrateWriter, LTP_PHASE_1_FLOOR, LTP_PHASE_3_TARGET, SOURCE_TAG,
     };
-    use crate::m7_workflow_runs::WorkflowRunRow;
+    use crate::m7_workflow_runs::{Outcome, RunState, WorkflowRunRow};
     use crate::m9_watcher_namespace_guard::{
         assert_workflow_trace_namespace, WORKFLOW_TRACE_NS_PREFIX,
     };
@@ -608,8 +614,10 @@ mod tests {
         WorkflowRunRow {
             id: 42,
             started_at: "2026-05-17T00:00:00Z".into(),
-            ended_at: Some("2026-05-17T01:00:00Z".into()),
-            outcome: Some("ok".into()),
+            run_state: RunState::Closed {
+                ended_at: "2026-05-17T01:00:00Z".into(),
+                outcome: Outcome::Ok,
+            },
             consumer_inputs: "{}".into(),
             cost_tokens: Some(100),
             fitness_dimension: 0.0,
@@ -643,23 +651,38 @@ mod tests {
         }
     }
 
+    /// Build a fresh, zero-state [`RecordingWriter`]; `fail` selects the
+    /// write-error mock.
+    fn recording_writer(fail: bool) -> RecordingWriter {
+        RecordingWriter {
+            next_id: StdMutex::new(0),
+            written: StdMutex::new(Vec::new()),
+            fail,
+        }
+    }
+
+    /// Create a `.jsonl` temp outbox path that survives `Drop` (the file is
+    /// intentionally leaked so the writer-under-test can read it back).
+    fn temp_outbox_path() -> std::path::PathBuf {
+        let outbox = tempfile::Builder::new()
+            .suffix(".jsonl")
+            .tempfile()
+            .expect("temp")
+            .into_temp_path();
+        let path = outbox.to_path_buf();
+        // Forget the temp_path so the file is not deleted on drop.
+        std::mem::forget(outbox);
+        path
+    }
+
     fn writer(
         density: Option<f64>,
         fail_writes: bool,
     ) -> StcortexWriter<StaticDensity, RecordingWriter> {
-        let outbox =
-            tempfile::Builder::new().suffix(".jsonl").tempfile().expect("temp").into_temp_path();
-        let path = outbox.to_path_buf();
-        // Forget the temp_path so the file is not deleted on drop.
-        std::mem::forget(outbox);
-        StcortexWriter::new(
+        StcortexWriter::new_unchecked(
             StaticDensity(density),
-            RecordingWriter {
-                next_id: StdMutex::new(0),
-                written: StdMutex::new(Vec::new()),
-                fail: fail_writes,
-            },
-            path,
+            recording_writer(fail_writes),
+            temp_outbox_path(),
         )
     }
 
@@ -753,13 +776,16 @@ mod tests {
     fn correlation_memory_relevance_mapping() {
         let ns = assert_workflow_trace_namespace(&canonical_ns_x()).expect("ns");
         for (outcome, expected) in [
-            ("ok", 1.0_f32),
-            ("fail", 0.5),
-            ("abort", 0.3),
-            ("unknown", 0.1),
+            (Outcome::Ok, 1.0_f32),
+            (Outcome::Fail, 0.5),
+            (Outcome::Abort, 0.3),
+            (Outcome::Unknown, 0.1),
         ] {
             let mut r = run();
-            r.outcome = Some(outcome.to_owned());
+            r.run_state = RunState::Closed {
+                ended_at: "2026-05-17T01:00:00Z".into(),
+                outcome,
+            };
             let m = CorrelationMemory::from_row(&r, &ns, false);
             assert!((m.relevance - expected).abs() < 1e-6);
         }
@@ -877,21 +903,10 @@ mod tests {
                 panic!("LTP probe must not fire when namespace is rejected");
             }
         }
-        let outbox = tempfile::Builder::new()
-            .suffix(".jsonl")
-            .tempfile()
-            .expect("temp")
-            .into_temp_path();
-        let path = outbox.to_path_buf();
-        std::mem::forget(outbox);
-        let w = StcortexWriter::new(
+        let w = StcortexWriter::new_unchecked(
             PanickingReader,
-            RecordingWriter {
-                next_id: StdMutex::new(0),
-                written: StdMutex::new(Vec::new()),
-                fail: false,
-            },
-            path,
+            recording_writer(false),
+            temp_outbox_path(),
         );
         let err = w.promote_run(&run(), "orac_evil").expect_err("AP30");
         assert!(matches!(err, StcortexWriterError::NamespaceViolation(_)));
@@ -965,15 +980,17 @@ mod tests {
         }
     }
 
-    // rationale: Adversarial input — unknown outcome strings (future m7
-    // variant unsynced with m13) collapse to the "unknown" relevance
-    // bucket (0.1). Failure-soft documentation.
+    // rationale: Type-design invariant — unrecognised outcome strings are
+    // now structurally unrepresentable (`run_state` carries a typed
+    // `Outcome`). The remaining "no clear outcome" case is an open run
+    // (`RunState::Open`); `from_row` collapses it to the `Outcome::Unknown`
+    // relevance bucket (0.1).
     #[test]
-    fn unknown_outcome_collapses_to_unknown_relevance() {
-        // rationale: Adversarial input
+    fn open_run_collapses_to_unknown_relevance() {
+        // rationale: Type-design invariant
         let ns = assert_workflow_trace_namespace(&canonical_ns()).expect("ns");
         let mut r = run();
-        r.outcome = Some("future_variant_zzz".into());
+        r.run_state = RunState::Open;
         let m = CorrelationMemory::from_row(&r, &ns, false);
         assert!((m.relevance - 0.1).abs() < 1e-6);
     }
@@ -1271,7 +1288,7 @@ mod tests {
     fn correlation_memory_none_outcome_maps_to_unknown_and_lowest_relevance() {
         let ns = assert_workflow_trace_namespace(&canonical_ns()).expect("ns");
         let mut r = run();
-        r.outcome = None;
+        r.run_state = RunState::Open;
         let m = CorrelationMemory::from_row(&r, &ns, false);
         assert!((m.relevance - 0.1).abs() < 1e-6, "None outcome relevance");
         let parsed: serde_json::Value = serde_json::from_str(&m.content).expect("json");
@@ -1420,22 +1437,11 @@ mod tests {
         density: Option<f64>,
         fresh: bool,
     ) -> StcortexWriter<StaticDensity, RecordingWriter> {
-        let outbox = tempfile::Builder::new()
-            .suffix(".jsonl")
-            .tempfile()
-            .expect("temp")
-            .into_temp_path();
-        let path = outbox.to_path_buf();
-        std::mem::forget(outbox);
         StcortexWriter::with_freshness_gate(
             StaticDensity(density),
-            RecordingWriter {
-                next_id: StdMutex::new(0),
-                written: StdMutex::new(Vec::new()),
-                fail: false,
-            },
+            recording_writer(false),
             Arc::new(StaticFreshness(fresh)),
-            path,
+            temp_outbox_path(),
         )
     }
 
@@ -1493,22 +1499,11 @@ mod tests {
                 panic!("LTP probe must not run when the consumer is stale");
             }
         }
-        let outbox = tempfile::Builder::new()
-            .suffix(".jsonl")
-            .tempfile()
-            .expect("temp")
-            .into_temp_path();
-        let path = outbox.to_path_buf();
-        std::mem::forget(outbox);
         let w = StcortexWriter::with_freshness_gate(
             PanickingReader,
-            RecordingWriter {
-                next_id: StdMutex::new(0),
-                written: StdMutex::new(Vec::new()),
-                fail: false,
-            },
+            recording_writer(false),
             Arc::new(StaticFreshness(false)),
-            path,
+            temp_outbox_path(),
         );
         let out = w
             .promote_run(&run(), &canonical_ns())

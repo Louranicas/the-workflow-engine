@@ -43,7 +43,7 @@ use workflow_core::m41_lcm_rpc::{LcmLoopCreateParams, RPC_METHOD};
 use workflow_core::m42_stcortex_emit::{
     emit_feedback, signal_for_outcome, HebbianSignal,
 };
-use workflow_core::m7_workflow_runs::WorkflowRunRow;
+use workflow_core::m7_workflow_runs::{Outcome, RunState, WorkflowRunRow};
 use workflow_core::m9_watcher_namespace_guard::WORKFLOW_TRACE_NS_PREFIX;
 
 // ─── shared fixtures ────────────────────────────────────────────────────
@@ -132,11 +132,17 @@ fn approve(kind: VerifierKind) -> Box<dyn Verifier> {
 }
 
 fn run_with_outcome(outcome: Option<&str>) -> WorkflowRunRow {
+    let run_state = match outcome {
+        None => RunState::Open,
+        Some(o) => RunState::Closed {
+            ended_at: "2026-05-21T01:00:00Z".into(),
+            outcome: Outcome::parse(o).expect("test outcome must be a valid CHECK value"),
+        },
+    };
     WorkflowRunRow {
         id: 5005,
         started_at: "2026-05-21T00:00:00Z".into(),
-        ended_at: Some("2026-05-21T01:00:00Z".into()),
-        outcome: outcome.map(str::to_owned),
+        run_state,
         consumer_inputs: "{}".into(),
         cost_tokens: Some(200),
         fitness_dimension: 0.0,
@@ -195,14 +201,14 @@ fn cc5_dispatch_outcome_feeds_m42_substrate_emit() {
 
     // The dispatch outcome's run record (outcome "ok") feeds m42 emit.
     let run = run_with_outcome(Some("ok"));
-    let signal = signal_for_outcome(run.outcome.as_deref());
+    let signal = signal_for_outcome(run.run_state.outcome().map(Outcome::as_str));
     assert_eq!(
         signal,
         HebbianSignal::Reinforce,
         "an ok run must derive a Reinforce signal"
     );
     let w42 =
-        StcortexWriter::new(StaticDensity(Some(0.20)), RecordingWriter::new(), temp_outbox());
+        StcortexWriter::new_unchecked(StaticDensity(Some(0.20)), RecordingWriter::new(), temp_outbox());
     let emit_out = emit_feedback(&w42, &workflow, &run, &canonical_ns(), signal)
         .expect("m42 emit_feedback consumes the dispatch outcome");
     assert!(
@@ -213,7 +219,7 @@ fn cc5_dispatch_outcome_feeds_m42_substrate_emit() {
     // A failed run derives the opposite polarity.
     let bad_run = run_with_outcome(Some("fail"));
     assert_eq!(
-        signal_for_outcome(bad_run.outcome.as_deref()),
+        signal_for_outcome(bad_run.run_state.outcome().map(Outcome::as_str)),
         HebbianSignal::Depress,
         "a failed run must derive a Depress signal"
     );
@@ -228,7 +234,7 @@ fn cc5_dispatch_outcome_feeds_m42_substrate_emit() {
 fn cc5_m42_routes_feedback_through_m13_to_stcortex() {
     // rationale: Cross-module (CC-5 m42 → m13 → m9)
     let writer = RecordingWriter::new();
-    let w42 = StcortexWriter::new(StaticDensity(Some(0.20)), writer, temp_outbox());
+    let w42 = StcortexWriter::new_unchecked(StaticDensity(Some(0.20)), writer, temp_outbox());
     let bank = CuratedBank::new();
     let id = bank
         .accept(proposal_with_seed(21), 1_700_000_000_000)
@@ -253,7 +259,7 @@ fn cc5_m42_routes_feedback_through_m13_to_stcortex() {
     // A foreign namespace fails the m9 boundary transitively — the m42 →
     // m13 → m9 chain has no bypass.
     let w42_bad =
-        StcortexWriter::new(StaticDensity(Some(0.20)), RecordingWriter::new(), temp_outbox());
+        StcortexWriter::new_unchecked(StaticDensity(Some(0.20)), RecordingWriter::new(), temp_outbox());
     let err = emit_feedback(
         &w42_bad,
         &workflow,
@@ -348,13 +354,13 @@ fn cc5_substrate_loop_full_cycle_g_to_h() {
     // m42 — emit feedback for the dispatched workflow (G → H closure).
     let run = run_with_outcome(Some("ok"));
     let w42 =
-        StcortexWriter::new(StaticDensity(Some(0.20)), RecordingWriter::new(), temp_outbox());
+        StcortexWriter::new_unchecked(StaticDensity(Some(0.20)), RecordingWriter::new(), temp_outbox());
     let emit_out = emit_feedback(
         &w42,
         &workflow,
         &run,
         &canonical_ns(),
-        signal_for_outcome(run.outcome.as_deref()),
+        signal_for_outcome(run.run_state.outcome().map(Outcome::as_str)),
     )
     .expect("m42 closes the G → H loop");
     assert!(
@@ -430,7 +436,7 @@ fn cc5_feedback_loop_preserves_workflow_id_identity() {
 
     // m32 — dispatcher carries the id unchanged onto the conductor wire.
     let workflow = bank.get(workflow_id).expect("m30 get");
-    assert_eq!(workflow.workflow_id, workflow_id, "m30 get preserved workflow_id");
+    assert_eq!(workflow.workflow_id(), workflow_id, "m30 get preserved workflow_id");
     let (client, log) = spy_pair();
     let dispatcher = ConductorDispatcher::new(client);
     let _ = dispatcher
@@ -446,7 +452,7 @@ fn cc5_feedback_loop_preserves_workflow_id_identity() {
     // m42 — feedback emit for the same workflow (no id mutation in the
     // AcceptedWorkflow carried into emit_feedback).
     let w42 =
-        StcortexWriter::new(StaticDensity(Some(0.20)), RecordingWriter::new(), temp_outbox());
+        StcortexWriter::new_unchecked(StaticDensity(Some(0.20)), RecordingWriter::new(), temp_outbox());
     let _ = emit_feedback(
         &w42,
         &workflow,
@@ -456,7 +462,7 @@ fn cc5_feedback_loop_preserves_workflow_id_identity() {
     )
     .expect("m42 emit");
     assert_eq!(
-        workflow.workflow_id, workflow_id,
+        workflow.workflow_id(), workflow_id,
         "m42 emit must not mutate the workflow_id"
     );
 

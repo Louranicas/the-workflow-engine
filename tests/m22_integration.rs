@@ -6,9 +6,9 @@
 //!   bit-identical centroids (compared via `f64::to_bits()`, not an
 //!   epsilon — m22's contract is exact reproducibility).
 //! - Boundary — `k == n` places every point in its own cluster.
-//! - Adversarial — NaN / +∞ / -∞ coordinates are refused with a typed
-//!   error (the public taxonomy reports these as `DimMismatch` with the
-//!   `usize::MAX` sentinel — see m22 mod docstring F-m22-02).
+//! - Adversarial — NaN / +∞ / -∞ coordinates are refused with the
+//!   dedicated [`KMeansError::NonFiniteCoordinate`] variant, which carries
+//!   the offending `point` / `dim` indices (no magic sentinel).
 //! - Wave-1 fix regression — an empty cluster mid-iteration retains its
 //!   prior centroid rather than recentering on the origin (no NaN drift).
 //! - Wave-A4 H7 fix regression — the k-means++ tiebreak bias is bounded
@@ -114,8 +114,9 @@ fn m22_rejects_nan_input() {
     };
     let err = kmeans(&pts, &cfg).expect_err("NaN input must be refused");
     assert!(
-        matches!(err, KMeansError::DimMismatch { .. }),
-        "NaN must be reported via the typed taxonomy, got {err:?}"
+        matches!(err, KMeansError::NonFiniteCoordinate { point: 1, dim: 0 }),
+        "NaN must be reported via the dedicated NonFiniteCoordinate variant \
+         carrying the offending indices, got {err:?}"
     );
 }
 
@@ -131,13 +132,17 @@ fn m22_rejects_infinite_input() {
     };
     let err = kmeans(&pts, &cfg).expect_err("infinite input must be refused");
     assert!(
-        matches!(err, KMeansError::DimMismatch { .. }),
-        "infinity must be reported via the typed taxonomy, got {err:?}"
+        matches!(err, KMeansError::NonFiniteCoordinate { point: 1, dim: 0 }),
+        "infinity must be reported via the dedicated NonFiniteCoordinate \
+         variant, got {err:?}"
     );
     // -infinity is the symmetric case and must also be refused.
     let neg = vec![vec![0.0, 0.0], vec![f64::NEG_INFINITY, 1.0]];
     assert!(
-        matches!(kmeans(&neg, &cfg), Err(KMeansError::DimMismatch { .. })),
+        matches!(
+            kmeans(&neg, &cfg),
+            Err(KMeansError::NonFiniteCoordinate { point: 1, dim: 0 })
+        ),
         "-infinity must also be refused"
     );
 }

@@ -30,6 +30,21 @@ pub enum WorkflowError {
     /// JSON patch failure when merging consumer_inputs.
     #[error("consumer_inputs JSON patch failed: {0}")]
     JsonPatch(String),
+    /// A persisted row carries a mismatched `(ended_at, outcome)` pair —
+    /// exactly one column is `NULL`. The lifecycle is coupled: an open run
+    /// has neither, a closed run has both. A mixed pair is DB corruption.
+    #[error(
+        "inconsistent run state for row {id}: \
+         ended_at is {ended_at_present} but outcome is {outcome_present}"
+    )]
+    InconsistentRunState {
+        /// The id of the corrupt row.
+        id: i64,
+        /// Whether the `ended_at` column was non-NULL.
+        ended_at_present: bool,
+        /// Whether the `outcome` column was non-NULL.
+        outcome_present: bool,
+    },
     /// Connection-open failure.
     #[error("connection acquisition failed: {0}")]
     Connection(String),

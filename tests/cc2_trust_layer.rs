@@ -47,7 +47,7 @@ use workflow_core::m21_variant_builder::build_variants;
 use workflow_core::m23_proposer::build_proposal;
 use workflow_core::m30_bank::{AcceptedWorkflow, CuratedBank};
 use workflow_core::m42_stcortex_emit::{emit_feedback, HebbianSignal, SubstrateEmitError};
-use workflow_core::m7_workflow_runs::WorkflowRunRow;
+use workflow_core::m7_workflow_runs::{Outcome, RunState, WorkflowRunRow};
 use workflow_core::m8_povm_build_prereq::{classify, BandClassification};
 
 // ─── shared fixtures ────────────────────────────────────────────────────
@@ -104,8 +104,10 @@ fn ok_run() -> WorkflowRunRow {
     WorkflowRunRow {
         id: 1001,
         started_at: "2026-05-21T00:00:00Z".into(),
-        ended_at: Some("2026-05-21T01:00:00Z".into()),
-        outcome: Some("ok".into()),
+        run_state: RunState::Closed {
+            ended_at: "2026-05-21T01:00:00Z".into(),
+            outcome: Outcome::Ok,
+        },
         consumer_inputs: "{}".into(),
         cost_tokens: Some(100),
         fitness_dimension: 0.0,
@@ -151,7 +153,7 @@ fn cc2_every_stcortex_write_passes_m9_namespace_guard() {
     let foreign = "orac_foreign_prefix";
 
     // Boundary 1 — m13 writer directly.
-    let w13 = StcortexWriter::new(StaticDensity(Some(0.20)), RecordingWriter::new(), temp_outbox());
+    let w13 = StcortexWriter::new_unchecked(StaticDensity(Some(0.20)), RecordingWriter::new(), temp_outbox());
     let err13 = w13
         .promote_run(&ok_run(), foreign)
         .expect_err("m13 must refuse foreign namespace at the m9 boundary");
@@ -161,7 +163,7 @@ fn cc2_every_stcortex_write_passes_m9_namespace_guard() {
     );
 
     // Boundary 2 — m42 emit_feedback (m42 → m13 → m9).
-    let w42 = StcortexWriter::new(StaticDensity(Some(0.20)), RecordingWriter::new(), temp_outbox());
+    let w42 = StcortexWriter::new_unchecked(StaticDensity(Some(0.20)), RecordingWriter::new(), temp_outbox());
     let err42 = emit_feedback(
         &w42,
         &workflow_fixture(7),
@@ -180,13 +182,13 @@ fn cc2_every_stcortex_write_passes_m9_namespace_guard() {
 
     // Control: a canonical namespace passes at BOTH boundaries.
     let w13_ok =
-        StcortexWriter::new(StaticDensity(Some(0.20)), RecordingWriter::new(), temp_outbox());
+        StcortexWriter::new_unchecked(StaticDensity(Some(0.20)), RecordingWriter::new(), temp_outbox());
     assert!(
         w13_ok.promote_run(&ok_run(), &canonical_ns()).is_ok(),
         "canonical namespace must pass the m13 boundary"
     );
     let w42_ok =
-        StcortexWriter::new(StaticDensity(Some(0.20)), RecordingWriter::new(), temp_outbox());
+        StcortexWriter::new_unchecked(StaticDensity(Some(0.20)), RecordingWriter::new(), temp_outbox());
     assert!(
         emit_feedback(
             &w42_ok,
@@ -211,7 +213,7 @@ fn cc2_m9_hyphen_munge_applies_transitively_through_m13() {
     // Move ownership into the StcortexWriter; inspect via a re-built fixture
     // is not possible (writer is consumed), so we use the m13 unit-tested
     // contract + re-derive the expected munge here.
-    let w = StcortexWriter::new(StaticDensity(Some(0.20)), writer, temp_outbox());
+    let w = StcortexWriter::new_unchecked(StaticDensity(Some(0.20)), writer, temp_outbox());
     let out = w
         .promote_run(&ok_run(), "workflow-trace-x")
         .expect("hyphenated namespace must pass after m9 munge");
@@ -322,14 +324,16 @@ fn cc2_m11_decay_cycle_is_the_lifecycle_arm_of_cc2() {
     let id_a = bank.accept(p_a, now).expect("accept a");
     let id_b = bank.accept(p_b, now).expect("accept b");
 
+    // Pathway weights are keyed by the canonical `workflow_pathway_id` — the
+    // key `CuratedBank`'s `LifecycleBank::iter_active` reports (C8).
     let mut pw = HashMap::new();
-    pw.insert(id_a.to_string(), 0.5);
-    pw.insert(id_b.to_string(), 0.5);
+    pw.insert(workflow_core::m30_bank::workflow_pathway_id(id_a), 0.5);
+    pw.insert(workflow_core::m30_bank::workflow_pathway_id(id_b), 0.5);
     let pathways = Pw { w: pw };
     let cfg = DecayConfig::default();
 
-    let pre_a = bank.get(id_a).expect("pre a").weight;
-    let pre_b = bank.get(id_b).expect("pre b").weight;
+    let pre_a = bank.get(id_a).expect("pre a").weight();
+    let pre_b = bank.get(id_b).expect("pre b").weight();
 
     let stats = run_consolidation_cycle(&mut bank, &pathways, &Fr, &cfg, || Some(now))
         .expect("consolidation cycle");
@@ -339,8 +343,8 @@ fn cc2_m11_decay_cycle_is_the_lifecycle_arm_of_cc2() {
         "both active workflows must be decayed"
     );
 
-    let post_a = bank.get(id_a).expect("post a").weight;
-    let post_b = bank.get(id_b).expect("post b").weight;
+    let post_a = bank.get(id_a).expect("post a").weight();
+    let post_b = bank.get(id_b).expect("post b").weight();
     // CC-2 trust regime: decay is multiplicative; usage alone never grants
     // immortality — both weights strictly decrease.
     assert!(post_a < pre_a, "id_a weight {pre_a} → {post_a} must decay");
@@ -386,7 +390,7 @@ fn cc2_namespace_guard_control_char_rejection_holds_across_writers() {
     // rationale: Anti-property (m9 ControlChar across m13 + m42)
     for bad_ns in ["workflow_trace\0x", "\u{FEFF}workflow_trace_x"] {
         // m13 boundary.
-        let w13 = StcortexWriter::new(
+        let w13 = StcortexWriter::new_unchecked(
             StaticDensity(Some(0.20)),
             RecordingWriter::new(),
             temp_outbox(),
@@ -403,7 +407,7 @@ fn cc2_namespace_guard_control_char_rejection_holds_across_writers() {
         );
 
         // m42 boundary (transitive).
-        let w42 = StcortexWriter::new(
+        let w42 = StcortexWriter::new_unchecked(
             StaticDensity(Some(0.20)),
             RecordingWriter::new(),
             temp_outbox(),

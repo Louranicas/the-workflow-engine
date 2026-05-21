@@ -24,14 +24,18 @@ remotes. **Tests 1310 → 1903; clippy + pedantic clean every wave.**
   false-gate docstrings, HTTP body caps) (→ 1834).
 - **W3** `2e3113d` — type-design: `#[non_exhaustive]` ×24, `WorkflowId` + `MinSupport`
   encapsulation, comment accuracy (→ 1835).
-- **W4** `5de71ac` — mutation testing: `cargo-mutants` 412 mutants, 80.6% baseline; 68
-  mutant-killing tests, all surviving non-timeout mutants resolved (67 killed + 1
-  proven-equivalent) (→ 1903).
+- **W4** `5de71ac` — mutation testing: `cargo-mutants` scoped to m10/m11/m21/m22.
+  Committed baseline run = 319 mutants (240 caught / 20 missed / 20 timeout / 39 unviable;
+  85.7% caught of 280 viable). 68 mutant-killing tests authored targeting the 20 missed
+  mutants; the 20 m21 `build_variants` timeout mutants remain unscored. (→ 1903.)
 - **W5** `e8f6dd3` — docs reconciliation + 4-surface persistence + push.
 
 Gate every wave: `cargo check` + `clippy -D warnings` + `clippy -D clippy::pedantic` +
-`cargo test --all-targets --all-features --release`. **Open for node 0.A:** F2 — m8 POVM-gate
-architecture decision; W3 #5–#10 — core-domain-type encapsulation portfolio.
+`cargo test --all-targets --all-features --release`. **Resolved S1003733** (assessment-driven
+remediation): F2 m8 POVM-gate → **KEEP-DORMANT** (see `m8_povm_build_prereq` module doc §);
+W3 #5–#10 core-type-encapsulation portfolio → **completed** (remediation Wave C — 6
+representable-illegal-state holes closed across Pattern/WorkflowProposal/AcceptedWorkflow/
+NexusEvent/WorkflowRunRow/ID-newtypes).
 
 ### 🔵 COLD-START — RESUME HERE
 
@@ -211,11 +215,11 @@ cd /home/louranicas/claude-code-workspace/the-workflow-engine && \
 
 | State | Value |
 |---|---|
-| **Phase** | ACTIVE implementation + hardening — G9 fired 2026-05-17, HOLD-v2 lifted. 26-module Rust codebase (~31k LOC); Hardening Fleet 2026-05-21 W1–W3 committed, W4 in progress |
+| **Phase** | ACTIVE implementation + hardening — G9 fired 2026-05-17, HOLD-v2 lifted. 26-module Rust codebase (~31k LOC); Hardening Fleet 2026-05-21 complete (W0–W5); assessment-driven remediation S1003733 in progress |
 | **Gates** | G1–G9 all resolved; **G9 FIRED 2026-05-17** — live record in `GATE_STATE.md` |
 | **Last spec version** | v1.2 binding (Zen-audit-locked); **v1.3 patch pending** (single-phase override absorption) |
 | **Vault** | 88 files / 2.4MB across root + `module specs/` (9 files) + `boilerplate modules/` (10 subdirs + 4 gold-standard exemplars) + `deployment framework/` (10 phase docs) |
-| **Git** | branch `main` at `76ea4d6` (CR-2b coactivation pair-loop existence-filter); 479 dirty files |
+| **Git** | branch `main` at `2fbfbd1` (Hardening Fleet W5 docs persist); assessment-remediation S1003733 in flight |
 | **Services** | 11/11 healthy at last probe (8082, 8083, 8092, 8111, 8120, 8125, 8130, 8132, 8133, 8180, 10002) |
 | **Watcher** | ready · eligible · 48,723 observations · proposals_submitted 0 · R13 elapsed |
 | **Substrate** | LTP/LTD = 0.043 (35× below healthy); substrate_LTP_density 0.018 (Phase 1 PASSING) |

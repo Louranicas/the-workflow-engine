@@ -169,10 +169,11 @@ pub fn munge_hyphen_slug(input: &str) -> String {
 // TODO(m30/m32 — Cluster G, post-Wave-3): wire the EscapeSurfaceProfile
 // 7-variant capability table per m9 spec § 2 (D-S1002127-02 ADR at
 // ai_docs/optimisation-v7/decisions/2026-05-17-escape-surface-cardinality-7-privilege-escalation.md).
-// PrivilegeEscalation (ordinal 30) requires
-// `HumanAcceptanceSignature.privilege_escalation_acknowledged = true`;
-// DataExfil (ordinal 60) requires `data_exfil_acknowledged = true`.
-// The signature struct lives in m30; m9 will read it via a trait abstraction
+// The m32 acknowledgement gate is monotone (C10): a dispatch at profile X is
+// permitted iff `X.ordinal() <= HumanAcceptanceSignature.acknowledged_ceiling.ordinal()`.
+// So PrivilegeEscalation (ordinal 30) requires an acknowledged ceiling of at
+// least PrivilegeEscalation, and DataExfil (ordinal 60) one of at least DataExfil.
+// The signature struct lives in m32; m9 will read it via a trait abstraction
 // once that module ships. Day-1 scope = prefix + munge + 4 base variants.
 
 #[cfg(test)]

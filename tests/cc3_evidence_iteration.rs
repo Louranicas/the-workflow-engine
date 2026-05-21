@@ -19,14 +19,16 @@ use workflow_core::m21_variant_builder::build_variants;
 use workflow_core::m23_proposer::{
     build_proposal, compose_proposals, ProposerError, PROPOSAL_F2_THRESHOLD,
 };
-use workflow_core::m7_workflow_runs::WorkflowRunRow;
+use workflow_core::m7_workflow_runs::{Outcome, RunState, WorkflowRunRow};
 
 fn run(id: i64, outcome: &str, cost: Option<i64>) -> WorkflowRunRow {
     WorkflowRunRow {
         id,
         started_at: format!("2026-05-20T00:{:02}:00Z", id % 60),
-        ended_at: Some("2026-05-20T01:00:00Z".into()),
-        outcome: Some(outcome.to_owned()),
+        run_state: RunState::Closed {
+            ended_at: "2026-05-20T01:00:00Z".into(),
+            outcome: Outcome::parse(outcome).expect("test outcome must be a valid CHECK value"),
+        },
         consumer_inputs: "{}".into(),
         cost_tokens: cost,
         fitness_dimension: 0.0,
@@ -77,7 +79,8 @@ fn cc3_lift_snapshot_below_min_blocks_proposal_emission() {
         "m14 must refuse below-floor with lift=None"
     );
     // m23's batched compose_proposals MUST skip (yields empty batch).
-    let batch = compose_proposals(&[sample_pattern()], &snapshot);
+    // `|_| None` = the m22-clustering-skipped diversity closure.
+    let batch = compose_proposals(&[sample_pattern()], &snapshot, |_| None);
     assert!(batch.is_empty(), "below-floor snapshot must skip every variant");
     // m23's strict path returns the typed EvidenceBelowThreshold.
     let variant = build_variants(&sample_pattern()).expect("v")[0].clone();
@@ -109,7 +112,7 @@ fn cc3_lift_snapshot_at_min_unblocks_proposal_emission() {
     let variant = build_variants(&sample_pattern()).expect("v")[0].clone();
     let proposal = build_proposal(variant, &snapshot, None)
         .expect("at-floor snapshot MUST unblock m23");
-    assert_eq!(proposal.evidence_n, MIN_SAMPLE_SIZE);
+    assert_eq!(proposal.evidence_n(), MIN_SAMPLE_SIZE);
 }
 
 // rationale: m14 → m23 happy path — compose_proposals over a small set
@@ -127,12 +130,12 @@ fn cc3_compose_proposals_handles_mixed_evidence_quality() {
         Pattern::new(vec![StepToken(1), StepToken(2), StepToken(3)], 25, (0, 1)),
         Pattern::new(vec![StepToken(4), StepToken(5)], 22, (0, 0)),
     ];
-    let batch = compose_proposals(&patterns, &snapshot);
+    let batch = compose_proposals(&patterns, &snapshot, |_| None);
     assert!(!batch.is_empty(), "sufficient-evidence batch must be non-empty");
     for p in &batch {
-        assert!(p.evidence_n >= PROPOSAL_F2_THRESHOLD);
-        assert!((p.evidence_lift - 0.42).abs() < 1e-12);
-        assert!((p.evidence_ci_half - 0.05).abs() < 1e-12);
+        assert!(p.evidence_n() >= PROPOSAL_F2_THRESHOLD);
+        assert!((p.evidence_lift() - 0.42).abs() < 1e-12);
+        assert!((p.evidence_ci_half() - 0.05).abs() < 1e-12);
     }
 }
 
@@ -165,5 +168,5 @@ fn cc3_evidence_threshold_change_propagates_to_proposer() {
     // At-floor: unblocks.
     let s_at = snap(MIN_SAMPLE_SIZE, Some(0.5), Some(0.05));
     let p = build_proposal(variant, &s_at, None).expect("at-floor MUST unblock");
-    assert_eq!(p.evidence_n, MIN_SAMPLE_SIZE);
+    assert_eq!(p.evidence_n(), MIN_SAMPLE_SIZE);
 }

@@ -19,7 +19,7 @@
 
 use std::time::SystemTime;
 
-use crate::m7_workflow_runs::WorkflowRunRow;
+use crate::m7_workflow_runs::{Outcome, WorkflowRunRow};
 use crate::m9_watcher_namespace_guard::WORKFLOW_TRACE_NS_PREFIX;
 
 /// Hard minimum sample size for any Wilson CI emission. Below this the
@@ -416,7 +416,7 @@ impl LiftAggregator {
         }
         let successes = window
             .iter()
-            .filter(|r| r.outcome.as_deref() == Some("ok"))
+            .filter(|r| r.run_state.outcome() == Some(Outcome::Ok))
             .count();
         let cascade_rate = successes as f64 / n as f64;
         let baseline = baseline_cost_from_window(&window)?;
@@ -471,14 +471,16 @@ mod tests {
         LiftAggregator, LiftAggregatorConfig, LiftError, LiftSnapshot, WorkflowId,
         M31_MODULATION_CLAMP, MIN_SAMPLE_SIZE,
     };
-    use crate::m7_workflow_runs::WorkflowRunRow;
+    use crate::m7_workflow_runs::{Outcome, RunState, WorkflowRunRow};
 
     fn run(id: i64, outcome: &str, cost: Option<i64>) -> WorkflowRunRow {
         WorkflowRunRow {
             id,
             started_at: format!("2026-05-17T00:{:02}:00Z", id % 60),
-            ended_at: Some("2026-05-17T01:00:00Z".into()),
-            outcome: Some(outcome.to_owned()),
+            run_state: RunState::Closed {
+                ended_at: "2026-05-17T01:00:00Z".into(),
+                outcome: Outcome::parse(outcome).expect("test outcome must be a valid CHECK value"),
+            },
             consumer_inputs: "{}".into(),
             cost_tokens: cost,
             fitness_dimension: 0.0,

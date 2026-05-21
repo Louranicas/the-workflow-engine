@@ -27,7 +27,8 @@ use rusqlite::Connection;
 use tempfile::tempdir;
 use workflow_core::m7_workflow_runs::{
     close_run, find_by_id, find_by_outcome, find_open, insert_run, merge_observation,
-    open_database, open_memory, update_cost_tokens, ClusterBObservation, Outcome, WorkflowRunRow,
+    open_database, open_memory, update_cost_tokens, ClusterBObservation, Outcome, RunState,
+    WorkflowRunRow,
 };
 
 fn mem() -> Connection {
@@ -54,8 +55,15 @@ fn m7_open_run_keeps_ended_at_and_outcome_none() {
     .expect("merge");
     update_cost_tokens(&conn, id, 750).expect("cost");
     let row = find_by_id(&conn, id).expect("find");
-    assert!(row.ended_at.is_none(), "F9: ended_at must stay None on open run");
-    assert!(row.outcome.is_none(), "F9: outcome must stay None on open run");
+    assert_eq!(row.run_state, RunState::Open, "F9: open run stays Open");
+    assert!(
+        row.run_state.ended_at().is_none(),
+        "F9: ended_at must stay None on open run"
+    );
+    assert!(
+        row.run_state.outcome().is_none(),
+        "F9: outcome must stay None on open run"
+    );
     assert_eq!(row.cost_tokens, Some(750));
 }
 
@@ -85,8 +93,8 @@ fn m7_close_run_is_idempotent_on_already_closed_run() {
     close_run(&conn, id, "2026-05-20T01:00:00Z", "ok").expect("first close");
     close_run(&conn, id, "2026-05-20T02:00:00Z", "fail").expect("second close");
     let row = find_by_id(&conn, id).expect("find");
-    assert_eq!(row.outcome.as_deref(), Some("fail"));
-    assert_eq!(row.ended_at.as_deref(), Some("2026-05-20T02:00:00Z"));
+    assert_eq!(row.run_state.outcome(), Some(Outcome::Fail));
+    assert_eq!(row.run_state.ended_at(), Some("2026-05-20T02:00:00Z"));
     // Only ONE row exists (idempotent UPDATE, not duplicate INSERT).
     let n: i64 = conn
         .query_row("SELECT COUNT(*) FROM workflow_runs", [], |r| r.get(0))
@@ -105,7 +113,7 @@ fn m7_outcome_wire_set_matches_sqlite_check_constraint() {
     for wire in ["ok", "fail", "abort", "unknown"] {
         close_run(&conn, id, "2026-05-20T01:00:00Z", wire).expect("CHECK passes");
         let row = find_by_id(&conn, id).expect("find");
-        assert_eq!(row.outcome.as_deref(), Some(wire));
+        assert_eq!(row.run_state.outcome(), Some(Outcome::parse(wire).expect("wire")));
     }
     // An invalid wire string is rejected before the DB hit.
     assert!(close_run(&conn, id, "2026-05-20T01:00:00Z", "WEIRD").is_err());
@@ -157,8 +165,7 @@ fn m7_serde_round_trip_via_find_by_id() {
     let row_b: WorkflowRunRow = serde_json::from_str(&json).expect("deserialise");
     assert_eq!(row_a.id, row_b.id);
     assert_eq!(row_a.started_at, row_b.started_at);
-    assert_eq!(row_a.ended_at, row_b.ended_at);
-    assert_eq!(row_a.outcome, row_b.outcome);
+    assert_eq!(row_a.run_state, row_b.run_state);
     assert_eq!(row_a.consumer_inputs, row_b.consumer_inputs);
     assert_eq!(row_a.cost_tokens, row_b.cost_tokens);
     assert!((row_a.fitness_dimension - row_b.fitness_dimension).abs() < f64::EPSILON);

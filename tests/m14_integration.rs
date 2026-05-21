@@ -13,14 +13,16 @@
 use workflow_core::m14_lift::{
     cost_lift, wilson_ci_half, LiftAggregator, LiftAggregatorConfig, LiftError, MIN_SAMPLE_SIZE,
 };
-use workflow_core::m7_workflow_runs::WorkflowRunRow;
+use workflow_core::m7_workflow_runs::{Outcome, RunState, WorkflowRunRow};
 
 fn run(id: i64, outcome: &str, cost: Option<i64>) -> WorkflowRunRow {
     WorkflowRunRow {
         id,
         started_at: format!("2026-05-20T00:{:02}:00Z", id % 60),
-        ended_at: Some("2026-05-20T01:00:00Z".into()),
-        outcome: Some(outcome.to_owned()),
+        run_state: RunState::Closed {
+            ended_at: "2026-05-20T01:00:00Z".into(),
+            outcome: Outcome::parse(outcome).expect("test outcome must be a valid CHECK value"),
+        },
         consumer_inputs: "{}".into(),
         cost_tokens: cost,
         fitness_dimension: 0.0,

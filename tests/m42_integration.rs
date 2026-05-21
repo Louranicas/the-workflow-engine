@@ -31,7 +31,7 @@ use workflow_core::m30_bank::{AcceptedWorkflow, CuratedBank};
 use workflow_core::m42_stcortex_emit::{
     emit_feedback, signal_for_outcome, HebbianSignal, SubstrateEmitError,
 };
-use workflow_core::m7_workflow_runs::WorkflowRunRow;
+use workflow_core::m7_workflow_runs::{Outcome, RunState, WorkflowRunRow};
 use workflow_core::m9_watcher_namespace_guard::WORKFLOW_TRACE_NS_PREFIX;
 
 // ─── fixtures ────────────────────────────────────────────────────────
@@ -84,8 +84,10 @@ fn ok_run() -> WorkflowRunRow {
     WorkflowRunRow {
         id: 42,
         started_at: "2026-05-20T00:00:00Z".into(),
-        ended_at: Some("2026-05-20T01:00:00Z".into()),
-        outcome: Some("ok".into()),
+        run_state: RunState::Closed {
+            ended_at: "2026-05-20T01:00:00Z".into(),
+            outcome: Outcome::Ok,
+        },
         consumer_inputs: "{}".into(),
         cost_tokens: Some(100),
         fitness_dimension: 0.0,
@@ -122,7 +124,7 @@ fn canonical_ns() -> String {
 #[test]
 fn m42_emit_feedback_routes_through_m13_via_namespace_prefix() {
     // rationale: Cross-module (m42 → m13)
-    let writer = StcortexWriter::new(
+    let writer = StcortexWriter::new_unchecked(
         StaticDensity(Some(0.20)),
         RecordingWriter::new(),
         temp_outbox(),
@@ -151,7 +153,7 @@ fn m42_emit_feedback_routes_through_m13_via_namespace_prefix() {
 #[test]
 fn m42_emit_feedback_refuses_foreign_namespace_via_m9_chain() {
     // rationale: Cross-module AP30 (m42 → m13 → m9)
-    let writer = StcortexWriter::new(
+    let writer = StcortexWriter::new_unchecked(
         StaticDensity(Some(0.20)),
         RecordingWriter::new(),
         temp_outbox(),
@@ -314,12 +316,12 @@ fn m42_no_8125_port_literal_in_m42_source() {
 #[test]
 fn m42_emit_feedback_silently_discards_workflow_arg_per_phase_a() {
     // rationale: Documented Phase-A behaviour
-    let writer_a = StcortexWriter::new(
+    let writer_a = StcortexWriter::new_unchecked(
         StaticDensity(Some(0.20)),
         RecordingWriter::new(),
         temp_outbox(),
     );
-    let writer_b = StcortexWriter::new(
+    let writer_b = StcortexWriter::new_unchecked(
         StaticDensity(Some(0.20)),
         RecordingWriter::new(),
         temp_outbox(),
@@ -352,7 +354,7 @@ fn m42_emit_feedback_silently_discards_workflow_arg_per_phase_a() {
     // And — for completeness — an unreachable ORAC defers to outbox
     // without surfacing as an error (m13 outbox-first invariant
     // transitively held).
-    let writer_unreachable = StcortexWriter::new(
+    let writer_unreachable = StcortexWriter::new_unchecked(
         StaticDensity(None),
         RecordingWriter::new(),
         temp_outbox(),

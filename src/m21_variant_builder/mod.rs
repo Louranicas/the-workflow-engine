@@ -13,6 +13,29 @@ use crate::m20_prefixspan::{Pattern, StepToken};
 /// Maximum variants emitted per input pattern.
 pub const MAX_VARIANTS_PER_PATTERN: usize = 8;
 
+/// Hard, independent iteration cap for the F5 fair-emission loop in
+/// [`build_variants`].
+///
+/// rationale: this cap exists so that a mutated loop *condition* (the
+/// `while` guard at the round-robin loop) is caught as a **bounded-wrong**
+/// result — a tight, fast-failing test oracle — rather than left UNSCORED
+/// as a TIMEOUT. `cargo-mutants` flips `<`/`<=`/`==`/`>` and `&&`/`||` on
+/// the loop guard; without an independent cap such a flip makes the loop
+/// iterate unboundedly and no test catches it *fast*.
+///
+/// Derivation of the bound: the F5 emission loop adds at least one variant
+/// to `out` on every legitimate iteration (a swap, a skip, or both), and
+/// `out` already holds the identity variant, so the loop can run at most
+/// `MAX_VARIANTS_PER_PATTERN - 1` productive iterations before the cap on
+/// `out.len()` halts it — i.e. the legitimate maximum is **7** iterations.
+/// `MAX_VARIANTS_PER_PATTERN * 4 == 32` is therefore a wide, provably
+/// unreachable upper bound on any valid input (4.5× the real maximum),
+/// while still being small enough to terminate a runaway mutated loop
+/// instantly. The cap is a **separate guard** from the existing loop
+/// condition: even if that condition is mutated, the loop still terminates
+/// within `MAX_LOOP_ITERATIONS` iterations.
+const MAX_LOOP_ITERATIONS: usize = MAX_VARIANTS_PER_PATTERN * 4;
+
 /// A workflow variant proposal.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct WorkflowVariant {
@@ -73,20 +96,20 @@ pub enum VariantBuilderError {
 ///
 /// # Errors
 ///
-/// [`VariantBuilderError::EmptyPattern`] when `pattern.steps` is empty.
+/// [`VariantBuilderError::EmptyPattern`] when `pattern.steps()` is empty.
 pub fn build_variants(
     pattern: &Pattern,
 ) -> Result<Vec<WorkflowVariant>, VariantBuilderError> {
-    if pattern.steps.is_empty() {
+    if pattern.steps().is_empty() {
         return Err(VariantBuilderError::EmptyPattern);
     }
     // Pre-allocate the variant cap (F2 monoculture-prevention bound).
     let mut out: Vec<WorkflowVariant> = Vec::with_capacity(MAX_VARIANTS_PER_PATTERN);
     let identity = WorkflowVariant {
-        variant_id: variant_hash(&pattern.steps, MutationKind::Identity),
-        steps: pattern.steps.clone(),
+        variant_id: variant_hash(pattern.steps(), MutationKind::Identity),
+        steps: pattern.steps().to_vec(),
         mutation: MutationKind::Identity,
-        source_pattern_hash: pattern.canonical_hash,
+        source_pattern_hash: pattern.canonical_hash(),
     };
     out.push(identity);
 
@@ -94,38 +117,57 @@ pub fn build_variants(
     // entire mutation class. `n_swaps = len - 1`; `n_skips = len` but only
     // meaningful when `len >= 2` (a single-step pattern reduced to zero is
     // the empty pattern, semantically invalid for downstream m22/m23).
-    let n_swaps = pattern.steps.len().saturating_sub(1);
-    let n_skips = if pattern.steps.len() >= 2 {
-        pattern.steps.len()
+    let n_swaps = pattern.steps().len().saturating_sub(1);
+    let n_skips = if pattern.steps().len() >= 2 {
+        pattern.steps().len()
     } else {
         0
     };
     let mut swap_i = 0_usize;
     let mut skip_i = 0_usize;
+    // Hard, independent iteration counter — see `MAX_LOOP_ITERATIONS`.
+    // rationale: this guard exists so loop-CONDITION mutations are caught
+    // (bounded-wrong output a test can assert against) rather than
+    // timed-out (an unbounded hang `cargo-mutants` leaves UNSCORED). It is
+    // deliberately SEPARATE from the `while` guard below: if that guard is
+    // mutated (`<`→`<=`/`>`/`==`, `&&`→`||`), this counter still halts the
+    // loop within `MAX_LOOP_ITERATIONS` iterations. On any valid input the
+    // legitimate loop finishes in at most 7 iterations (see derivation on
+    // `MAX_LOOP_ITERATIONS`), well below the cap, so this guard NEVER
+    // changes behaviour on valid inputs.
+    let mut loop_iterations = 0_usize;
     // Round-robin: at each step prefer a swap, then a skip, until both
     // classes are exhausted or the cap is reached.
     while out.len() < MAX_VARIANTS_PER_PATTERN && (swap_i < n_swaps || skip_i < n_skips) {
+        // Independent runaway-loop safety bound: break BEFORE doing any
+        // further work if the iteration counter reaches the hard cap. The
+        // output is then bounded-but-possibly-incomplete (a test catches
+        // it) instead of an infinite hang.
+        if loop_iterations >= MAX_LOOP_ITERATIONS {
+            break;
+        }
+        loop_iterations += 1;
         if swap_i < n_swaps && out.len() < MAX_VARIANTS_PER_PATTERN {
-            let mut steps = pattern.steps.clone();
+            let mut steps = pattern.steps().to_vec();
             steps.swap(swap_i, swap_i + 1);
             let mutation = MutationKind::Swap { at: swap_i };
             out.push(WorkflowVariant {
                 variant_id: variant_hash(&steps, mutation),
                 steps,
                 mutation,
-                source_pattern_hash: pattern.canonical_hash,
+                source_pattern_hash: pattern.canonical_hash(),
             });
             swap_i += 1;
         }
         if skip_i < n_skips && out.len() < MAX_VARIANTS_PER_PATTERN {
-            let mut steps = pattern.steps.clone();
+            let mut steps = pattern.steps().to_vec();
             steps.remove(skip_i);
             let mutation = MutationKind::Skip { at: skip_i };
             out.push(WorkflowVariant {
                 variant_id: variant_hash(&steps, mutation),
                 steps,
                 mutation,
-                source_pattern_hash: pattern.canonical_hash,
+                source_pattern_hash: pattern.canonical_hash(),
             });
             skip_i += 1;
         }
@@ -180,7 +222,7 @@ mod tests {
         let p = pattern(&[1, 2, 3]);
         let v = build_variants(&p).expect("ok");
         assert_eq!(v[0].mutation, MutationKind::Identity);
-        assert_eq!(v[0].steps, p.steps);
+        assert_eq!(v[0].steps, p.steps());
     }
 
     #[test]
@@ -194,7 +236,7 @@ mod tests {
         assert!(!swap_vars.is_empty());
         // Each swap should produce a different sequence than the identity.
         for sv in swap_vars {
-            assert_ne!(sv.steps, p.steps);
+            assert_ne!(sv.steps, p.steps());
         }
     }
 
@@ -204,7 +246,7 @@ mod tests {
         let v = build_variants(&p).expect("ok");
         for var in &v {
             if matches!(var.mutation, MutationKind::Skip { .. }) {
-                assert_eq!(var.steps.len(), p.steps.len() - 1);
+                assert_eq!(var.steps.len(), p.steps().len() - 1);
             }
         }
     }
@@ -231,7 +273,7 @@ mod tests {
         let p = pattern(&[5, 7]);
         let v = build_variants(&p).expect("ok");
         for var in &v {
-            assert_eq!(var.source_pattern_hash, p.canonical_hash);
+            assert_eq!(var.source_pattern_hash, p.canonical_hash());
         }
     }
 
@@ -524,7 +566,7 @@ mod tests {
     fn identity_variant_is_verbatim_copy() {
         let p = pattern(&[11, 22, 33, 44]);
         let v = build_variants(&p).expect("ok");
-        assert_eq!(v[0].steps, p.steps);
+        assert_eq!(v[0].steps, p.steps());
         assert_eq!(v[0].mutation, MutationKind::Identity);
     }
 
@@ -582,14 +624,14 @@ mod tests {
     fn cross_module_source_hash_tracks_pattern_gap_bounds() {
         let p_a = Pattern::new(vec![StepToken(1), StepToken(2)], 5, (0, 0));
         let p_b = Pattern::new(vec![StepToken(1), StepToken(2)], 5, (0, 3));
-        assert_ne!(p_a.canonical_hash, p_b.canonical_hash);
+        assert_ne!(p_a.canonical_hash(), p_b.canonical_hash());
         let va = build_variants(&p_a).expect("a");
         let vb = build_variants(&p_b).expect("b");
         for v in &va {
-            assert_eq!(v.source_pattern_hash, p_a.canonical_hash);
+            assert_eq!(v.source_pattern_hash, p_a.canonical_hash());
         }
         for v in &vb {
-            assert_eq!(v.source_pattern_hash, p_b.canonical_hash);
+            assert_eq!(v.source_pattern_hash, p_b.canonical_hash());
         }
     }
 
@@ -601,7 +643,7 @@ mod tests {
         let v = build_variants(&p).expect("ok");
         for var in &v {
             if matches!(var.mutation, MutationKind::Swap { .. }) {
-                assert_ne!(var.steps, p.steps, "swap collapsed to identity: {var:?}");
+                assert_ne!(var.steps, p.steps(), "swap collapsed to identity: {var:?}");
             }
         }
     }
@@ -615,7 +657,7 @@ mod tests {
         let v = build_variants(&p).expect("ok");
         let swap0 = v.iter().find(|x| x.mutation == MutationKind::Swap { at: 0 }).expect("s0");
         // [5,5,9] swap(0,1) → [5,5,9] — identical, but still a Swap variant.
-        assert_eq!(swap0.steps, p.steps);
+        assert_eq!(swap0.steps, p.steps());
         assert_eq!(swap0.mutation, MutationKind::Swap { at: 0 });
     }
 
@@ -824,7 +866,7 @@ mod tests {
         // Every emitted swap index must be a valid first-of-adjacent-pair.
         for at in swap_indices {
             assert!(
-                at + 1 < p.steps.len(),
+                at + 1 < p.steps().len(),
                 "swap index {at} indexes a non-existent adjacent pair",
             );
         }
@@ -869,12 +911,12 @@ mod tests {
         // Belt-and-braces: a swap of distinct tokens must NOT equal the
         // source — the no-op mutant `+`→`*` makes them identical.
         assert_ne!(
-            swap0.steps, p.steps,
+            swap0.steps, p.steps(),
             "Swap{{0}} of distinct tokens collapsed to identity steps — \
              :110 swap-index arithmetic was mutated",
         );
         assert_ne!(
-            swap1.steps, p.steps,
+            swap1.steps, p.steps(),
             "Swap{{1}} of distinct tokens collapsed to identity steps — \
              :110 swap-index arithmetic was mutated",
         );
@@ -956,7 +998,7 @@ mod tests {
         let v = build_variants(&p).expect("ok");
         assert!(!v.is_empty());
         for var in &v {
-            assert_eq!(var.source_pattern_hash, p.canonical_hash);
+            assert_eq!(var.source_pattern_hash, p.canonical_hash());
             assert!(!var.steps.is_empty(), "variant must never be empty");
         }
     }
@@ -1003,7 +1045,7 @@ mod tests {
         let v = build_variants(&p).expect("ok");
         for var in &v {
             if let MutationKind::Skip { at } = var.mutation {
-                assert!(at < p.steps.len(), "skip index {at} out of bounds");
+                assert!(at < p.steps().len(), "skip index {at} out of bounds");
             }
         }
     }
@@ -1016,7 +1058,7 @@ mod tests {
         let v = build_variants(&p).expect("ok");
         for var in &v {
             if let MutationKind::Swap { at } = var.mutation {
-                assert!(at < p.steps.len() - 1, "swap index {at} out of pair range");
+                assert!(at < p.steps().len() - 1, "swap index {at} out of pair range");
             }
         }
     }
@@ -1119,5 +1161,134 @@ mod tests {
         let seq_a: Vec<MutationKind> = a.iter().map(|x| x.mutation).collect();
         let seq_b: Vec<MutationKind> = b.iter().map(|x| x.mutation).collect();
         assert_eq!(seq_a, seq_b, "F5 interleave drifted across runs");
+    }
+
+    // ====================================================================
+    // Runaway-loop / iteration-cap hardening (S1003529 W4 follow-up).
+    //
+    // The F5 emission loop's `while` guard at the round-robin loop relied
+    // SOLELY on its loop condition for termination. `cargo-mutants` flips
+    // that condition (`<`→`<=`/`>`/`==`, `&&`→`||`); a flipped guard makes
+    // the loop iterate unboundedly, so the mutant TIMES OUT and is left
+    // UNSCORED (~20 such mutants in the KEYSTONE module). The independent
+    // `MAX_LOOP_ITERATIONS` cap converts those hangs into bounded-WRONG
+    // output. These tests give cargo-mutants a FAST-FAILING oracle: a tight
+    // output-size assertion that a runaway-loop mutant fails immediately
+    // (wrong count) instead of by timeout (unscored).
+    // ====================================================================
+
+    #[test]
+    // rationale: Runaway-loop kill — `build_variants` on a representative
+    // pattern must return a BOUNDED result well within the documented cap.
+    // The output size is `<= MAX_VARIANTS_PER_PATTERN` for ANY input. A
+    // loop-condition mutant that hangs cannot satisfy this assertion fast;
+    // the independent `MAX_LOOP_ITERATIONS` guard makes the mutated loop
+    // terminate with a bounded-but-wrong count this test catches at once.
+    fn runaway_loop_output_is_bounded_by_variant_cap() {
+        for steps in [
+            &[1_u32][..],
+            &[1, 2][..],
+            &[1, 2, 3][..],
+            &[1, 2, 3, 4][..],
+            &[1, 2, 3, 4, 5, 6, 7, 8][..],
+        ] {
+            let p = pattern(steps);
+            let v = build_variants(&p).expect("ok");
+            assert!(
+                v.len() <= MAX_VARIANTS_PER_PATTERN,
+                "build_variants emitted {} variants for a {}-step pattern \
+                 — exceeds MAX_VARIANTS_PER_PATTERN ({}); a runaway loop \
+                 mutant produced an over-bounded result",
+                v.len(),
+                steps.len(),
+                MAX_VARIANTS_PER_PATTERN,
+            );
+        }
+    }
+
+    #[test]
+    // rationale: Runaway-loop kill — a LONG pattern makes the F5 loop do
+    // real work (many swap/skip candidates) yet the output is still hard-
+    // bounded by the cap. A loop-condition mutant on a long pattern is the
+    // most likely to spin unboundedly; the independent iteration cap halts
+    // it within `MAX_LOOP_ITERATIONS`, so this test fails FAST on a wrong
+    // count rather than by timeout (which leaves the mutant UNSCORED).
+    fn runaway_loop_long_pattern_still_bounded() {
+        let big: Vec<u32> = (0..200).collect();
+        let p = pattern(&big);
+        let v = build_variants(&p).expect("ok");
+        assert!(
+            v.len() <= MAX_VARIANTS_PER_PATTERN,
+            "200-step pattern produced {} variants — a runaway F5 loop \
+             mutant escaped the cap",
+            v.len(),
+        );
+        // A correctly-terminating loop fills the cap exactly on a long
+        // pattern (identity + 7 interleaved swap/skip slots).
+        assert_eq!(
+            v.len(),
+            MAX_VARIANTS_PER_PATTERN,
+            "200-step pattern must fill the cap exactly",
+        );
+    }
+
+    #[test]
+    // rationale: Iteration-cap derivation — `MAX_LOOP_ITERATIONS` must be a
+    // STRICT upper bound that valid inputs never reach. The legitimate F5
+    // loop runs at most `MAX_VARIANTS_PER_PATTERN - 1` (= 7) iterations, so
+    // the cap (`MAX_VARIANTS_PER_PATTERN * 4` = 32) is provably unreachable
+    // on any valid input. Lock both the constant and the headroom so a
+    // future edit that shrinks the cap below the legitimate maximum is
+    // caught here.
+    fn iteration_cap_constant_strictly_exceeds_legitimate_maximum() {
+        // The legitimate loop never runs more than (cap on out.len) minus
+        // the identity slot already pushed = MAX_VARIANTS_PER_PATTERN - 1.
+        let legitimate_max_iterations = MAX_VARIANTS_PER_PATTERN - 1;
+        assert!(
+            super::MAX_LOOP_ITERATIONS > legitimate_max_iterations,
+            "MAX_LOOP_ITERATIONS ({}) must strictly exceed the legitimate \
+             loop maximum ({})",
+            super::MAX_LOOP_ITERATIONS,
+            legitimate_max_iterations,
+        );
+        // Exact value lock — the documented derivation.
+        assert_eq!(
+            super::MAX_LOOP_ITERATIONS,
+            MAX_VARIANTS_PER_PATTERN * 4,
+            "MAX_LOOP_ITERATIONS must equal MAX_VARIANTS_PER_PATTERN * 4 \
+             per the documented derivation",
+        );
+    }
+
+    #[test]
+    // rationale: Cap-vs-correctness independence — the iteration cap must
+    // NOT change behaviour on valid inputs. Across the full representative
+    // length range every output is identical to the documented F5
+    // cardinality (1/4/6/8/8…), proving the legitimate emission path
+    // always finishes well below `MAX_LOOP_ITERATIONS` and the cap is a
+    // pure additional safety bound, never a behavioural one.
+    fn iteration_cap_does_not_alter_valid_input_behaviour() {
+        let expected: [(u32, usize); 8] = [
+            (1, 1),
+            (2, 4),
+            (3, 6),
+            (4, 8),
+            (5, 8),
+            (8, 8),
+            (16, 8),
+            (32, 8),
+        ];
+        for (len, want) in expected {
+            let steps: Vec<u32> = (1..=len).collect();
+            let p = pattern(&steps);
+            let v = build_variants(&p).expect("ok");
+            assert_eq!(
+                v.len(),
+                want,
+                "len {len}: iteration cap altered the legitimate output \
+                 cardinality — the cap must be a pure safety bound, never \
+                 reached on valid input",
+            );
+        }
     }
 }

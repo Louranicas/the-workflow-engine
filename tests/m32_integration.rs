@@ -1,7 +1,7 @@
 //! Integration tests for m32 `ConductorDispatcher` — exercises each
-//! `EscapeSurfaceProfile` with the canonical `HumanAcceptanceSignature`
-//! ack-table, plus the C3 routing-method check + AP-V7-08 self-dispatch
-//! guard. Wave-B1 / S1002600 carry-forward.
+//! `EscapeSurfaceProfile` against the canonical `HumanAcceptanceSignature`
+//! monotone acknowledged-ceiling gate (C10), plus the C3 routing-method
+//! check + AP-V7-08 self-dispatch guard. Wave-B1 / S1002600 carry-forward.
 
 #![allow(clippy::doc_markdown)]
 
@@ -86,13 +86,12 @@ impl Verifier for RefuseVerifier {
     }
 }
 
-/// Build a HumanAcceptanceSignature with the right ack bits set for a given
-/// profile, so that profile-specific ack-gates pass cleanly.
+/// Build a `HumanAcceptanceSignature` whose acknowledged ceiling is exactly
+/// `p`, so the monotone ack-gate passes cleanly for a dispatch at profile `p`.
 fn signature_for_profile(p: EscapeSurfaceProfile) -> HumanAcceptanceSignature {
     HumanAcceptanceSignature {
         interactive_terminal: true,
-        privilege_escalation_acknowledged: matches!(p, EscapeSurfaceProfile::PrivilegeEscalation),
-        data_exfil_acknowledged: matches!(p, EscapeSurfaceProfile::DataExfil),
+        acknowledged_ceiling: p,
     }
 }
 
@@ -119,9 +118,9 @@ fn m32_each_escape_surface_profile_dispatches_or_refuses_per_ack_table() {
 
 #[test]
 fn m32_privilege_escalation_without_ack_refused() {
-    // rationale: Adversarial input — PrivilegeEscalation requires explicit
-    // privilege_escalation_acknowledged=true; default sig refuses with the
-    // PrivilegeNotAcknowledged reason and the client is not invoked.
+    // rationale: Adversarial input — PrivilegeEscalation (ord 30) is not
+    // covered by the default (Sandboxed, ord 0) ceiling; dispatch refuses
+    // with EscapeSurfaceNotAcknowledged and the client is not invoked.
     let (client, calls) = ok_pair();
     let d = ConductorDispatcher::new(client);
     let out = d
@@ -134,7 +133,10 @@ fn m32_privilege_escalation_without_ack_refused() {
     assert!(matches!(
         out,
         DispatchOutcome::Refused {
-            reason: RefusalReason::PrivilegeNotAcknowledged
+            reason: RefusalReason::EscapeSurfaceNotAcknowledged {
+                required: EscapeSurfaceProfile::PrivilegeEscalation,
+                acknowledged: EscapeSurfaceProfile::Sandboxed,
+            }
         }
     ));
     assert_eq!(*calls.lock().expect("lock"), 0);
@@ -142,9 +144,9 @@ fn m32_privilege_escalation_without_ack_refused() {
 
 #[test]
 fn m32_data_exfil_without_ack_refused() {
-    // rationale: Adversarial input — DataExfil requires explicit
-    // data_exfil_acknowledged=true; default sig refuses with the
-    // DataExfilNotAcknowledged reason.
+    // rationale: Adversarial input — DataExfil (ord 60) is not covered by the
+    // default (Sandboxed, ord 0) ceiling; dispatch refuses with
+    // EscapeSurfaceNotAcknowledged.
     let (client, calls) = ok_pair();
     let d = ConductorDispatcher::new(client);
     let out = d
@@ -157,10 +159,89 @@ fn m32_data_exfil_without_ack_refused() {
     assert!(matches!(
         out,
         DispatchOutcome::Refused {
-            reason: RefusalReason::DataExfilNotAcknowledged
+            reason: RefusalReason::EscapeSurfaceNotAcknowledged {
+                required: EscapeSurfaceProfile::DataExfil,
+                acknowledged: EscapeSurfaceProfile::Sandboxed,
+            }
         }
     ));
     assert_eq!(*calls.lock().expect("lock"), 0);
+}
+
+#[test]
+fn m32_file_write_without_ack_refused() {
+    // rationale: C10 regression — the monotone-gate bug. FileWrite (ord 40)
+    // outranks the previously-gated PrivilegeEscalation (ord 30) yet, pre-fix,
+    // dispatched with no acknowledgement. Under the default (Sandboxed)
+    // ceiling it MUST now refuse and the client MUST NOT be invoked.
+    let (client, calls) = ok_pair();
+    let d = ConductorDispatcher::new(client);
+    let out = d
+        .dispatch(
+            &workflow_with_seed(105),
+            EscapeSurfaceProfile::FileWrite,
+            &HumanAcceptanceSignature::default(),
+        )
+        .expect("dispatch ok");
+    assert!(matches!(
+        out,
+        DispatchOutcome::Refused {
+            reason: RefusalReason::EscapeSurfaceNotAcknowledged {
+                required: EscapeSurfaceProfile::FileWrite,
+                acknowledged: EscapeSurfaceProfile::Sandboxed,
+            }
+        }
+    ));
+    assert_eq!(*calls.lock().expect("lock"), 0);
+}
+
+#[test]
+fn m32_network_egress_without_ack_refused() {
+    // rationale: C10 regression — companion to the FileWrite case.
+    // NetworkEgress (ord 50) also outranks PrivilegeEscalation (ord 30) and,
+    // pre-fix, sailed through ungated. The default ceiling MUST now refuse it.
+    let (client, calls) = ok_pair();
+    let d = ConductorDispatcher::new(client);
+    let out = d
+        .dispatch(
+            &workflow_with_seed(106),
+            EscapeSurfaceProfile::NetworkEgress,
+            &HumanAcceptanceSignature::default(),
+        )
+        .expect("dispatch ok");
+    assert!(matches!(
+        out,
+        DispatchOutcome::Refused {
+            reason: RefusalReason::EscapeSurfaceNotAcknowledged {
+                required: EscapeSurfaceProfile::NetworkEgress,
+                acknowledged: EscapeSurfaceProfile::Sandboxed,
+            }
+        }
+    ));
+    assert_eq!(*calls.lock().expect("lock"), 0);
+}
+
+#[test]
+fn m32_ceiling_at_profile_severity_permits_dispatch() {
+    // rationale: C10 contract regression — the monotone permit half. For
+    // every profile, a signature whose ceiling is exactly that profile MUST
+    // Accept (the helper `signature_for_profile` builds exactly this).
+    for &profile in &EscapeSurfaceProfile::VARIANTS {
+        let (client, calls) = ok_pair();
+        let d = ConductorDispatcher::new(client);
+        let out = d
+            .dispatch(
+                &workflow_with_seed(u32::from(profile.ordinal()) + 200),
+                profile,
+                &signature_for_profile(profile),
+            )
+            .expect("dispatch ok");
+        assert!(
+            matches!(out, DispatchOutcome::Accepted { .. }),
+            "profile {profile:?} refused with ceiling at its own severity: {out:?}"
+        );
+        assert_eq!(*calls.lock().expect("lock"), 1);
+    }
 }
 
 #[test]
@@ -206,7 +287,7 @@ fn m32_self_dispatch_guard_refuses_forbidden_proposal_id() {
     // workflow's proposal_id; dispatch refuses with SelfDispatchRefused
     // BEFORE any ack / routing / verifier check.
     let w = workflow_with_seed(104);
-    let forbidden = vec![w.proposal.proposal_id];
+    let forbidden = vec![w.proposal().proposal_id()];
 
     // Sanity: the bare guard agrees.
     assert!(!self_dispatch_guard(&w, &forbidden));

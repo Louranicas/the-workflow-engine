@@ -32,7 +32,7 @@ use workflow_core::m12_cli_reports::{
     render_cluster_cost_table, render_cost_histogram, render_machine, render_outcome_timeline,
     render_summary_line, OutputFormat,
 };
-use workflow_core::m7_workflow_runs::WorkflowRunRow;
+use workflow_core::m7_workflow_runs::{Outcome, RunState, WorkflowRunRow};
 
 // ---- fixtures ------------------------------------------------------------
 
@@ -44,11 +44,17 @@ fn run(
     outcome: Option<&str>,
     consumer_inputs: &str,
 ) -> WorkflowRunRow {
+    let run_state = match outcome {
+        None => RunState::Open,
+        Some(o) => RunState::Closed {
+            ended_at: format!("2026-05-20T01:{:02}:00Z", id % 60),
+            outcome: Outcome::parse(o).expect("test outcome must be a valid CHECK value"),
+        },
+    };
     WorkflowRunRow {
         id,
         started_at: format!("2026-05-20T00:{:02}:00Z", id % 60),
-        ended_at: outcome.map(|_| format!("2026-05-20T01:{:02}:00Z", id % 60)),
-        outcome: outcome.map(str::to_owned),
+        run_state,
         consumer_inputs: consumer_inputs.to_owned(),
         cost_tokens: cost,
         fitness_dimension: 0.0,

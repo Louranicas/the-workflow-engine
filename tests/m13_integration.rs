@@ -37,7 +37,7 @@ use workflow_core::m13_stcortex_writer::{
     DeferReason, LtpDensityReader, PromoteOutcome, StcortexWriter, StcortexWriterError,
     SubstrateWriter, CorrelationMemory, LTP_PHASE_1_FLOOR,
 };
-use workflow_core::m7_workflow_runs::WorkflowRunRow;
+use workflow_core::m7_workflow_runs::{Outcome, RunState, WorkflowRunRow};
 use workflow_core::m9_watcher_namespace_guard::{NamespaceViolation, WORKFLOW_TRACE_NS_PREFIX};
 
 // ---- Test-double surfaces ------------------------------------------------
@@ -103,8 +103,10 @@ fn ok_run() -> WorkflowRunRow {
     WorkflowRunRow {
         id: 42,
         started_at: "2026-05-20T00:00:00Z".into(),
-        ended_at: Some("2026-05-20T01:00:00Z".into()),
-        outcome: Some("ok".into()),
+        run_state: RunState::Closed {
+            ended_at: "2026-05-20T01:00:00Z".into(),
+            outcome: Outcome::Ok,
+        },
         consumer_inputs: "{}".into(),
         cost_tokens: Some(100),
         fitness_dimension: 0.0,
@@ -115,7 +117,7 @@ fn build_writer(
     density: Option<f64>,
     outbox: PathBuf,
 ) -> StcortexWriter<StaticDensity, RecordingWriter> {
-    StcortexWriter::new(StaticDensity(density), RecordingWriter::new(), outbox)
+    StcortexWriter::new_unchecked(StaticDensity(density), RecordingWriter::new(), outbox)
 }
 
 // ---- Tests ---------------------------------------------------------------
@@ -282,7 +284,7 @@ fn m13_munges_hyphen_namespace_via_m9() {
     // payload after the m13 call returns — m13 doesn't expose a public
     // writer-getter, so we share the recorder via Arc.
     let shared = Arc::new(RecordingWriter::new());
-    let s = StcortexWriter::new(
+    let s = StcortexWriter::new_unchecked(
         StaticDensity(Some(0.20)),
         SharedWriter(Arc::clone(&shared)),
         tmp.path().join("outbox.jsonl"),

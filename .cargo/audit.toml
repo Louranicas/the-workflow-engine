@@ -1,0 +1,18 @@
+# cargo-audit configuration — workflow-trace
+# Hardening Fleet W2 (2026-05-21). See RustSec: https://rustsec.org
+
+[advisories]
+# RUSTSEC-2024-0436 — `paste` is unmaintained.
+#
+# `paste` reaches workflow-trace only as a transitive dependency, four
+# levels deep through the vendored SpacetimeDB SDK:
+#   paste <- spacetimedb-metrics <- spacetimedb-sdk <- workflow-trace
+#
+# It is an `unmaintained` *informational* advisory, NOT an exploitable
+# vulnerability or CVE. workflow-trace has no direct dependency on `paste`
+# and cannot remove it without an upstream SpacetimeDB SDK bump, which is
+# out of scope for this crate.
+#
+# Action on resolution: re-evaluate / drop this ignore when spacetimedb-sdk
+# is next upgraded. Reviewed 2026-05-21 — Hardening Fleet W2.
+ignore = ["RUSTSEC-2024-0436"]

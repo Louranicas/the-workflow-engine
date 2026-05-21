@@ -288,9 +288,9 @@ impl PressureRegister {
     /// [`PressureRegisterError::WriteFailed`] on filesystem I/O failure.
     /// [`PressureRegisterError::Serialise`] on JSON encoding failure.
     ///
-    /// # Panics
-    ///
-    /// Panics only if the internal id mutex is poisoned.
+    /// A poisoned `next_id` lock is recovered in place via
+    /// `PoisonError::into_inner`; the counter has no invariant a prior
+    /// panic could have left broken.
     pub fn detect_and_emit(
         &self,
         trigger_excerpt: &str,
@@ -314,9 +314,9 @@ impl PressureRegister {
 
     /// Build a `PressureEvent` from raw inputs without emitting it.
     ///
-    /// # Panics
-    ///
-    /// Panics only if the internal id mutex is poisoned.
+    /// A poisoned `next_id` lock is recovered in place via
+    /// `PoisonError::into_inner`; the counter has no invariant a prior
+    /// panic could have left broken.
     #[must_use]
     pub fn build_event(
         &self,
@@ -327,7 +327,10 @@ impl PressureRegister {
         violated_charter: CharterSection,
     ) -> PressureEvent {
         let id = {
-            let mut guard = self.next_id.lock().expect("next_id lock");
+            let mut guard = self
+                .next_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let id = *guard;
             *guard = guard.saturating_add(1);
             id

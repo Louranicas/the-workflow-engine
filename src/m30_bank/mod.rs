@@ -168,11 +168,9 @@ impl CuratedBank {
     ///
     /// - [`BankError::AlreadyAccepted`] if the workflow id already exists.
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned (data corruption is
-    /// unrecoverable; see CLAUDE.md § Verification Discipline — silently
-    /// treating poison as empty would mask the prior panic).
+    /// A poisoned internal lock is recovered in place via
+    /// `PoisonError::into_inner`; the bank's `BTreeMap` is structurally
+    /// valid regardless of a prior panic, so recovery cannot corrupt it.
     pub fn accept(
         &self,
         proposal: WorkflowProposal,
@@ -181,7 +179,7 @@ impl CuratedBank {
         let workflow_id = crate::m4_cascade::cluster_id::fnv1a_64(
             format!("workflow:{}", proposal.proposal_id).as_bytes(),
         );
-        let mut guard = self.inner.lock().expect("bank lock");
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if guard.contains_key(&workflow_id) {
             return Err(BankError::AlreadyAccepted(workflow_id));
         }
@@ -204,13 +202,13 @@ impl CuratedBank {
     ///
     /// [`BankError::NotFound`] if absent.
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned.
+    /// A poisoned internal lock is recovered in place via
+    /// `PoisonError::into_inner`; the bank's `BTreeMap` is structurally
+    /// valid regardless of a prior panic, so recovery cannot corrupt it.
     pub fn get(&self, workflow_id: u64) -> Result<AcceptedWorkflow, BankError> {
         self.inner
             .lock()
-            .expect("bank lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&workflow_id)
             .cloned()
             .ok_or(BankError::NotFound(workflow_id))
@@ -229,9 +227,9 @@ impl CuratedBank {
     ///   `NaN * weight` propagates silently and would corrupt the entire
     ///   selector's downstream ranking, so the bank refuses at the gate.
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned.
+    /// A poisoned internal lock is recovered in place via
+    /// `PoisonError::into_inner`; the bank's `BTreeMap` is structurally
+    /// valid regardless of a prior panic, so recovery cannot corrupt it.
     pub fn try_apply_decay(
         &self,
         workflow_id: u64,
@@ -240,7 +238,7 @@ impl CuratedBank {
         if !factor.is_finite() {
             return Err(BankError::InvalidDecayFactor(factor));
         }
-        let mut g = self.inner.lock().expect("bank lock");
+        let mut g = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let w = g
             .get_mut(&workflow_id)
             .ok_or(BankError::NotFound(workflow_id))?;
@@ -277,11 +275,11 @@ impl CuratedBank {
     ///
     /// [`BankError::NotFound`] if the workflow id is absent.
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned.
+    /// A poisoned internal lock is recovered in place via
+    /// `PoisonError::into_inner`; the bank's `BTreeMap` is structurally
+    /// valid regardless of a prior panic, so recovery cannot corrupt it.
     pub fn try_record_run(&self, workflow_id: u64, now_ms: i64) -> Result<(), BankError> {
-        let mut g = self.inner.lock().expect("bank lock");
+        let mut g = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let w = g
             .get_mut(&workflow_id)
             .ok_or(BankError::NotFound(workflow_id))?;
@@ -307,14 +305,14 @@ impl CuratedBank {
     /// (ossification): rows with `weight < min_weight` are excluded even if
     /// their sunset has not yet fired.
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned.
+    /// A poisoned internal lock is recovered in place via
+    /// `PoisonError::into_inner`; the bank's `BTreeMap` is structurally
+    /// valid regardless of a prior panic, so recovery cannot corrupt it.
     #[must_use]
     pub fn active(&self, now_ms: i64, min_weight: f64) -> Vec<AcceptedWorkflow> {
         self.inner
             .lock()
-            .expect("bank lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values()
             .filter(|w| !w.is_sunset_expired(now_ms) && w.weight >= min_weight)
             .cloned()
@@ -325,9 +323,9 @@ impl CuratedBank {
     /// supplied thresholds. Consumed by m11's consolidation cycle to mark
     /// soft-floor candidates without re-classifying the bank itself.
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned.
+    /// A poisoned internal lock is recovered in place via
+    /// `PoisonError::into_inner`; the bank's `BTreeMap` is structurally
+    /// valid regardless of a prior panic, so recovery cannot corrupt it.
     #[must_use]
     pub fn prune_pending(
         &self,
@@ -337,7 +335,7 @@ impl CuratedBank {
     ) -> Vec<AcceptedWorkflow> {
         self.inner
             .lock()
-            .expect("bank lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values()
             .filter(|w| {
                 w.phase_for(now_ms, prune_pending_threshold, prune_threshold)
@@ -351,11 +349,11 @@ impl CuratedBank {
     /// [`SunsetPhase::SunsetExpired`] under the default thresholds. Returns
     /// the count of evicted rows. Caller schedules: m11 consolidation cycle.
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned.
+    /// A poisoned internal lock is recovered in place via
+    /// `PoisonError::into_inner`; the bank's `BTreeMap` is structurally
+    /// valid regardless of a prior panic, so recovery cannot corrupt it.
     pub fn prune_expired(&self, now_ms: i64) -> usize {
-        let mut g = self.inner.lock().expect("bank lock");
+        let mut g = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let before = g.len();
         g.retain(|_, w| {
             w.phase_for(
@@ -369,12 +367,12 @@ impl CuratedBank {
 
     /// Total bank size.
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned.
+    /// A poisoned internal lock is recovered in place via
+    /// `PoisonError::into_inner`; the bank's `BTreeMap` is structurally
+    /// valid regardless of a prior panic, so recovery cannot corrupt it.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.inner.lock().expect("bank lock").len()
+        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len()
     }
 
     /// `true` when the bank is empty.

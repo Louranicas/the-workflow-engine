@@ -224,10 +224,23 @@ struct ProjectedSuffix {
     right_gap: usize,
 }
 
-/// Find the FIRST occurrence of `prefix` in `seq` under gap-allowed
-/// semantics: between successive prefix tokens, at most `max_gap.0`
-/// non-matching tokens may be skipped. Returns the suffix AFTER the last
-/// matched prefix token, plus the maximum gap observed.
+/// Find the first gap-bounded occurrence of `prefix` in `seq`.
+///
+/// Gap-allowed semantics: between two successively matched prefix
+/// tokens at most `max_gap.0` non-matching tokens may be skipped.
+/// "First" means the earliest start index (a `seq` position equal to
+/// `prefix[0]`) that admits a *complete* embedding of the whole prefix;
+/// within that start every prefix token is matched as early as
+/// possible, falling back to a backtracked choice only when the
+/// earliest choice cannot be completed.
+///
+/// Returns the suffix AFTER the last matched prefix token, plus the
+/// maximum inter-token gap observed in the chosen embedding.
+///
+/// A greedy single pass is *incomplete* for this problem — an
+/// over-gapped first candidate, or an earliest-but-dead-ending
+/// intermediate match, can hide a valid embedding — so both the start
+/// position and each intermediate match are allowed to backtrack.
 fn project_after_prefix(
     seq: &[StepToken],
     prefix: &[StepToken],
@@ -239,46 +252,76 @@ fn project_after_prefix(
             right_gap: 0,
         });
     }
-    let mut p_idx = 0_usize;
-    let mut last_match_idx: Option<usize> = None;
-    let mut max_gap_observed = 0_usize;
-    for (i, tok) in seq.iter().enumerate() {
-        if *tok == prefix[p_idx] {
-            if let Some(last) = last_match_idx {
-                let gap = i.saturating_sub(last).saturating_sub(1);
-                if gap > max_gap.0 {
-                    // Gap too large; restart matching at this token.
-                    if *tok == prefix[0] {
-                        p_idx = 1;
-                        last_match_idx = Some(i);
-                        max_gap_observed = 0;
-                        continue;
-                    }
-                    p_idx = 0;
-                    last_match_idx = None;
-                    max_gap_observed = 0;
-                    continue;
-                }
-                if gap > max_gap_observed {
-                    max_gap_observed = gap;
-                }
-            }
-            last_match_idx = Some(i);
-            p_idx += 1;
-            if p_idx == prefix.len() {
-                let after = i.saturating_add(1);
-                let suffix = if after >= seq.len() {
-                    Vec::new()
-                } else {
-                    seq[after..].to_vec()
-                };
-                return Some(ProjectedSuffix {
-                    suffix,
-                    right_gap: max_gap_observed,
-                });
-            }
+    // `(p_idx, prev_idx)` states already proven to admit no embedding —
+    // shared across start positions so the search stays polynomial.
+    let mut failed: std::collections::HashSet<(usize, usize)> =
+        std::collections::HashSet::new();
+    for (start, tok) in seq.iter().enumerate() {
+        if *tok != prefix[0] {
+            continue;
+        }
+        if let Some((last_idx, max_observed)) =
+            embed_from(seq, prefix, 1, start, max_gap.0, &mut failed)
+        {
+            let after = last_idx.saturating_add(1);
+            let suffix = if after >= seq.len() {
+                Vec::new()
+            } else {
+                seq[after..].to_vec()
+            };
+            return Some(ProjectedSuffix {
+                suffix,
+                right_gap: max_observed,
+            });
         }
     }
+    None
+}
+
+/// Depth-first, earliest-position-first embedding of `prefix[p_idx..]`
+/// into `seq`, given the previous prefix token was matched at
+/// `prev_idx`. Returns `(last_matched_idx, max_gap_observed)` for the
+/// first complete embedding found. Earliest-first traversal yields the
+/// greedy embedding when greedy succeeds and the earliest backtracked
+/// embedding otherwise. Failed `(p_idx, prev_idx)` states are memoised
+/// in `failed` so the search is polynomial against adversarial input.
+fn embed_from(
+    seq: &[StepToken],
+    prefix: &[StepToken],
+    p_idx: usize,
+    prev_idx: usize,
+    max_gap: usize,
+    failed: &mut std::collections::HashSet<(usize, usize)>,
+) -> Option<(usize, usize)> {
+    if p_idx == prefix.len() {
+        return Some((prev_idx, 0));
+    }
+    if failed.contains(&(p_idx, prev_idx)) {
+        return None;
+    }
+    let first = prev_idx.saturating_add(1);
+    if first >= seq.len() {
+        failed.insert((p_idx, prev_idx));
+        return None;
+    }
+    // prefix[p_idx] may land in `prev_idx+1 ..= prev_idx+1+max_gap`,
+    // clamped to the last valid index.
+    let last = first
+        .saturating_add(max_gap)
+        .min(seq.len().saturating_sub(1));
+    for cand in first..=last {
+        if seq[cand] != prefix[p_idx] {
+            continue;
+        }
+        // `cand >= first == prev_idx + 1`, so the subtraction is safe.
+        let gap = cand.saturating_sub(prev_idx).saturating_sub(1);
+        if let Some((deep_last, deep_max)) =
+            embed_from(seq, prefix, p_idx + 1, cand, max_gap, failed)
+        {
+            return Some((deep_last, gap.max(deep_max)));
+        }
+    }
+    failed.insert((p_idx, prev_idx));
     None
 }
 
@@ -849,51 +892,36 @@ mod tests {
     }
 
     #[test]
-    // rationale: BUG REGRESSION GUARD — restart-on-repeated-first-token is
-    // DEAD CODE. The block at m20_prefixspan/mod.rs:251 (`if *tok ==
-    // prefix[0]` inside the over-gap branch) is only reachable when the
-    // outer `if *tok == prefix[p_idx]` (line 246) ALSO holds — i.e. only
-    // when `prefix[p_idx] == prefix[0]`. For the ordinary case prefix=[1,2]
-    // (mid-match, expecting `2`), a fresh `1` after an over-gap is
-    // `*tok == prefix[0]` but `*tok != prefix[p_idx]`, so the branch never
-    // executes and the documented re-anchor never happens.
-    //
-    // CONSEQUENCE: a sequence [1, <over-gap noise>, 1, 2] does NOT match
-    // pattern [1,2] even though a valid gap-0 occurrence exists at the tail.
-    // This UNDER-COUNTS support for any pattern whose first token recurs
-    // after a wide gap — directly weakening the KEYSTONE compositional
-    // sub-graph detector. See module doc-comment lines 227-230 which
-    // describe the intended (but unimplemented) restart semantics.
-    //
-    // This test pins the ACTUAL current behaviour (None) so the bug is
-    // visible and a future fix is caught by a flipped assertion.
-    fn bug_projection_restart_on_repeated_first_token_is_dead_code() {
+    // rationale: F1 REGRESSION GUARD — the KEYSTONE over-gap restart bug.
+    // Before the W2 fix, project_after_prefix was a greedy single pass: a
+    // fresh `prefix[0]` appearing after an over-gap, while mid-match
+    // expecting a non-first token, was neither matched nor used to
+    // re-anchor — so [1, <over-gap noise>, 1, 2] failed to match [1,2]
+    // and pattern support was UNDER-COUNTED. The matcher now backtracks
+    // both the start position and intermediate matches; this test pins
+    // the recovered (correct) behaviour.
+    fn projection_recovers_when_first_token_recurs_after_overgap() {
         // First 1 at idx 0; 2 is 6 positions away (over max_gap=2). Second
-        // 1 at idx 6 with 2 immediately after at idx 7 — a clean gap-0
-        // match that SHOULD be recoverable but is not.
+        // 1 at idx 6 with 2 immediately after at idx 7 — the clean gap-0
+        // match the old greedy pass missed.
         let s = seq(&[1, 9, 9, 9, 9, 9, 1, 2]);
-        let r = project_after_prefix(&s, &[tok(1), tok(2)], MaxGap(2));
-        let matched = r.map(|p| p.suffix);
-        assert!(
-            matched.is_none(),
-            "BUG STATUS CHANGED: restart-on-repeated-first-token now matches \
-             — update this test to assert the recovered suffix. suffix={matched:?}"
-        );
+        let p = project_after_prefix(&s, &[tok(1), tok(2)], MaxGap(2))
+            .expect("[1,2] embeds at indices 6,7 within MaxGap(2)");
+        assert!(p.suffix.is_empty(), "match ends at idx 7 — empty suffix");
+        assert_eq!(p.right_gap, 0, "the recovered embedding (6,7) is gap-0");
     }
 
     #[test]
-    // rationale: Restart logic IS reachable for self-repeating prefixes —
-    // prefix=[1,1] where prefix[p_idx] can equal prefix[0]. This exercises
-    // the live branch of the restart code (line 251) and documents the one
-    // shape where the restart works as written.
+    // rationale: self-repeating prefix [1,1] — exercises the backtracking
+    // matcher when the only second-token candidate over-gaps (no
+    // embedding) and when a later candidate completes within gap.
     fn projection_restart_reachable_for_self_repeating_prefix() {
-        // prefix [1,1]: after matching the first 1 we expect another 1.
-        // [1, 9,9,9,9,9, 1] — the second 1 is over-gap (gap 5 > max_gap 2),
-        // restart triggers because *tok == prefix[0] == 1, p_idx → 1.
-        // No third 1 follows, so the prefix is never completed → None.
+        // [1, 9,9,9,9,9, 1] — the only second 1 (idx 6) is over-gap
+        // (gap 5 > max_gap 2) from the first 1 and no other 1 follows,
+        // so [1,1] has no gap-bounded embedding → None.
         let s = seq(&[1, 9, 9, 9, 9, 9, 1]);
         let r = project_after_prefix(&s, &[tok(1), tok(1)], MaxGap(2));
-        assert!(r.is_none(), "expected None — no 1 after the restart anchor");
+        assert!(r.is_none(), "expected None — no second 1 within gap");
         // [1, 9,9, 1, 1] completes [1,1] within gap: first 1 at idx0,
         // second 1 at idx3 (gap = 3-0-1 = 2, within MaxGap(2)). The match
         // ends at idx3, so the suffix is the tail past idx3 = [1].
@@ -901,6 +929,64 @@ mod tests {
         let p = project_after_prefix(&s2, &[tok(1), tok(1)], MaxGap(2)).expect("match");
         assert_eq!(p.suffix, seq(&[1]));
         assert_eq!(p.right_gap, 2, "the single observed inter-prefix gap is 2");
+    }
+
+    #[test]
+    // rationale: F1 — earliest-greedy from a start can dead-end; the
+    // matcher must backtrack the intermediate match. prefix [1,2,3] in
+    // [1,2,2,9,3] MaxGap(1): greedy picks 2@1 then cannot reach 3, so it
+    // must fall back to 2@2 to complete via 3@4.
+    fn projection_backtracks_dead_ending_intermediate_match() {
+        let s = seq(&[1, 2, 2, 9, 3]);
+        let p = project_after_prefix(&s, &[tok(1), tok(2), tok(3)], MaxGap(1))
+            .expect("[1,2,3] embeds at (0,2,4) within MaxGap(1)");
+        assert!(p.suffix.is_empty(), "match ends at idx 4");
+        assert_eq!(p.right_gap, 1, "both inter-token gaps are 1");
+    }
+
+    #[test]
+    // rationale: F1 — a stray copy of prefix[0] mid-match must NOT force a
+    // re-anchor that abandons a still-completable match. prefix [1,2,3] in
+    // [1,2,1,3]: the 1 at idx 2 must be skipped, not re-anchored to.
+    fn projection_does_not_falsely_reanchor_on_stray_first_token() {
+        let s = seq(&[1, 2, 1, 3]);
+        let p = project_after_prefix(&s, &[tok(1), tok(2), tok(3)], MaxGap(5))
+            .expect("[1,2,3] embeds at (0,1,3)");
+        assert!(p.suffix.is_empty(), "match ends at idx 3");
+    }
+
+    #[test]
+    // rationale: F1 — the first start may over-gap while a later start
+    // succeeds; the matcher returns the later start's embedding.
+    fn projection_uses_later_start_when_first_start_overgaps() {
+        // 1@0 then 2@8 over-gaps (MaxGap 2); 1@7, 2@8 is a clean match.
+        let s = seq(&[1, 9, 9, 9, 9, 9, 9, 1, 2, 2]);
+        let p = project_after_prefix(&s, &[tok(1), tok(2)], MaxGap(2))
+            .expect("[1,2] embeds at (7,8)");
+        assert_eq!(p.suffix, seq(&[2]), "match ends at idx 8, tail is [2]");
+        assert_eq!(p.right_gap, 0);
+    }
+
+    #[test]
+    // rationale: F1 — a genuinely absent token still returns None after
+    // the all-starts search (exercises the failure memo across starts).
+    fn projection_absent_pattern_returns_none_across_all_starts() {
+        let s = seq(&[1, 1, 1, 1, 1]);
+        assert!(
+            project_after_prefix(&s, &[tok(1), tok(2)], MaxGap(9)).is_none(),
+            "no token 2 anywhere — no embedding from any start"
+        );
+    }
+
+    #[test]
+    // rationale: F1 — token order matters: [1,2] cannot embed in [2,1]
+    // (the 2 precedes the 1) regardless of the gap budget.
+    fn projection_respects_token_order() {
+        let s = seq(&[2, 1]);
+        assert!(
+            project_after_prefix(&s, &[tok(1), tok(2)], MaxGap(9)).is_none(),
+            "[1,2] requires a 1 before a 2"
+        );
     }
 
     #[test]

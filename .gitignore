@@ -49,3 +49,7 @@ logs/
 !layers/
 !modules/
 !the-workflow-engine-vault/
+
+# cargo-mutants output (ephemeral mutation-testing artifacts)
+mutants.out/
+mutants.out.old/

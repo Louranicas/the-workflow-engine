@@ -1,7 +1,7 @@
 # the-workflow-engine — Project Charter
 
 > **Project location:** `/home/louranicas/claude-code-workspace/the-workflow-engine` (absolute path on host; all relative links in this file resolve against this root)
-> **Status:** Planning-only pilot · HOLD-v2 active · **0 LOC Rust code** · 41,508 words of module specs (vault) + 66,576 words of deployment framework + ~7,000 words of god-tier consolidation · **+ S1002127 scaffold Waves 0/1/2/3 LIVE: ~198 files / ~140k words of structure + per-module Rust specs + ai_docs deep + ai_specs cross-cutting + ultramap operational maps + `.claude/` full optimisation** (see [`PRIME_DIRECTIVE_WAIVER.md`](PRIME_DIRECTIVE_WAIVER.md) for scope)
+> **Status:** ACTIVE — G9 fired 2026-05-17, HOLD-v2 lifted. The 26-module Rust codebase is implemented (~31k LOC; `workflow_core` lib + `wf-crystallise` / `wf-dispatch` binaries) and under active hardening. **Hardening Fleet 2026-05-21: W1–W3 complete (W4 mutation-testing in progress) — 1835 tests passing, clippy + pedantic clean.** Current-authority state: [`CLAUDE.local.md`](CLAUDE.local.md) snapshot + [`GATE_STATE.md`](GATE_STATE.md) (G9 FIRED) + git history. Any "planning-only" language elsewhere in the repo is superseded archaeology.
 > **Cold-start (3 reads):** [`README.md`](README.md) → [`CLAUDE.local.md`](CLAUDE.local.md) → [`the-workflow-engine-vault/GOD_TIER_CONSOLIDATION_S1001982.md`](the-workflow-engine-vault/GOD_TIER_CONSOLIDATION_S1001982.md). Then [`ARCHITECTURE.md`](ARCHITECTURE.md), [`GATE_STATE.md`](GATE_STATE.md), [`ai_specs/INDEX.md`](ai_specs/INDEX.md), [`ai_docs/INDEX.md`](ai_docs/INDEX.md), [`ultramap/README.md`](ultramap/README.md).
 > **Session-state delta:** [CLAUDE.local.md](CLAUDE.local.md)
 > **Vault home:** [the-workflow-engine-vault/HOME.md](the-workflow-engine-vault/HOME.md)
@@ -12,20 +12,31 @@
 
 ## PRIME DIRECTIVE (read first)
 
-- **Planning-only pilot.** No code. No `cargo init`. No `cargo new`. No source files under `src/`. No `Cargo.toml`. No scaffold. Markdown spec documents only.
-- **HOLD-v2 envelope active** — Zen URGENT block on G9 out-of-sequence stands until either (a) G1-G8 drive green in sequence OR (b) Luke files explicit per-gate waivers.
-- **No new substrate writes** for the workflow-trace spec until G8 (except communication notices to `~/projects/shared-context/agent-cross-talk/` and `~/projects/shared-context/watcher-notices/`).
-- **Ignore TaskCreate reminders** — per Luke's consistent planning-pilot directive throughout this session arc (TaskCreate is for implementation tracking, not planning artefacts).
-- **No focus yank.** No Zellij tab navigation. All cross-pane comms via file-drop channels.
-- **Vault subfolder `the-workflow-engine-vault/` is the navigation surface.** Open it first; canonical files live alongside in this directory.
+- **Status: ACTIVE implementation.** G9 fired 2026-05-17; HOLD-v2 lifted. The 26-module
+  Rust codebase is implemented and under active hardening — **code work is authorised**.
+  (Historical: this project began as a planning-only pilot. That envelope — "no code", "no
+  cargo", HOLD-v2 — is **fully superseded**; see `GATE_STATE.md` G9-FIRED table + git
+  history. Older "planning-only" language anywhere in the repo is archaeology, not a rule.)
+- **God-tier quality bar.** Every change passes the full gate: `cargo check` → `clippy -D
+  warnings` → `clippy -D clippy::pedantic` → `cargo test --all-targets`. Zero tolerance.
+  50+ tests/module; no `unwrap()`/`expect()` outside tests; no `unsafe`; doc comments on
+  public items.
+- **No daemon / service spawn from an agent** — the sandbox reaps children; Luke runs
+  `devenv` from the terminal.
+- **No focus yank.** All cross-pane comms via file-drop channels
+  (`~/projects/shared-context/agent-cross-talk/`, `~/projects/shared-context/watcher-notices/`).
+- **FP-verify discipline.** Any "X is done / gate-clean" claim is re-exercised (re-run,
+  re-grep, re-read) before it is trusted — agent reports are evidence, not fact.
+- **Vault subfolder `the-workflow-engine-vault/`** is a navigation surface alongside the
+  canonical files in this directory.
 
 ---
 
 ## What IS this project
 
-**`workflow-trace`** (working name; final naming TBD per OI-5) — a planned single-phase Rust codebase for recording cascading-command + Battern-protocol + context-window observations across the Zellij habitat, then proposing variants for human evaluation, then dispatching ratified workflows via HABITAT-CONDUCTOR (never directly).
+**`workflow-trace`** (working name; final naming TBD per OI-5) — a single-phase Rust codebase for recording cascading-command + Battern-protocol + context-window observations across the Zellij habitat, then proposing variants for human evaluation, then dispatching ratified workflows via HABITAT-CONDUCTOR (never directly).
 
-- **Architecture:** 26 modules · 8 synergy clusters · ~5,200 LOC · two-binary split (`wf-crystallise` + `wf-dispatch` + shared `workflow-core` lib)
+- **Architecture:** 26 modules · 8 synergy clusters · ~31k LOC implemented (`workflow_core` lib + `wf-crystallise` / `wf-dispatch` binaries) — the realised codebase is larger than the planning-era ~5,200 LOC estimate
 - **Deployment:** single-phase per Luke override 2026-05-17 (waiving Fossil scope discipline + Skeptic pain-source + RALPH selector safety + Watcher R6 + Substrate exploration-protection — all explicit; risks on Command's head)
 - **Reuse density:** ~65% boilerplate-lift from 48 source clones in `the-workflow-engine-vault/boilerplate modules/`
 - **Structural-gap authorship (cannot be lifted):**
@@ -106,18 +117,12 @@ Beyond the rubric, the working stance carried into this project:
 
 ---
 
-## 6 critical-path blockers (Luke's call)
+## Gate history (all resolved — G9 fired)
 
-| # | Blocker | Resolution path |
-|---|---|---|
-| B1 | G7 Zen URGENT block on G9 out-of-sequence | Per-gate waiver OR drive G1-G8 in sequence |
-| B2 | v1.3 patch not yet authored | Command authors (1-2 days) |
-| B3 | Conductor Waves 1B/1C/2/3 `auto_start=false` | Luke @ terminal bring-up |
-| B4 | Ember rubric §5.1 amendment pending | Watcher's lane (1 session) |
-| B5 | POVM `:8125` redeploy verify (G3) | Luke `devenv restart povm-engine` (~hour) |
-| B6 | Power-structure ambiguity (Luke override vs Zen G7 audit precedence) | Luke clarifies (1 decision) |
-
-**4 of 6 are sequenceable; 2 require single Luke actions.** Total pre-G9 to GREEN: ~5-10 days.
+The nine pre-genesis gates (G1–G9) and the B1–B6 blocker register are **closed** — G9 fired
+2026-05-17 and the 26-module codebase was implemented. Live gate record:
+[`GATE_STATE.md`](GATE_STATE.md). This section is retained only as a pointer; the project is
+past the gate phase and into implementation + hardening.
 
 ---
 
@@ -136,18 +141,22 @@ Beyond the rubric, the working stance carried into this project:
 
 ## Operational rules unique to this project
 
-- **No code authoring** — markdown spec documents only; Rust code blocks within markdown are spec documentation, not source files
-- **No `cargo`** of any kind — no `cargo init`, no `cargo new`, no `cargo build`, no `cargo run`
-- **No directory rename** (`the-workflow-engine/` → `workflow-trace/`) until G2 fires (gated on G1 Watcher close-notice)
-- **No new stcortex writes** under `workflow_trace_*` namespace until G8 (except via comms-permitted save-session hooks)
-- **No CLAUDE.local.md (workspace-root) edits** for the workflow-trace spec — only Hebbian v3 reconciliation citation update authorised (per Zen audit `2026-05-16T224430Z`)
-- **All cross-pane comms via file-drop** in `~/projects/shared-context/agent-cross-talk/` (Command ↔ Command-2/3/Zen) or `~/projects/shared-context/watcher-notices/` (Watcher channel via `~/.local/bin/watcher notify`)
-- **No Tab navigation in Zellij** — receive-mode for peer drops; no focus-yank
-- **Ignore TaskCreate reminders** — repeats throughout session per Luke's planning-pilot directive
-- **FP-verify discipline** — any claim like "X is done" or "Y is gate-clean" must be independently re-exercised via grep, file read, gate re-run; agent reports are evidence to verify (per LCM Drift #11 generalisation)
-- **Hyphen-slug discipline** for stcortex (S1001757 munge bug) — labels with hyphens converted to underscores in pre_id/post_id slugs
-- **`/usr/bin/cp -f`** never `cp -f` for binary placement (alias trap; per CLAUDE.md workspace charter)
-- **No daemon/service start from agent** — sandbox reaps children (per CLAUDE.md workspace charter); Luke runs `devenv` from terminal
+- **God-tier code standard** — the full 4-stage gate on every change (`check` → `clippy -D
+  warnings` → `clippy -D clippy::pedantic` → `test --all-targets`); 50+ tests/module; no
+  `unwrap`/`expect` outside tests; no `unsafe`; doc comments on public items.
+- **Directory vs crate name** — the directory is still `the-workflow-engine/`; the Cargo
+  package is `workflow-trace` (`workflow_core` lib + `wf-crystallise` / `wf-dispatch`
+  binaries). A directory rename to `workflow-trace/` is deferred to post-M0 (cosmetic).
+- **stcortex namespace** — substrate writes use the `workflow_trace_*` namespace; observe
+  hyphen-slug discipline (S1001757 munge bug — hyphens → underscores in `pre_id`/`post_id`).
+- **All cross-pane comms via file-drop** in `~/projects/shared-context/agent-cross-talk/`
+  (Command ↔ Command-2/3/Zen) or `~/projects/shared-context/watcher-notices/`.
+- **No Tab navigation in Zellij** — receive-mode for peer drops; no focus-yank.
+- **FP-verify discipline** — any "X is done" / "Y is gate-clean" claim must be independently
+  re-exercised (grep, file read, gate re-run); agent reports are evidence to verify.
+- **`/usr/bin/cp -f`** never `cp -f` for binary placement (alias trap).
+- **No daemon/service start from an agent** — the sandbox reaps children; Luke runs `devenv`
+  from the terminal.
 
 ---
 

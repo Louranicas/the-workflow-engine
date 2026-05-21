@@ -53,3 +53,21 @@ Rust quality and the highest achievable security posture. Verify every step; do 
 ## Continuity
 
 In-session `/loop` self-pacing between waves; TaskList (#1–#6) = goal tracker; this doc + cross-talk = resume anchors. No `/cron` unless work crosses a session boundary (flagged before creation — autonomous billing).
+
+## Results (live — 2026-05-21)
+
+| Wave | Outcome | Commit | Tests |
+|------|---------|--------|-------|
+| W0 | Baseline + atuin security harvest + plan | — | baseline 1310 |
+| W1 | Quality floor — all 26 modules to ≥50 meaningful tests | `dc25335` | 1310 → 1782 |
+| W2 | 19 security findings resolved — KEYSTONE `project_after_prefix` correctness bug, 9 lock-poison panics, LIKE-injection, error-swallow, m9 namespace boundary, m8 false-gate docstrings, HTTP body caps | `c662b2d` + `5cb4822` | → 1834 |
+| W3 | Type-design — `#[non_exhaustive]` ×24, `WorkflowId` + `MinSupport` encapsulation, 5 comment-accuracy fixes | `2e3113d` | → 1835 |
+| W4 | `cargo-mutants` — 412 mutants, 80.6% baseline kill rate; 68 mutant-killing tests resolve every surviving non-timeout mutant in m10/m11/m21/m22 (67 killed + 1 proven-equivalent) | `5de71ac` | → 1903 |
+| W5 | Docs reconciliation (CLAUDE.md charter + project & workspace CLAUDE.local.md) · 4-surface persistence · commit + push both remotes | (W5 commit) | 1903 |
+
+Gate green every wave: `cargo check` + `clippy -D warnings` + `clippy -D clippy::pedantic` +
+`cargo test --all-targets --all-features --release`. Zen audit packets W1/W2/W3 filed in
+`~/projects/shared-context/agent-cross-talk/`. W1 incident (shared-tree parallel-agent file
+reverts) was disclosed and fully reconciled. Open for node 0.A: the **F2 m8-gate architecture
+decision** and the **W3 #5–#10 core-type-encapsulation portfolio**
+([HARDENING_W3_TYPE_DESIGN_PORTFOLIO.md](HARDENING_W3_TYPE_DESIGN_PORTFOLIO.md)).

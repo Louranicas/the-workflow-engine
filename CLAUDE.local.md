@@ -12,6 +12,65 @@
 
 ---
 
+## 🔧 HARDENING FLEET — 2026-05-21 (S1003529) · CURRENT
+
+End-to-end quality + security hardening of the 26-module codebase, in collaboration with
+Zen (audit lane). 6 waves; W1–W3 committed, W4 (mutation testing) in progress, W5 (docs).
+
+- **W1** quality floor — every module to 50+ meaningful tests. Commit `dc25335`. Tests 1310 → 1782.
+- **W2** security hardening — 19 findings (KEYSTONE `project_after_prefix` correctness bug,
+  9 lock-poison panics, injection / error-swallow, m9 namespace boundary, m8 false-gate
+  docstrings). Commits `c662b2d` + `5cb4822`. Tests → 1834.
+- **W3** type-design + comment accuracy — `#[non_exhaustive]` on 24 error enums, `WorkflowId`
+  + `MinSupport` encapsulation, 5 comment fixes. Commit `2e3113d`. Tests → 1835.
+- **W4** Zen audit + `cargo-mutants` on KEYSTONE (m20-23) + trust spine (m8-11) — in progress.
+- **W5** docs reconciliation (this) + 4-surface persistence + push.
+
+Gate green throughout: `check` + `clippy -D warnings` + `clippy -D clippy::pedantic` +
+`test --all-targets --release`. Canonical: [`ai_docs/HARDENING_FLEET_2026-05-21.md`](ai_docs/HARDENING_FLEET_2026-05-21.md) ·
+[`ai_docs/HARDENING_W2_FINDINGS.md`](ai_docs/HARDENING_W2_FINDINGS.md) ·
+[`ai_docs/HARDENING_W3_TYPE_DESIGN_PORTFOLIO.md`](ai_docs/HARDENING_W3_TYPE_DESIGN_PORTFOLIO.md).
+Zen audit packets filed per wave in `agent-cross-talk/`. **Open for node 0.A:** the F2 m8-gate
+architecture decision; the W3 #5–#10 core-type-encapsulation portfolio.
+
+---
+
+## 🟢 CURRENT STATUS SNAPSHOT — S1002209+M0/M1 implementation wave (verified 2026-05-20 08:19 +1000)
+
+**Project state:** `workflow-trace` is no longer planning-only. G9 fired on 2026-05-17; HOLD-v2 is lifted. The full 26-module Rust architecture is now present in `src/` with both binaries and the shared `workflow_core` library.
+
+**Latest verified git anchor:** `9db534d hardening(the-workflow-engine): Cluster H — m40/m41/m42 god-tier pass` on branch `main`.
+
+**Implemented clusters/modules:**
+- Cluster A: m1/m2/m3 substrate ingest — Atuin, stcortex narrowed consumer, injection.db.
+- Cluster B: m4/m5/m6 habitat observation — cascade, battern, context cost.
+- Cluster C: m7/m12/m13 correlation/output — workflow runs, CLI reports, stcortex writer.
+- Cluster D: m8/m9/m10/m11 trust spine — POVM prereq, namespace guard, Ember CI gate, fitness-weighted decay.
+- Cluster E: m14/m15 evidence/pressure — lift and pressure register.
+- Cluster F: m20/m21/m22/m23 KEYSTONE iteration — PrefixSpan, variant builder, k-means features, proposer.
+- Cluster G: m30/m31/m32/m33 bank/select/dispatch/verify.
+- Cluster H: m40/m41/m42 substrate feedback — Nexus emit, LCM RPC, stcortex emit.
+
+**Verification receipts from this snapshot:**
+- `cargo check --all-targets --all-features` = PASS.
+- `cargo test --all-targets --all-features -- --format terse` = **1090 passed, 0 failed, 1 ignored**.
+- Active Rust surface: `src` 119 files / 118 `.rs`; `tests` 11 files / 9 `.rs`.
+- Implemented module directories: 26/26.
+- Docs/spec surface still large and useful: `ai_docs` 64 md, `ai_specs` 76 md, `ultramap` 14 md, vault 103 files.
+
+**Known drift / dirty state:**
+- Git working tree is not pristine: `.obsidian/workspace.json`, `pre-framework-consolidation/WATCHER_DEPLOYMENT_WATCH_JOURNAL_S1001982.md`, `src/m30_bank/mod.rs`, and vault Watcher journal files are modified.
+- Some older sections below still preserve historical planning-only/HOLD-v2 language as archaeology. Treat this snapshot + `GATE_STATE.md` G9-fired table + git history as current authority.
+- Build warning persists by design until live POVM CR-2 is explicitly verified: `POVM_CR2_DEPLOYED=1` not set. Workflow-trace is stcortex-routed per m42 ADR, so this is a trust-gate warning, not a blocker for stcortex-only paths.
+
+**Current next moves:**
+1. Inspect/resolve the dirty `src/m30_bank/mod.rs` delta.
+2. Run full gate including clippy pedantic again after any m30 edit is accepted.
+3. Exercise binaries beyond compile/test: `wf-crystallise` report path and `wf-dispatch` dry-run/verification path.
+4. Bring up Conductor/weaver/zen/enforcer when Luke wants live dispatch-plane soak; keep real dispatch human-ratified.
+
+---
+
 ## 🟢 RESUME FROM HERE — S1002127 Cold-Start Entry (Workflow-Trace Scaffold Closeout)
 
 > **For a fresh Claude session:** read this section FIRST, then drop into the workstream rich-block below (`## S1002127 — Scaffold Waves 0/1/2/3/4 (LIVE)`) for Wave-by-Wave detail.
@@ -134,8 +193,8 @@ cd /home/louranicas/claude-code-workspace/the-workflow-engine && \
 
 | State | Value |
 |---|---|
-| **Phase** | Planning-only · HOLD-v2 active · 0 LOC code · 41,508 words module specs + 66,576 words deployment framework + ~7,000 words consolidation |
-| **Gates** | G1-G9 all NOT GREEN; G9 fired out-of-sequence (Zen URGENT block) |
+| **Phase** | ACTIVE implementation + hardening — G9 fired 2026-05-17, HOLD-v2 lifted. 26-module Rust codebase (~31k LOC); Hardening Fleet 2026-05-21 W1–W3 committed, W4 in progress |
+| **Gates** | G1–G9 all resolved; **G9 FIRED 2026-05-17** — live record in `GATE_STATE.md` |
 | **Last spec version** | v1.2 binding (Zen-audit-locked); **v1.3 patch pending** (single-phase override absorption) |
 | **Vault** | 88 files / 2.4MB across root + `module specs/` (9 files) + `boilerplate modules/` (10 subdirs + 4 gold-standard exemplars) + `deployment framework/` (10 phase docs) |
 | **Git** | branch `main` at `76ea4d6` (CR-2b coactivation pair-loop existence-filter); 479 dirty files |

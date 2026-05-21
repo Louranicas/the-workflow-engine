@@ -7,6 +7,22 @@
 > **Latest update:** 2026-05-20 post-Wave-A + Wave-B + Wave-C (9 HIGH + T4-SERDE + 14 integration test files closed; 1262 tests passing). Two cross-pane Zen verdicts received: V2 LCM 1A closed by peer (`795e4890`, re-gate requested); V1 Restraint v1.1 BLOCKED-PENDING-LUKE.
 > **Loop entry point:** `/carry-forward` slash command (`.claude/commands/carry-forward.md`).
 
+## Zen God-Tier Quality Assessment — 2026-05-21
+
+Full report: `~/projects/shared-context/quality-assessments/2026-05-21_zen_god_tier_assessment_workflow_trace_lcm.md`. Assessed at HEAD `1535df2`.
+
+**workflow-trace: 87/100** — "top-quartile-to-top-1% library implementation that is not yet an end-to-end product." Library-only ≈ 90; deployed-product-readiness-only ≈ 76. Facets: Rust 91 · logic 82 · anti-pattern 84 · tests 86 · security 88 · **ops 74** · arch/docs 88. Verdict: APPROVE as library / HOLD as product.
+
+The single biggest score lever is the **ops facet 74** — the `wf-crystallise`/`wf-dispatch` stubs. Zen's 5 ranked improvements, mapped to this register:
+
+| # | Zen recommendation | Register mapping | Type |
+|---|---|---|---|
+| 1 | Wire `wf-crystallise` + `wf-dispatch` into real library flows | **NOT a register item — feature-build, needs Luke scope decision** (Day-1-stub is current charter doctrine) | Feature |
+| 2 | Resolve V4 spec/code drift, esp. m20-m23 KEYSTONE | Tier 3 SD1-SD12 — PENDING Zen V4 verdict | Blocked |
+| 3 | Close integration gaps m12/m21/m22/m31 + CC-2/CC-5/CC-7 | H9-rem + H8-rem — **actionable now (CC-7 H5-blocked)** | Hardening |
+| 4 | Remove/vendor-normalise absolute `spacetimedb-sdk` path dep | T4-PORT — actionable now | Hardening |
+| 5 | Run `cargo-mutants` on m20-m23 + trust/boundary modules | NEW item T5-MUTANTS — actionable now; highest-signal metric | Measurement |
+
 ## Session-over-session test count trajectory
 
 | Session checkpoint | Commit | Tests | Δ |

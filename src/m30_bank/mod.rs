@@ -1105,4 +1105,201 @@ mod tests {
         let post_weight = bank.get(id).expect("post").weight;
         assert!((post_weight - pre_weight).abs() < f64::EPSILON);
     }
+
+    // ---- Wave: god-tier hardening pass — m30 to ≥50 tests ----
+
+    #[test]
+    fn try_apply_decay_happy_path_returns_ok_and_mutates() {
+        // rationale: Contract regression — the typed (Ok) success branch of
+        // try_apply_decay, distinct from the infallible apply_decay wrapper.
+        let b = CuratedBank::new();
+        let id = b.accept(sample_proposal(), 0).expect("ok");
+        let r = b.try_apply_decay(id, 0.25);
+        assert!(r.is_ok());
+        let w = b.get(id).expect("get");
+        assert!((w.weight - 0.25).abs() < 1e-12);
+    }
+
+    #[test]
+    fn try_apply_decay_factor_above_one_clamps_to_unit_ceiling() {
+        // rationale: Boundary — a >1 factor multiplied into weight is
+        // clamped to the 1.0 ceiling, never exceeding the unit interval.
+        let b = CuratedBank::new();
+        let id = b.accept(sample_proposal(), 0).expect("ok");
+        b.try_apply_decay(id, 0.5).expect("first");
+        b.try_apply_decay(id, 100.0).expect("boost"); // 0.5*100=50 → clamp 1.0
+        let w = b.get(id).expect("get");
+        assert!((w.weight - 1.0).abs() < 1e-12, "weight {}", w.weight);
+    }
+
+    #[test]
+    fn try_apply_decay_negative_factor_clamps_to_zero_floor() {
+        // rationale: Boundary — a negative factor yields a negative product
+        // which the clamp(0.0,1.0) floors at 0.0 (documented destructive edge).
+        let b = CuratedBank::new();
+        let id = b.accept(sample_proposal(), 0).expect("ok");
+        b.try_apply_decay(id, -2.0).expect("neg");
+        let w = b.get(id).expect("get");
+        assert!((w.weight - 0.0).abs() < 1e-12, "weight {}", w.weight);
+    }
+
+    #[test]
+    fn try_apply_decay_is_multiplicative_and_compounding() {
+        // rationale: Contract regression — successive decays compound
+        // multiplicatively: 1.0 · 0.5 · 0.5 = 0.25.
+        let b = CuratedBank::new();
+        let id = b.accept(sample_proposal(), 0).expect("ok");
+        b.try_apply_decay(id, 0.5).expect("d1");
+        b.try_apply_decay(id, 0.5).expect("d2");
+        let w = b.get(id).expect("get");
+        assert!((w.weight - 0.25).abs() < 1e-12, "weight {}", w.weight);
+    }
+
+    #[test]
+    fn apply_decay_absent_id_is_silent_noop_not_panic() {
+        // rationale: Anti-property — the back-compat infallible helper must
+        // tolerate a missing id without panicking (m11 best-effort sweep).
+        let b = CuratedBank::new();
+        b.apply_decay(123_456_789, 0.5); // no such id — must not panic
+        assert!(b.is_empty());
+    }
+
+    #[test]
+    fn prune_expired_on_empty_bank_returns_zero() {
+        // rationale: Boundary — pruning an empty bank evicts nothing.
+        let b = CuratedBank::new();
+        assert_eq!(b.prune_expired(1_700_000_000_000), 0);
+        assert!(b.is_empty());
+    }
+
+    #[test]
+    fn prune_expired_evicts_sunset_crossed_rows() {
+        // rationale: Boundary — a row whose sunset_at_ms has been crossed is
+        // SunsetExpired by hard-sunset (independent of weight) and evicted.
+        let b = CuratedBank::new();
+        let now = 1_700_000_000_000_i64;
+        let id = b.accept(sample_proposal(), now).expect("ok");
+        let after_sunset = now + DEFAULT_SUNSET_DAYS * MS_PER_DAY + 1;
+        let evicted = b.prune_expired(after_sunset);
+        assert_eq!(evicted, 1);
+        assert!(matches!(b.get(id), Err(BankError::NotFound(_))));
+    }
+
+    #[test]
+    fn prune_pending_empty_when_all_rows_active() {
+        // rationale: Boundary — no soft-window rows means an empty result.
+        let b = CuratedBank::new();
+        let _ = b.accept(sample_proposal_with_seed(11), 0).expect("a");
+        let _ = b.accept(sample_proposal_with_seed(12), 0).expect("b");
+        let pending = b.prune_pending(
+            1,
+            DEFAULT_PRUNE_PENDING_THRESHOLD,
+            DEFAULT_PRUNE_THRESHOLD,
+        );
+        assert!(pending.is_empty(), "fresh rows at weight 1.0 are all Active");
+    }
+
+    #[test]
+    fn phase_for_exactly_at_soft_threshold_is_active() {
+        // rationale: Boundary — phase_for uses strict `<` for the soft floor,
+        // so a weight EXACTLY at the soft threshold classifies as Active.
+        let now = 1_700_000_000_000_i64;
+        let w = AcceptedWorkflow {
+            workflow_id: 1,
+            proposal: sample_proposal(),
+            accepted_at_ms: now,
+            sunset_at_ms: i64::MAX,
+            weight: DEFAULT_PRUNE_PENDING_THRESHOLD,
+            last_run_ms: None,
+            run_count: 0,
+        };
+        let phase = w.phase_for(
+            now + 1,
+            DEFAULT_PRUNE_PENDING_THRESHOLD,
+            DEFAULT_PRUNE_THRESHOLD,
+        );
+        assert_eq!(phase, SunsetPhase::Active, "strict `<` keeps the floor Active");
+    }
+
+    #[test]
+    fn phase_for_exactly_at_hard_threshold_is_prune_pending() {
+        // rationale: Boundary — weight EXACTLY at the hard floor uses strict
+        // `<` so it is NOT SunsetExpired; it falls to the PrunePending band
+        // (still below the soft floor).
+        let now = 1_700_000_000_000_i64;
+        let w = AcceptedWorkflow {
+            workflow_id: 2,
+            proposal: sample_proposal(),
+            accepted_at_ms: now,
+            sunset_at_ms: i64::MAX,
+            weight: DEFAULT_PRUNE_THRESHOLD,
+            last_run_ms: None,
+            run_count: 0,
+        };
+        let phase = w.phase_for(
+            now + 1,
+            DEFAULT_PRUNE_PENDING_THRESHOLD,
+            DEFAULT_PRUNE_THRESHOLD,
+        );
+        assert_eq!(phase, SunsetPhase::PrunePending);
+    }
+
+    #[test]
+    fn multiple_distinct_proposals_get_distinct_workflow_ids() {
+        // rationale: Anti-property — distinct proposals (distinct seeds →
+        // distinct proposal_id) must map to distinct opaque workflow_ids.
+        let b = CuratedBank::new();
+        let id_a = b.accept(sample_proposal_with_seed(201), 0).expect("a");
+        let id_b = b.accept(sample_proposal_with_seed(202), 0).expect("b");
+        let id_c = b.accept(sample_proposal_with_seed(203), 0).expect("c");
+        assert_ne!(id_a, id_b);
+        assert_ne!(id_b, id_c);
+        assert_ne!(id_a, id_c);
+        assert_eq!(b.len(), 3);
+    }
+
+    #[test]
+    fn duplicate_rejection_leaves_original_row_intact() {
+        // rationale: Anti-property — a rejected duplicate accept() must NOT
+        // mutate, reset, or remove the already-banked row.
+        let b = CuratedBank::new();
+        let p = sample_proposal();
+        let id = b.accept(p.clone(), 1_700_000_000_000).expect("first");
+        b.apply_decay(id, 0.3); // mutate the original
+        b.record_run(id, 42);
+        assert!(matches!(
+            b.accept(p, 1_700_000_000_000),
+            Err(BankError::AlreadyAccepted(_))
+        ));
+        let w = b.get(id).expect("still present");
+        assert!((w.weight - 0.3).abs() < 1e-12, "duplicate accept clobbered weight");
+        assert_eq!(w.run_count, 1, "duplicate accept clobbered run_count");
+    }
+
+    #[test]
+    fn record_run_overwrites_last_run_ms_with_latest() {
+        // rationale: Contract regression — last_run_ms tracks the LATEST
+        // dispatch, not the first; run_count still accumulates.
+        let b = CuratedBank::new();
+        let id = b.accept(sample_proposal(), 0).expect("ok");
+        b.record_run(id, 100);
+        b.record_run(id, 50); // earlier ts, but still "latest call"
+        let w = b.get(id).expect("get");
+        assert_eq!(w.last_run_ms, Some(50));
+        assert_eq!(w.run_count, 2);
+    }
+
+    #[test]
+    fn invalid_decay_factor_error_carries_offending_value() {
+        // rationale: Error variant — the InvalidDecayFactor payload must
+        // be the actual non-finite value (here: positive infinity).
+        let b = CuratedBank::new();
+        let id = b.accept(sample_proposal(), 0).expect("ok");
+        match b.try_apply_decay(id, f64::INFINITY) {
+            Err(BankError::InvalidDecayFactor(f)) => {
+                assert!(f.is_infinite() && f > 0.0, "payload was {f}");
+            }
+            other => panic!("expected InvalidDecayFactor, got {other:?}"),
+        }
+    }
 }

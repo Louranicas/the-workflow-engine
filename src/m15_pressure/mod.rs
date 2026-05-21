@@ -1078,4 +1078,216 @@ mod tests {
             "m15 event JSONL must not embed namespace-prefix substrings: {content}"
         );
     }
+
+    // ====================================================================
+    // Hardening pass 2 — +13 tests. Classifier precedence, build_event
+    // shape, serde enum wire-form, list ordering, source variants.
+    // ====================================================================
+
+    // rationale: Correctness — classify_excerpt is case-insensitive; an
+    // upper-case verb still matches its forbidden category.
+    #[test]
+    fn classify_excerpt_is_case_insensitive() {
+        assert_eq!(
+            classify_excerpt("AUTO_PROMOTE"),
+            Some(ForbiddenCategory::AutoOrSmartVerb)
+        );
+        assert_eq!(
+            classify_excerpt("Rewrite_Source"),
+            Some(ForbiddenCategory::RewriteVerb)
+        );
+    }
+
+    // rationale: Boundary — classifier precedence. An excerpt containing
+    // BOTH a recommend-verb and an auto-verb matches the first checked
+    // branch (recommend), per the function's top-to-bottom ordering.
+    #[test]
+    fn classify_excerpt_recommend_wins_over_auto_when_both_present() {
+        let cat = classify_excerpt("recommend_ and auto_ together").expect("c");
+        assert_eq!(cat, ForbiddenCategory::RecommendVerb, "recommend checked first");
+    }
+
+    // rationale: Boundary — the `recommend ` (with trailing space) branch
+    // catches the natural-language form, not just the snake_case verb.
+    #[test]
+    fn classify_excerpt_matches_recommend_space_natural_language() {
+        assert_eq!(
+            classify_excerpt("the agent will recommend a cascade"),
+            Some(ForbiddenCategory::RecommendVerb)
+        );
+    }
+
+    // rationale: Adversarial input — POVM mention WITHOUT a write/emit
+    // verb is NOT classified as DeprecatedPovmWrite (both conditions
+    // required by the `&&` guard).
+    #[test]
+    fn classify_excerpt_povm_read_only_is_in_charter() {
+        assert!(
+            classify_excerpt("read from povm history").is_none(),
+            "povm read without write/emit must be in-charter"
+        );
+        assert_eq!(
+            classify_excerpt("povm write back"),
+            Some(ForbiddenCategory::DeprecatedPovmWrite)
+        );
+    }
+
+    // rationale: Adversarial input — "handshake" alone or "silence" alone
+    // is in-charter; only the conjunction triggers HandshakeSilence.
+    #[test]
+    fn classify_excerpt_handshake_alone_is_in_charter() {
+        assert!(classify_excerpt("send a handshake message").is_none());
+        assert!(classify_excerpt("a moment of silence").is_none());
+        assert_eq!(
+            classify_excerpt("handshake met with silence"),
+            Some(ForbiddenCategory::HandshakeSilence)
+        );
+    }
+
+    // rationale: Boundary — the empty excerpt is in-charter (classifier
+    // returns None; detect_and_emit emits nothing).
+    #[test]
+    fn classify_empty_excerpt_returns_none() {
+        assert!(classify_excerpt("").is_none());
+        let (reg, _dir) = tmp_register();
+        let result = reg
+            .detect_and_emit(
+                "",
+                PressureSource::Unknown,
+                "empty",
+                CharterSection::V1_3VerbClass,
+            )
+            .expect("ok");
+        assert!(result.is_none(), "empty excerpt emits nothing");
+    }
+
+    // rationale: Correctness — optimize_ (US spelling) is classified the
+    // same as optimise_ (UK spelling).
+    #[test]
+    fn classify_excerpt_optimize_us_spelling_matches() {
+        assert_eq!(
+            classify_excerpt("optimize_parameters"),
+            Some(ForbiddenCategory::OptimiseWithoutGate)
+        );
+    }
+
+    // rationale: Correctness — build_event faithfully copies all inputs
+    // into the event (category, source, feature, charter section).
+    #[test]
+    fn build_event_copies_all_input_fields() {
+        let (reg, _dir) = tmp_register();
+        let src = PressureSource::SpecPatch {
+            file: "ai_docs/patch.md".into(),
+        };
+        let charter = CharterSection::Ap27Boundary;
+        let e = reg.build_event(
+            ForbiddenCategory::SidecarDaemon,
+            "spawn sidecar daemon",
+            src.clone(),
+            "daemon proposal",
+            charter.clone(),
+        );
+        assert_eq!(e.forbidden_category, ForbiddenCategory::SidecarDaemon);
+        assert_eq!(e.source, src);
+        assert_eq!(e.proposed_feature, "daemon proposal");
+        assert_eq!(e.violated_charter, charter);
+        assert_eq!(e.session_id, "TESTSESS");
+    }
+
+    // rationale: Correctness — build_event truncates an over-long
+    // trigger_excerpt to MAX_EXCERPT_CHARS+1 (ellipsis) before storing.
+    #[test]
+    fn build_event_truncates_over_long_excerpt() {
+        let (reg, _dir) = tmp_register();
+        let big = "rewrite_".to_owned() + &"x".repeat(2_000);
+        let e = reg.build_event(
+            ForbiddenCategory::RewriteVerb,
+            &big,
+            PressureSource::Unknown,
+            "p",
+            CharterSection::V1_3HardRefusal,
+        );
+        assert!(e.trigger_excerpt.chars().count() <= MAX_EXCERPT_CHARS + 1);
+        assert!(e.trigger_excerpt.ends_with('\u{2026}'));
+    }
+
+    // rationale: Contract regression — ForbiddenCategory serialises with
+    // snake_case rename; the Other variant carries its description.
+    #[test]
+    fn forbidden_category_serde_wire_form_is_snake_case() {
+        let s = serde_json::to_string(&ForbiddenCategory::RouteBypassConductor)
+            .expect("ser");
+        assert_eq!(s, "\"route_bypass_conductor\"", "snake_case wire form");
+        let other = ForbiddenCategory::Other {
+            description: "custom surface".into(),
+        };
+        let os = serde_json::to_string(&other).expect("ser");
+        let back: ForbiddenCategory = serde_json::from_str(&os).expect("de");
+        assert_eq!(back, other, "Other round-trips with description");
+    }
+
+    // rationale: Contract regression — CharterSection::V1_3HardRefusal
+    // serde wire-form is the documented snake_case string.
+    #[test]
+    fn charter_section_serde_wire_form_round_trips() {
+        for cs in [
+            CharterSection::V1_3HardRefusal,
+            CharterSection::V1_3VerbClass,
+            CharterSection::Ap27Boundary,
+            CharterSection::Other {
+                section: "x-cut".into(),
+            },
+        ] {
+            let s = serde_json::to_string(&cs).expect("ser");
+            let back: CharterSection = serde_json::from_str(&s).expect("de");
+            assert_eq!(back, cs);
+        }
+    }
+
+    // rationale: Correctness — list_notices returns paths in sorted
+    // order; since filenames embed the zero-padded id, sort order equals
+    // emission order.
+    #[test]
+    fn list_notices_returns_paths_in_sorted_emission_order() {
+        let (reg, _dir) = tmp_register();
+        for _ in 0..5_u32 {
+            let e = reg.build_event(
+                ForbiddenCategory::RewriteVerb,
+                "rewrite_x",
+                PressureSource::Unknown,
+                "p",
+                CharterSection::V1_3HardRefusal,
+            );
+            reg.emit(&e).expect("emit");
+        }
+        let notices = reg.list_notices().expect("list");
+        assert_eq!(notices.len(), 5);
+        let mut sorted = notices.clone();
+        sorted.sort();
+        assert_eq!(notices, sorted, "list_notices output must be sorted");
+    }
+
+    // rationale: Correctness — detect_and_emit's written file embeds the
+    // monotonic id zero-padded to 6 digits in the filename.
+    #[test]
+    fn emit_filename_embeds_zero_padded_event_id() {
+        let (reg, _dir) = tmp_register();
+        let e = reg.build_event(
+            ForbiddenCategory::RewriteVerb,
+            "rewrite_x",
+            PressureSource::Unknown,
+            "p",
+            CharterSection::V1_3HardRefusal,
+        );
+        let id = e.id;
+        let p = reg.emit(&e).expect("emit");
+        let name = p
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .expect("name");
+        assert!(
+            name.contains(&format!("{id:06}")),
+            "filename must embed zero-padded id {id:06}: {name}"
+        );
+    }
 }

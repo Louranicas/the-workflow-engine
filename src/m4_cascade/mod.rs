@@ -598,4 +598,171 @@ mod tests {
         assert_eq!(got.window_ms, cfg.window_ms);
         assert_eq!(got.max_steps_per_cluster, cfg.max_steps_per_cluster);
     }
+
+    // ====================================================================
+    // Hardening pass 2 — pane-label fallback, DAG depth, window range,
+    // min_pane_count gating, and dispatch-slack windowing.
+    // ====================================================================
+
+    // rationale: Core correctness — when dispatch records are absent, the
+    // correlator falls back to distinct sessions as pane labels. Three
+    // distinct sessions → pane_count 3.
+    #[test]
+    fn pane_labels_fall_back_to_distinct_sessions_when_no_dispatch() {
+        let c = corr(2, 30_000);
+        let steps = vec![
+            step("a", 1_000_000_000, "alpha"),
+            step("b", 1_001_000_000, "beta"),
+            step("c", 1_002_000_000, "alpha"),
+        ];
+        let clusters = c.correlate(&steps, &[]);
+        assert_eq!(clusters.len(), 1);
+        // alpha + beta = 2 distinct sessions (alpha is deduplicated).
+        assert_eq!(clusters[0].pane_count, 2, "session fallback must dedupe");
+    }
+
+    // rationale: Core correctness — when every step shares one session and
+    // there are no dispatch records, the fallback yields exactly one pane;
+    // with default min_pane_count=2 the cluster is dropped.
+    #[test]
+    fn single_session_fallback_yields_one_pane_and_drops_under_default_min() {
+        let c = corr(2, 30_000);
+        let steps = vec![
+            step("a", 1_000_000_000, "solo"),
+            step("b", 1_001_000_000, "solo"),
+            step("c", 1_002_000_000, "solo"),
+        ];
+        assert!(
+            c.correlate(&steps, &[]).is_empty(),
+            "one-pane cluster must be filtered by min_pane_count=2"
+        );
+    }
+
+    // rationale: Boundary — a dispatch record OUTSIDE the cluster window
+    // (before the first step) does NOT contribute a pane label; the
+    // session fallback takes over instead.
+    #[test]
+    fn dispatch_record_before_window_start_is_excluded() {
+        let c = corr(1, 30_000);
+        let steps = vec![step("a", 5_000_000_000, "s1")];
+        // Dispatch at ts BEFORE the first step → must be excluded.
+        let d = vec![dispatch(1_000_000_000, "STALE-PANE", "s1")];
+        let clusters = c.correlate(&steps, &d);
+        assert_eq!(clusters.len(), 1);
+        // No in-window dispatch → fallback to the single session → 1 pane.
+        assert_eq!(clusters[0].pane_count, 1);
+    }
+
+    // rationale: Boundary — a dispatch record within the 60s trailing
+    // slack AFTER the last step still counts (m4 spec § 3 windowing).
+    #[test]
+    fn dispatch_record_within_trailing_slack_is_included() {
+        let c = corr(2, 30_000);
+        let steps = vec![step("a", 1_000_000_000, "s1"), step("b", 1_500_000_000, "s1")];
+        // Second dispatch is 30s after the last step — inside the 60s slack.
+        let d = vec![
+            dispatch(1_000_000_000, "ALPHA", "s1"),
+            dispatch(1_500_000_000 + 30_000_000_000, "BETA", "s1"),
+        ];
+        let clusters = c.correlate(&steps, &d);
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].pane_count, 2, "trailing-slack dispatch must count");
+    }
+
+    // rationale: Boundary — a dispatch record BEYOND the 60s trailing
+    // slack is excluded.
+    #[test]
+    fn dispatch_record_beyond_trailing_slack_is_excluded() {
+        let c = corr(1, 30_000);
+        let steps = vec![step("a", 1_000_000_000, "s1")];
+        // Dispatch 61s after the step — beyond the 60s slack.
+        let d = vec![dispatch(1_000_000_000 + 61_000_000_000, "LATE", "s1")];
+        let clusters = c.correlate(&steps, &d);
+        assert_eq!(clusters.len(), 1);
+        // Out-of-slack dispatch ignored → session fallback → 1 pane.
+        assert_eq!(clusters[0].pane_count, 1);
+    }
+
+    // rationale: Core correctness — dag_depth equals the run length for a
+    // tightly-spaced contiguous group (all gaps within max_gap_ns).
+    #[test]
+    fn dag_depth_equals_step_count_for_contiguous_group() {
+        let c = corr(1, 60_000);
+        let steps: Vec<AtuinStep> = (0..5_i64)
+            .map(|i| step(&format!("s{i}"), 1_000_000_000 + i * 1_000_000, "s1"))
+            .collect();
+        let clusters = c.correlate(&steps, &[]);
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].step_count, 5);
+        assert_eq!(clusters[0].dag_depth, 5, "tight contiguous run → depth==count");
+    }
+
+    // rationale: Core correctness — when one inter-step gap inside a
+    // cluster exceeds max_gap_ns, the DAG depth resets at that gap (the
+    // longest contiguous run is shorter than the step count).
+    #[test]
+    fn dag_depth_resets_on_internal_gap_exceeding_max() {
+        // max_gap_ms 60_000 keeps all steps in ONE cluster (the cluster
+        // split threshold), but a gap > max_gap_ns inside breaks the run.
+        let c = corr(1, 60_000);
+        let gap = 70_000_000_000_i64; // 70s > 60s max_gap_ns
+        let steps = vec![
+            step("a", 1_000_000_000, "s1"),
+            step("b", 1_001_000_000, "s1"),
+            // Big gap here — run resets.
+            step("c", 1_001_000_000 + gap + 1_000_000, "s1"),
+        ];
+        let clusters = c.correlate(&steps, &[]);
+        // The 70s gap exceeds max_gap_ns so the cluster itself splits.
+        assert_eq!(clusters.len(), 2, "internal gap > max splits the cluster");
+    }
+
+    // rationale: Core correctness — window_start/window_end reflect the
+    // min/max timestamps of the cluster's steps after sorting.
+    #[test]
+    fn window_bounds_track_min_and_max_step_timestamps() {
+        let c = corr(2, 60_000);
+        let steps = vec![
+            step("mid", 2_000_000_000, "s1"),
+            step("first", 1_000_000_000, "s2"),
+            step("last", 3_000_000_000, "s3"),
+        ];
+        let clusters = c.correlate(&steps, &[]);
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].window_start_ns, 1_000_000_000);
+        assert_eq!(clusters[0].window_end_ns, 3_000_000_000);
+    }
+
+    // rationale: Resource accounting — min_pane_count higher than the
+    // achievable pane count drops every cluster.
+    #[test]
+    fn min_pane_count_above_achievable_drops_all_clusters() {
+        let c = corr(99, 30_000);
+        let steps = vec![
+            step("a", 1_000_000_000, "s1"),
+            step("b", 1_001_000_000, "s2"),
+        ];
+        assert!(
+            c.correlate(&steps, &[]).is_empty(),
+            "min_pane_count=99 unreachable → no clusters"
+        );
+    }
+
+    // rationale: Anti-property F11 — observed_at_ms is a wall-clock field;
+    // it MUST be populated (non-zero on a real clock) and identical across
+    // every cluster emitted in one correlate() call (single now_ms read).
+    #[test]
+    fn observed_at_ms_is_uniform_across_clusters_in_one_call() {
+        let c = corr(1, 1_000);
+        let split_gap = 5_000_000_000_i64; // 5s > 1s max_gap → splits
+        let steps = vec![
+            step("a", 1_000_000_000, "s1"),
+            step("b", 1_000_000_000 + split_gap, "s1"),
+            step("c", 1_000_000_000 + 2 * split_gap, "s1"),
+        ];
+        let clusters = c.correlate(&steps, &[]);
+        assert_eq!(clusters.len(), 3, "three split clusters expected");
+        let first_ts = clusters[0].observed_at_ms;
+        assert!(clusters.iter().all(|cl| cl.observed_at_ms == first_ts));
+    }
 }

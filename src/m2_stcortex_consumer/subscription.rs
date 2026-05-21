@@ -495,4 +495,143 @@ mod tests {
         probe.simulate_on_disconnect();
         assert_eq!(probe.status(), RegistrationStatus::Disconnected);
     }
+
+    // ====================================================================
+    // Hardening pass — adversarial SQL-injection discipline on the
+    // tool_call query builder + freshness state-machine boundary cases.
+    // ====================================================================
+
+    // rationale: Adversarial input — `tool_call_query` strips single
+    // quotes so a hypothetical drifted call-site supplying a quote-injection
+    // payload cannot break out of the SQL string literal. After stripping,
+    // the emitted SQL must contain exactly the two structural quote
+    // delimiters the builder itself adds — the injected quote is gone.
+    #[test]
+    fn tool_call_query_strips_single_quotes_from_namespace() {
+        let q = tool_call_query("workflow_trace_x' OR 1=1; --");
+        assert_eq!(
+            q.matches('\'').count(),
+            2,
+            "exactly two structural quotes expected, injected quote not stripped: {q}"
+        );
+        assert!(q.contains("workflow_trace_x OR 1=1; --_%"));
+    }
+
+    // rationale: Adversarial input — multiple embedded quotes are ALL
+    // stripped, not just the first. Defence-in-depth against a payload
+    // crafted to survive a single-pass naive sanitiser.
+    #[test]
+    fn tool_call_query_strips_every_single_quote_not_just_first() {
+        let q = tool_call_query("workflow_trace_'''a'''");
+        assert_eq!(
+            q.matches('\'').count(),
+            2,
+            "all embedded quotes must be stripped: {q}"
+        );
+    }
+
+    // rationale: Boundary — an empty namespace still produces structurally
+    // valid SQL (the LIKE clause degenerates to `'_%'`). The builder never
+    // panics on empty input; m9 does the structural rejection upstream.
+    #[test]
+    fn tool_call_query_empty_namespace_yields_well_formed_sql() {
+        let q = tool_call_query("");
+        assert_eq!(q, "SELECT * FROM tool_call WHERE namespace LIKE '_%'");
+    }
+
+    // rationale: Determinism — the query builder is a pure function;
+    // identical input yields byte-identical output across repeated calls.
+    #[test]
+    fn tool_call_query_is_deterministic() {
+        let first = tool_call_query("workflow_trace_alpha");
+        for _ in 0..50_u32 {
+            assert_eq!(tool_call_query("workflow_trace_alpha"), first);
+        }
+    }
+
+    // rationale: Contract regression — the consumption_event query is a
+    // constant; it carries no namespace and references exactly the
+    // `consumption_event` table (W1 narrowing invariant).
+    #[test]
+    fn consumption_event_query_references_only_consumption_event_table() {
+        let q = consumption_event_query();
+        assert!(q.contains("consumption_event"));
+        assert!(!q.contains("tool_call"));
+        assert!(!q.contains("pathway"));
+        assert!(!q.contains("memory"));
+    }
+
+    // rationale: State-machine boundary — calling `simulate_on_applied`
+    // twice with no disconnect in between is idempotent: still Fresh.
+    #[test]
+    fn double_apply_without_disconnect_stays_fresh() {
+        let probe = FreshnessProbe::new();
+        probe.simulate_on_applied();
+        probe.simulate_on_applied();
+        assert!(probe.is_fresh());
+        assert_eq!(probe.status(), RegistrationStatus::Fresh);
+    }
+
+    // rationale: State-machine boundary — a disconnect fired BEFORE any
+    // apply still drives the handle to Disconnected (not Stale): the
+    // disconnected_flag is the dominant gate.
+    #[test]
+    fn disconnect_before_any_apply_is_disconnected_not_stale() {
+        let probe = FreshnessProbe::new();
+        probe.simulate_on_disconnect();
+        assert!(!probe.is_fresh());
+        assert_eq!(probe.status(), RegistrationStatus::Disconnected);
+    }
+
+    // rationale: State-machine invariant — `is_fresh()` and `status()` are
+    // NEVER mutually inconsistent. `is_fresh() == true` MUST imply
+    // `status() == Fresh`, across every reachable state of the probe.
+    #[test]
+    fn is_fresh_and_status_are_always_consistent() {
+        // Reachable states: initial, applied, disconnected, applied-then-
+        // disconnected, disconnected-then-phantom-applied.
+        let states: Vec<Box<dyn Fn() -> FreshnessProbe>> = vec![
+            Box::new(FreshnessProbe::new),
+            Box::new(|| {
+                let p = FreshnessProbe::new();
+                p.simulate_on_applied();
+                p
+            }),
+            Box::new(|| {
+                let p = FreshnessProbe::new();
+                p.simulate_on_disconnect();
+                p
+            }),
+            Box::new(|| {
+                let p = FreshnessProbe::new();
+                p.simulate_on_applied();
+                p.simulate_on_disconnect();
+                p
+            }),
+            Box::new(|| {
+                let p = FreshnessProbe::new();
+                p.simulate_on_disconnect();
+                p.simulate_on_applied();
+                p
+            }),
+        ];
+        for build in states {
+            let probe = build();
+            let fresh = probe.is_fresh();
+            let liveness = probe.status();
+            assert_eq!(
+                fresh,
+                liveness == RegistrationStatus::Fresh,
+                "is_fresh()={fresh} but status()={liveness:?} — inconsistent"
+            );
+        }
+    }
+
+    // rationale: Boundary — a quote-only namespace strips to empty and
+    // yields the degenerate-but-valid `'_%'` LIKE clause; no panic.
+    #[test]
+    fn tool_call_query_quote_only_namespace_degenerates_safely() {
+        let q = tool_call_query("''''");
+        assert_eq!(q, "SELECT * FROM tool_call WHERE namespace LIKE '_%'");
+    }
 }

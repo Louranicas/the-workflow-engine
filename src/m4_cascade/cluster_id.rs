@@ -192,4 +192,68 @@ mod tests {
         s.insert(id2);
         assert_eq!(s.len(), 1);
     }
+
+    // rationale: Core correctness — FNV-1a is a known reference algorithm.
+    // The 64-bit hash of "a" has a fixed, independently-verifiable value
+    // (FNV-1a 64 of a single byte 0x61). Pins the implementation against
+    // a transposed XOR/multiply order or wrong constants.
+    #[test]
+    fn fnv1a_known_reference_value_for_single_byte() {
+        // FNV-1a 64: h = (offset_basis ^ 0x61) * prime
+        let expected = (FNV_OFFSET_BASIS ^ 0x61).wrapping_mul(FNV_PRIME);
+        assert_eq!(fnv1a_64(b"a"), expected);
+    }
+
+    // rationale: Core correctness — FNV-1a is order-sensitive; "ab" and
+    // "ba" hash differently. A commutative bug (e.g. summing bytes) would
+    // break this.
+    #[test]
+    fn fnv1a_is_order_sensitive() {
+        assert_ne!(fnv1a_64(b"ab"), fnv1a_64(b"ba"));
+    }
+
+    // rationale: Boundary — a single zero byte still mixes the state away
+    // from the offset basis (XOR with 0 is a no-op but the multiply runs).
+    #[test]
+    fn fnv1a_single_zero_byte_still_mixes() {
+        let h = fnv1a_64(&[0_u8]);
+        // h = (offset_basis ^ 0) * prime = offset_basis * prime
+        assert_eq!(h, FNV_OFFSET_BASIS.wrapping_mul(FNV_PRIME));
+        assert_ne!(h, FNV_OFFSET_BASIS);
+    }
+
+    // rationale: Boundary — empty pane-label slice still derives a
+    // well-formed id (join of empty = empty string; hash is defined).
+    #[test]
+    fn assign_cluster_id_empty_pane_labels_yields_well_formed_id() {
+        let id = assign_cluster_id(0, 100, &[], 3);
+        let s = id.as_str();
+        assert!(s.starts_with("cascade_cluster_"));
+        assert_eq!(s["cascade_cluster_".len()..].len(), 16);
+    }
+
+    // rationale: Core correctness — step_count is folded via XOR; the
+    // count u64::MAX (saturated usize) is a legal input and produces a
+    // distinct, well-formed id (no panic from the try_from fallback).
+    #[test]
+    fn assign_cluster_id_handles_max_step_count_without_panic() {
+        let id = assign_cluster_id(0, 100, &["X"], usize::MAX);
+        assert!(id.as_str().starts_with("cascade_cluster_"));
+        // Differs from a small count at the same window/labels.
+        assert_ne!(id, assign_cluster_id(0, 100, &["X"], 1));
+    }
+
+    // rationale: Anti-property — duplicate pane labels in the input slice
+    // do not change the id versus the de-duplicated form ONLY IF sorted
+    // join differs. Here we pin that label MULTIPLICITY is significant:
+    // ["X","X"] joins to "X,X" which differs from ["X"] → "X".
+    #[test]
+    fn assign_cluster_id_label_multiplicity_is_significant() {
+        let single = assign_cluster_id(0, 100, &["X"], 3);
+        let doubled = assign_cluster_id(0, 100, &["X", "X"], 3);
+        assert_ne!(
+            single, doubled,
+            "label join is multiplicity-sensitive; 'X' != 'X,X'"
+        );
+    }
 }

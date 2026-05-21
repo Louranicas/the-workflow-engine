@@ -166,10 +166,6 @@ pub fn select_top_k(
         .max()
         .unwrap_or(0)
         .max(1);
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "run_count is bounded; precision irrelevant"
-    )]
     let max_run_count_f = f64::from(max_run_count);
     let mut scored: Vec<ScoredCandidate> = Vec::with_capacity(workflows.len());
     for w in workflows {
@@ -587,5 +583,332 @@ mod tests {
         let r = select_top_k(&[workflow(1, 0.5, 1, Some(0))], &cfg, |_| 0.5, 0, 1).expect("ok");
         let c: ScoredCandidate = r[0].clone();
         assert_eq!(c.workflow_id, 1);
+    }
+
+    // ---- Wave: god-tier hardening pass — m31 to ≥50 tests ----
+
+    #[test]
+    // rationale: Scoring correctness — hand-computed composite score.
+    // Default weights α=0.4 β=0.25 γ=0.2 δ=0.15. One workflow:
+    // fitness=1.0, last_run=now → recency=1.0, run_count=max → frequency=1.0,
+    // diversity=1.0 → score = 0.4+0.25+0.2+0.15 = 1.0.
+    fn scoring_all_components_one_yields_unit_score() {
+        let cfg = SelectorConfig::default();
+        let w = workflow(1, 1.0, 5, Some(1_700_000_000_000));
+        let r = select_top_k(&[w], &cfg, |_| 1.0, 1_700_000_000_000, 1).expect("ok");
+        assert!((r[0].score - 1.0).abs() < 1e-9, "score was {}", r[0].score);
+    }
+
+    #[test]
+    // rationale: Scoring correctness — hand-computed with zero diversity.
+    // fitness=1.0 recency=1.0 frequency=1.0 diversity=0.0 →
+    // score = 0.4·1 + 0.25·1 + 0.2·1 + 0.15·0 = 0.85.
+    fn scoring_zero_diversity_drops_score_by_delta() {
+        let cfg = SelectorConfig::default();
+        let now = 1_700_000_000_000_i64;
+        let w = workflow(1, 1.0, 5, Some(now));
+        let r = select_top_k(&[w], &cfg, |_| 0.0, now, 1).expect("ok");
+        assert!((r[0].score - 0.85).abs() < 1e-9, "score was {}", r[0].score);
+    }
+
+    #[test]
+    // rationale: Scoring correctness — pure-fitness config (α=1) makes the
+    // composite score equal the sanitised fitness exactly.
+    fn scoring_pure_fitness_config_score_equals_weight() {
+        let cfg = SelectorConfig { alpha: 1.0, beta: 0.0, gamma: 0.0, delta: 0.0 };
+        let now = 1_700_000_000_000_i64;
+        let w = workflow(1, 0.37, 5, Some(now));
+        let r = select_top_k(&[w], &cfg, |_| 0.99, now, 1).expect("ok");
+        assert!((r[0].score - 0.37).abs() < 1e-9, "score was {}", r[0].score);
+    }
+
+    #[test]
+    // rationale: Scoring correctness — pure-diversity config (δ=1) makes the
+    // score equal the sanitised diversity input exactly.
+    fn scoring_pure_diversity_config_score_equals_diversity() {
+        let cfg = SelectorConfig { alpha: 0.0, beta: 0.0, gamma: 0.0, delta: 1.0 };
+        let w = workflow(1, 0.9, 5, Some(0));
+        let r = select_top_k(&[w], &cfg, |_| 0.42, 0, 1).expect("ok");
+        assert!((r[0].score - 0.42).abs() < 1e-9, "score was {}", r[0].score);
+    }
+
+    #[test]
+    // rationale: Frequency correctness — frequency is run_count / max_run_count.
+    // Two workflows with run_count 2 and 8 → frequency 0.25 and 1.0.
+    fn frequency_is_run_count_over_cohort_max() {
+        let cfg = SelectorConfig::default();
+        let low = workflow(1, 0.5, 2, Some(0));
+        let high = workflow(2, 0.5, 8, Some(0));
+        let r = select_top_k(&[low, high], &cfg, |_| 0.5, 0, 2).expect("ok");
+        let f_low = r.iter().find(|c| c.workflow_id == 1).expect("low").components.frequency;
+        let f_high = r.iter().find(|c| c.workflow_id == 2).expect("high").components.frequency;
+        assert!((f_low - 0.25).abs() < 1e-9, "f_low {f_low}");
+        assert!((f_high - 1.0).abs() < 1e-9, "f_high {f_high}");
+    }
+
+    #[test]
+    // rationale: Frequency boundary — max_run_count is floored at 1 so a
+    // cohort of all-zero run_counts does not divide by zero; frequency=0.
+    fn frequency_max_run_count_floored_at_one() {
+        let cfg = SelectorConfig::default();
+        let a = workflow(1, 0.5, 0, None);
+        let b = workflow(2, 0.5, 0, None);
+        let r = select_top_k(&[a, b], &cfg, |_| 0.5, 0, 2).expect("ok");
+        for c in &r {
+            assert!((c.components.frequency - 0.0).abs() < 1e-12);
+            assert!(c.score.is_finite());
+        }
+    }
+
+    #[test]
+    // rationale: Recency correctness — recency factor at one half-life is
+    // 0.5, surfaced through select_top_k's component breakdown.
+    fn recency_component_half_at_one_half_life() {
+        let cfg = SelectorConfig::default();
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "half-life constant fits i64 for this range"
+        )]
+        let half_life_ms = (RECENCY_HALF_LIFE_DAYS * 1000.0 * 86_400.0) as i64;
+        let w = workflow(1, 0.5, 5, Some(0));
+        let r = select_top_k(&[w], &cfg, |_| 0.5, half_life_ms, 1).expect("ok");
+        assert!((r[0].components.recency - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    // rationale: Recency correctness — never-run workflow (last_run None)
+    // carries the neutral 0.5 recency through the component breakdown.
+    fn recency_component_neutral_for_never_run_workflow() {
+        let cfg = SelectorConfig::default();
+        let w = workflow(1, 0.5, 5, None);
+        let r = select_top_k(&[w], &cfg, |_| 0.5, 1_700_000_000_000, 1).expect("ok");
+        assert!((r[0].components.recency - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    // rationale: Recency decay — two half-lives gives 0.25 (exponential).
+    fn recency_factor_two_half_lives_quarter() {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "half-life constant fits i64 for this range"
+        )]
+        let two_half_lives = (2.0 * RECENCY_HALF_LIFE_DAYS * 1000.0 * 86_400.0) as i64;
+        let r = recency_factor(Some(0), two_half_lives);
+        assert!((r - 0.25).abs() < 1e-6, "recency at 2 half-lives was {r}");
+    }
+
+    #[test]
+    // rationale: Recency monotonicity — older last_run yields a strictly
+    // smaller recency factor than a more recent one.
+    fn recency_factor_monotonic_decreasing_with_age() {
+        let now = 1_000_000_000_000_i64;
+        let day_ms = 1000 * 86_400;
+        let recent = recency_factor(Some(now - day_ms), now);
+        let old = recency_factor(Some(now - 100 * day_ms), now);
+        assert!(recent > old, "recent {recent} should exceed old {old}");
+    }
+
+    #[test]
+    // rationale: Error path — only ONE weight non-finite still rejects;
+    // the gamma slot is the one tested here (covers all 4 source branches).
+    fn nonfinite_gamma_weight_rejected() {
+        let cfg = SelectorConfig { alpha: 0.4, beta: 0.25, gamma: f64::INFINITY, delta: 0.15 };
+        let r = select_top_k(&[], &cfg, |_| 0.0, 0, 1);
+        assert!(matches!(r, Err(SelectorError::NonFiniteWeight(_))));
+    }
+
+    #[test]
+    // rationale: Error path — non-finite delta weight rejected (4th branch).
+    fn nonfinite_delta_weight_rejected() {
+        let cfg = SelectorConfig { alpha: 0.4, beta: 0.25, gamma: 0.2, delta: f64::NAN };
+        let r = select_top_k(&[], &cfg, |_| 0.0, 0, 1);
+        assert!(matches!(r, Err(SelectorError::NonFiniteWeight(_))));
+    }
+
+    #[test]
+    // rationale: Error precedence — a non-finite weight is detected BEFORE
+    // the sum-to-1.0 check; the typed error must be NonFiniteWeight, not
+    // InvalidWeights (NaN would make the sum NaN otherwise).
+    fn nonfinite_weight_detected_before_sum_check() {
+        let cfg = SelectorConfig { alpha: f64::NAN, beta: 0.0, gamma: 0.0, delta: 0.0 };
+        match select_top_k(&[], &cfg, |_| 0.0, 0, 1) {
+            Err(SelectorError::NonFiniteWeight(_)) => {}
+            other => panic!("expected NonFiniteWeight, got {other:?}"),
+        }
+    }
+
+    #[test]
+    // rationale: Error boundary — weights summing to just outside the 1e-9
+    // tolerance are rejected; the InvalidWeights error carries the sum.
+    fn weights_just_outside_tolerance_rejected() {
+        let cfg = SelectorConfig { alpha: 0.4, beta: 0.25, gamma: 0.2, delta: 0.15 + 1e-6 };
+        match select_top_k(&[], &cfg, |_| 0.0, 0, 1) {
+            Err(SelectorError::InvalidWeights(sum)) => {
+                assert!((sum - 1.000_001).abs() < 1e-7, "sum payload was {sum}");
+            }
+            other => panic!("expected InvalidWeights, got {other:?}"),
+        }
+    }
+
+    #[test]
+    // rationale: Error boundary — weights summing within the 1e-9 tolerance
+    // are accepted (slight float drift must not trip the gate).
+    fn weights_just_inside_tolerance_accepted() {
+        let cfg = SelectorConfig { alpha: 0.4, beta: 0.25, gamma: 0.2, delta: 0.15 + 1e-12 };
+        let r = select_top_k(&[], &cfg, |_| 0.0, 0, 1);
+        assert!(r.is_ok(), "weights within tolerance should be accepted");
+    }
+
+    #[test]
+    // rationale: Weight validation precedes the empty-workflows shortcut —
+    // an invalid config errors even when there is nothing to score.
+    fn invalid_weights_error_even_on_empty_bank() {
+        let cfg = SelectorConfig { alpha: 0.9, beta: 0.9, gamma: 0.9, delta: 0.9 };
+        let r = select_top_k(&[], &cfg, |_| 0.0, 0, 5);
+        assert!(matches!(r, Err(SelectorError::InvalidWeights(_))));
+    }
+
+    #[test]
+    // rationale: Determinism — reversing the input slice must not change the
+    // ranked output when scores genuinely differ (no input-order leak).
+    fn ranking_independent_of_input_slice_order() {
+        let cfg = SelectorConfig::default();
+        let mut ws: Vec<_> = (0u32..8)
+            .map(|i| workflow(u64::from(i + 1), f64::from(i) / 8.0, 1, Some(0)))
+            .collect();
+        let forward = select_top_k(&ws, &cfg, |_| 0.5, 0, 8).expect("fwd");
+        ws.reverse();
+        let reversed = select_top_k(&ws, &cfg, |_| 0.5, 0, 8).expect("rev");
+        let f_ids: Vec<u64> = forward.iter().map(|c| c.workflow_id).collect();
+        let r_ids: Vec<u64> = reversed.iter().map(|c| c.workflow_id).collect();
+        assert_eq!(f_ids, r_ids, "ranking leaked input-slice order");
+    }
+
+    #[test]
+    // rationale: Tie-break — when two workflows tie on score, the LOWER
+    // workflow_id ranks first regardless of insertion order.
+    fn tie_break_lower_id_wins_pair() {
+        let cfg = SelectorConfig::default();
+        // Insert higher id first to exercise the secondary sort.
+        let hi = workflow(999, 0.5, 5, Some(0));
+        let lo = workflow(7, 0.5, 5, Some(0));
+        let r = select_top_k(&[hi, lo], &cfg, |_| 0.5, 0, 2).expect("ok");
+        assert_eq!(r[0].workflow_id, 7);
+        assert_eq!(r[1].workflow_id, 999);
+    }
+
+    #[test]
+    // rationale: Diversity — δ-weight makes a higher-diversity candidate
+    // outrank an identical-fitness lower-diversity one (anti-monoculture).
+    fn higher_diversity_outranks_at_equal_fitness() {
+        let cfg = SelectorConfig::default();
+        let a = workflow(1, 0.5, 5, Some(0));
+        let b = workflow(2, 0.5, 5, Some(0));
+        let r = select_top_k(
+            &[a, b],
+            &cfg,
+            |w| if w.workflow_id == 2 { 1.0 } else { 0.2 },
+            0,
+            2,
+        )
+        .expect("ok");
+        assert_eq!(r[0].workflow_id, 2, "higher diversity must win");
+    }
+
+    #[test]
+    // rationale: Sanitise — a diversity input above 1.0 is clamped to 1.0
+    // before entering the composite (the breakdown surfaces the clamp).
+    fn diversity_above_one_clamped_in_component_breakdown() {
+        let cfg = SelectorConfig::default();
+        let w = workflow(1, 0.5, 5, Some(0));
+        let r = select_top_k(&[w], &cfg, |_| 5.0, 0, 1).expect("ok");
+        assert!((r[0].components.diversity - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    // rationale: Sanitise — a negative diversity input is clamped to 0.0.
+    fn diversity_below_zero_clamped_in_component_breakdown() {
+        let cfg = SelectorConfig::default();
+        let w = workflow(1, 0.5, 5, Some(0));
+        let r = select_top_k(&[w], &cfg, |_| -3.0, 0, 1).expect("ok");
+        assert!((r[0].components.diversity - 0.0).abs() < 1e-12);
+    }
+
+    #[test]
+    // rationale: Sanitise — a weight (fitness) outside [0,1] is clamped in
+    // the component breakdown; e.g. AcceptedWorkflow.weight=1.5 → 1.0.
+    fn fitness_weight_above_one_clamped() {
+        let cfg = SelectorConfig::default();
+        let w = workflow(1, 1.5, 5, Some(0));
+        let r = select_top_k(&[w], &cfg, |_| 0.5, 0, 1).expect("ok");
+        assert!((r[0].components.fitness - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    // rationale: Infinity diversity input — inf is not NaN; sanitise clamps
+    // it via clamp(0,1) to 1.0 (only NaN takes the early-return-0 branch).
+    fn infinite_diversity_input_clamped_to_one() {
+        let cfg = SelectorConfig::default();
+        let w = workflow(1, 0.5, 5, Some(0));
+        let r = select_top_k(&[w], &cfg, |_| f64::INFINITY, 0, 1).expect("ok");
+        assert!((r[0].components.diversity - 1.0).abs() < 1e-12);
+        assert!(r[0].score.is_finite());
+    }
+
+    #[test]
+    // rationale: k=1 on a populated bank returns exactly the top scorer.
+    fn k_one_returns_single_top_scorer() {
+        let cfg = SelectorConfig::default();
+        let ws: Vec<_> = (0u32..6)
+            .map(|i| workflow(u64::from(i + 1), f64::from(i) / 6.0, 1, Some(0)))
+            .collect();
+        let r = select_top_k(&ws, &cfg, |_| 0.5, 0, 1).expect("ok");
+        assert_eq!(r.len(), 1);
+        // id 6 has the highest fitness.
+        assert_eq!(r[0].workflow_id, 6);
+    }
+
+    #[test]
+    // rationale: SelectorError equality — typed errors derive PartialEq, so
+    // two InvalidWeights with the same sum compare equal.
+    fn selector_error_partial_eq_holds() {
+        let a = SelectorError::InvalidWeights(2.0);
+        let b = SelectorError::InvalidWeights(2.0);
+        assert_eq!(a, b);
+        assert_ne!(a, SelectorError::NonFiniteWeight(2.0));
+    }
+
+    #[test]
+    // rationale: Component breakdown — for EVERY ranked candidate the stored
+    // components must reconstruct the score under the active weights.
+    fn every_candidate_components_reconstruct_score() {
+        let cfg = SelectorConfig::default();
+        let ws: Vec<_> = (0u32..15)
+            .map(|i| {
+                workflow(
+                    u64::from(i + 1),
+                    f64::from(i) / 15.0,
+                    i + 1,
+                    Some(i64::from(i) * 1_000_000),
+                )
+            })
+            .collect();
+        let r = select_top_k(&ws, &cfg, |w| f64::from(w.run_count) / 15.0, 50_000_000, 15)
+            .expect("ok");
+        for c in &r {
+            let recomposed = cfg.alpha * c.components.fitness
+                + cfg.beta * c.components.recency
+                + cfg.gamma * c.components.frequency
+                + cfg.delta * c.components.diversity;
+            assert!(
+                (c.score - recomposed).abs() < 1e-9,
+                "id {} score {} != recomposed {}",
+                c.workflow_id,
+                c.score,
+                recomposed
+            );
+        }
     }
 }

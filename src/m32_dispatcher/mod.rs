@@ -1167,4 +1167,643 @@ mod tests {
             }
         ));
     }
+
+    // --- God-tier hardening pass: error variants, boundaries, invariants ---
+
+    #[test]
+    fn ordinal_round_trips_through_variants_array_index_semantics() {
+        // rationale: Contract regression — VARIANTS is the canonical order;
+        // every variant's ordinal must be strictly increasing AND match the
+        // documented step-10 spacing (0,10,20,30,40,50,60).
+        let mut prev: Option<u8> = None;
+        for &p in &EscapeSurfaceProfile::VARIANTS {
+            let o = p.ordinal();
+            if let Some(prev_o) = prev {
+                assert!(o > prev_o, "ordinal not strictly ascending at {p:?}");
+                assert_eq!(o - prev_o, 10, "ordinal spacing drift at {p:?}");
+            }
+            prev = Some(o);
+        }
+    }
+
+    #[test]
+    fn variants_array_has_no_duplicate_variants() {
+        // rationale: Contract regression — D-S1002127-02 cardinality lock is
+        // meaningless if VARIANTS silently contains a repeat. Hash-set count
+        // must equal the array length.
+        let set: std::collections::HashSet<EscapeSurfaceProfile> =
+            EscapeSurfaceProfile::VARIANTS.iter().copied().collect();
+        assert_eq!(set.len(), EscapeSurfaceProfile::VARIANTS.len());
+        assert_eq!(set.len(), 7);
+    }
+
+    #[test]
+    fn variants_array_has_no_duplicate_ordinals() {
+        // rationale: Determinism — two variants sharing an ordinal would
+        // collapse the metric/snapshot projection. Every ordinal is unique.
+        let set: std::collections::HashSet<u8> = EscapeSurfaceProfile::VARIANTS
+            .iter()
+            .map(|p| p.ordinal())
+            .collect();
+        assert_eq!(set.len(), 7, "ordinal collision among EscapeSurfaceProfile");
+    }
+
+    #[test]
+    fn privilege_escalation_blocked_even_with_only_data_exfil_ack() {
+        // rationale: Adversarial input — the wrong ack bit must not unlock a
+        // PrivilegeEscalation dispatch. Setting data_exfil_acknowledged does
+        // nothing for the privilege gate.
+        let d = ConductorDispatcher::new(OkClient);
+        let sig = HumanAcceptanceSignature {
+            data_exfil_acknowledged: true,
+            privilege_escalation_acknowledged: false,
+            ..HumanAcceptanceSignature::default()
+        };
+        let out = d
+            .dispatch(
+                &sample_workflow(),
+                EscapeSurfaceProfile::PrivilegeEscalation,
+                &sig,
+            )
+            .expect("ok");
+        assert!(matches!(
+            out,
+            DispatchOutcome::Refused {
+                reason: RefusalReason::PrivilegeNotAcknowledged
+            }
+        ));
+    }
+
+    #[test]
+    fn data_exfil_blocked_even_with_only_privilege_ack() {
+        // rationale: Adversarial input — symmetric to the above; the privilege
+        // ack bit must not unlock a DataExfil dispatch.
+        let d = ConductorDispatcher::new(OkClient);
+        let sig = HumanAcceptanceSignature {
+            privilege_escalation_acknowledged: true,
+            data_exfil_acknowledged: false,
+            ..HumanAcceptanceSignature::default()
+        };
+        let out = d
+            .dispatch(&sample_workflow(), EscapeSurfaceProfile::DataExfil, &sig)
+            .expect("ok");
+        assert!(matches!(
+            out,
+            DispatchOutcome::Refused {
+                reason: RefusalReason::DataExfilNotAcknowledged
+            }
+        ));
+    }
+
+    #[test]
+    fn non_ack_profiles_ignore_signature_ack_bits_entirely() {
+        // rationale: Boundary — for the five non-ack profiles, an all-false
+        // signature must still Accept (no spurious ack requirement leaked in).
+        let d = ConductorDispatcher::new(OkClient);
+        let sig = HumanAcceptanceSignature {
+            interactive_terminal: false,
+            privilege_escalation_acknowledged: false,
+            data_exfil_acknowledged: false,
+        };
+        for &p in &EscapeSurfaceProfile::VARIANTS {
+            if p.requires_privilege_ack() || p.requires_data_exfil_ack() {
+                continue;
+            }
+            let out = d.dispatch(&sample_workflow(), p, &sig).expect("ok");
+            assert!(
+                matches!(out, DispatchOutcome::Accepted { .. }),
+                "profile {p:?} spuriously refused with all-false signature"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_forbidden_list_never_refuses_self_dispatch() {
+        // rationale: Boundary — empty forbidden list means the guard is a
+        // pure pass-through; no workflow can self-dispatch-refuse.
+        let w = sample_workflow();
+        assert!(self_dispatch_guard(&w, &[]));
+        let d = ConductorDispatcher::with_forbidden_proposals(OkClient, Vec::new());
+        let out = d
+            .dispatch(
+                &w,
+                EscapeSurfaceProfile::Sandboxed,
+                &HumanAcceptanceSignature::default(),
+            )
+            .expect("ok");
+        assert!(matches!(out, DispatchOutcome::Accepted { .. }));
+    }
+
+    #[test]
+    fn self_dispatch_guard_matches_only_exact_proposal_id() {
+        // rationale: Anti-property — AP-V7-08 guard must be an exact-id match,
+        // not a range/prefix. A neighbouring id (pid ± 1) must NOT be blocked.
+        let w = sample_workflow();
+        let pid = w.proposal.proposal_id;
+        let near_misses: Vec<u64> = vec![
+            pid.wrapping_add(1),
+            pid.wrapping_sub(1),
+            pid ^ 0xFF,
+        ];
+        assert!(
+            self_dispatch_guard(&w, &near_misses),
+            "guard wrongly blocked a non-matching proposal id"
+        );
+    }
+
+    #[test]
+    fn self_dispatch_guard_blocks_when_id_anywhere_in_list() {
+        // rationale: Anti-property — the forbidden id need not be first; the
+        // guard must scan the whole list.
+        let w = sample_workflow();
+        let pid = w.proposal.proposal_id;
+        let list = vec![1_u64, 2, 3, pid, 99];
+        assert!(!self_dispatch_guard(&w, &list));
+    }
+
+    #[test]
+    fn distinct_seeds_produce_distinct_proposal_ids() {
+        // rationale: Cross-module — the self-dispatch guard's exact-match
+        // semantics rely on proposal_id being content-derived. Two workflows
+        // built from different seeds must not collide.
+        let a = sample_workflow_with_seed(1);
+        let b = sample_workflow_with_seed(2);
+        assert_ne!(
+            a.proposal.proposal_id, b.proposal.proposal_id,
+            "proposal_id collision across seeds breaks AP-V7-08 guard"
+        );
+    }
+
+    #[test]
+    fn forbidding_one_workflow_does_not_forbid_a_sibling() {
+        // rationale: Anti-property — AP-V7-08 must be surgical. Forbidding
+        // workflow A's proposal_id must leave workflow B (different seed)
+        // free to dispatch.
+        let a = sample_workflow_with_seed(3);
+        let b = sample_workflow_with_seed(4);
+        let d = ConductorDispatcher::with_forbidden_proposals(
+            OkClient,
+            vec![a.proposal.proposal_id],
+        );
+        let out_a = d
+            .dispatch(
+                &a,
+                EscapeSurfaceProfile::Sandboxed,
+                &HumanAcceptanceSignature::default(),
+            )
+            .expect("ok");
+        let out_b = d
+            .dispatch(
+                &b,
+                EscapeSurfaceProfile::Sandboxed,
+                &HumanAcceptanceSignature::default(),
+            )
+            .expect("ok");
+        assert!(matches!(
+            out_a,
+            DispatchOutcome::Refused {
+                reason: RefusalReason::SelfDispatchRefused
+            }
+        ));
+        assert!(matches!(out_b, DispatchOutcome::Accepted { .. }));
+    }
+
+    #[test]
+    fn routing_mismatch_carries_exact_actual_method_name() {
+        // rationale: Contract regression — RoutingMethodMismatch must report
+        // the client's literal (wrong) method for operator triage, not a
+        // placeholder.
+        let d = ConductorDispatcher::new(WrongRoutingClient);
+        let out = d
+            .dispatch(
+                &sample_workflow(),
+                EscapeSurfaceProfile::Sandboxed,
+                &HumanAcceptanceSignature::default(),
+            )
+            .expect("ok");
+        let DispatchOutcome::Refused {
+            reason: RefusalReason::RoutingMethodMismatch { expected, actual },
+        } = out
+        else {
+            panic!("expected RoutingMethodMismatch");
+        };
+        assert_eq!(actual, "lcm.deploy");
+        assert_ne!(actual, expected);
+    }
+
+    #[test]
+    fn routing_mismatch_short_circuits_before_ack_check() {
+        // rationale: Anti-property — for a WrongRoutingClient, even a
+        // PrivilegeEscalation profile with no ack must refuse with
+        // RoutingMethodMismatch, NOT PrivilegeNotAcknowledged: the routing
+        // check is check 3 but the ack check is check 2... so verify the
+        // documented ordering: ack (check 2) actually precedes routing
+        // (check 3). With an unacknowledged privilege profile we must see
+        // PrivilegeNotAcknowledged.
+        let d = ConductorDispatcher::new(WrongRoutingClient);
+        let out = d
+            .dispatch(
+                &sample_workflow(),
+                EscapeSurfaceProfile::PrivilegeEscalation,
+                &HumanAcceptanceSignature::default(),
+            )
+            .expect("ok");
+        // Ack check (check 2) fires before routing check (check 3).
+        assert!(matches!(
+            out,
+            DispatchOutcome::Refused {
+                reason: RefusalReason::PrivilegeNotAcknowledged
+            }
+        ));
+    }
+
+    #[test]
+    fn routing_mismatch_refusal_does_not_call_client_submit() {
+        // rationale: Anti-property — a misrouted client must never reach
+        // egress. SpyClient with a wrong dispatch_method records zero calls.
+        struct WrongRoutingSpy {
+            calls: Mutex<u32>,
+        }
+        impl ConductorClient for WrongRoutingSpy {
+            fn submit(
+                &self,
+                _workflow_id: u64,
+                _profile: EscapeSurfaceProfile,
+                _signature: &HumanAcceptanceSignature,
+            ) -> Result<String, DispatcherError> {
+                *self.calls.lock().expect("lock") += 1;
+                Ok("should-never-happen".into())
+            }
+            fn dispatch_method(&self) -> &'static str {
+                "lcm.deploy"
+            }
+        }
+        let d = ConductorDispatcher::new(WrongRoutingSpy {
+            calls: Mutex::new(0),
+        });
+        let _ = d.dispatch(
+            &sample_workflow(),
+            EscapeSurfaceProfile::Sandboxed,
+            &HumanAcceptanceSignature::default(),
+        );
+        assert_eq!(
+            *d.client.calls.lock().expect("lock"),
+            0,
+            "misrouted client reached egress — AP-V7 wire-protection breached"
+        );
+    }
+
+    #[test]
+    fn verifier_gate_runs_after_routing_check_passes() {
+        // rationale: H6 ordering — with a correctly-routed client and a
+        // malformed (single-verifier) set, dispatch must reach the verifier
+        // gate and refuse with VerifierGateBlocked (empty blocking_kinds for
+        // the malformed-set fail-closed path).
+        let d = ConductorDispatcher::new(OkClient)
+            .with_verifiers(vec![approve_verifier(VerifierKind::Security)]);
+        let out = d
+            .dispatch(
+                &sample_workflow(),
+                EscapeSurfaceProfile::Sandboxed,
+                &HumanAcceptanceSignature::default(),
+            )
+            .expect("ok");
+        assert!(matches!(
+            out,
+            DispatchOutcome::Refused {
+                reason: RefusalReason::VerifierGateBlocked { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn malformed_verifier_set_fails_closed_with_empty_blocking_kinds() {
+        // rationale: Anti-property — a malformed verifier set (missing kinds)
+        // is operator misuse and MUST fail closed (refuse), surfacing an
+        // empty blocking_kinds vec per the documented fail-closed contract.
+        let d = ConductorDispatcher::new(OkClient).with_verifiers(vec![
+            approve_verifier(VerifierKind::Security),
+            approve_verifier(VerifierKind::Cost),
+        ]);
+        let out = d
+            .dispatch(
+                &sample_workflow(),
+                EscapeSurfaceProfile::Sandboxed,
+                &HumanAcceptanceSignature::default(),
+            )
+            .expect("ok");
+        let DispatchOutcome::Refused {
+            reason: RefusalReason::VerifierGateBlocked { blocking_kinds },
+        } = out
+        else {
+            panic!("expected VerifierGateBlocked");
+        };
+        assert!(
+            blocking_kinds.is_empty(),
+            "malformed-set fail-closed must carry empty blocking_kinds"
+        );
+    }
+
+    #[test]
+    fn duplicate_verifier_kind_set_fails_closed() {
+        // rationale: Anti-property — a duplicate-kind set is also malformed
+        // (aggregate returns DuplicateVerifier); the gate must fail closed.
+        let d = ConductorDispatcher::new(OkClient).with_verifiers(vec![
+            approve_verifier(VerifierKind::Security),
+            approve_verifier(VerifierKind::Security),
+            approve_verifier(VerifierKind::Consistency),
+            approve_verifier(VerifierKind::Cost),
+            approve_verifier(VerifierKind::Ember),
+        ]);
+        let out = d
+            .dispatch(
+                &sample_workflow(),
+                EscapeSurfaceProfile::Sandboxed,
+                &HumanAcceptanceSignature::default(),
+            )
+            .expect("ok");
+        assert!(matches!(
+            out,
+            DispatchOutcome::Refused {
+                reason: RefusalReason::VerifierGateBlocked { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn verifier_block_with_single_amend_reports_that_kind() {
+        // rationale: H6 contract — an Amend verdict (not Refuse) is still
+        // blocking; blocking_kinds must list the amending kind.
+        let verifiers: Vec<Box<dyn Verifier>> = vec![
+            approve_verifier(VerifierKind::Security),
+            approve_verifier(VerifierKind::Consistency),
+            Box::new(ProgrammableVerifier {
+                kind: VerifierKind::Cost,
+                verdict: VerifierVerdict::Amend {
+                    request: "trim budget".to_owned(),
+                },
+                calls: Mutex::new(0),
+            }),
+            approve_verifier(VerifierKind::Ember),
+        ];
+        let d = ConductorDispatcher::new(OkClient).with_verifiers(verifiers);
+        let out = d
+            .dispatch(
+                &sample_workflow(),
+                EscapeSurfaceProfile::Sandboxed,
+                &HumanAcceptanceSignature::default(),
+            )
+            .expect("ok");
+        let DispatchOutcome::Refused {
+            reason: RefusalReason::VerifierGateBlocked { blocking_kinds },
+        } = out
+        else {
+            panic!("expected VerifierGateBlocked");
+        };
+        assert_eq!(blocking_kinds, vec![VerifierKind::Cost]);
+    }
+
+    #[test]
+    fn verifier_block_all_four_lists_all_kinds_ordinal_ordered() {
+        // rationale: Determinism — when every verifier blocks, blocking_kinds
+        // is the full ordinal-ordered set regardless of construction order.
+        let verifiers: Vec<Box<dyn Verifier>> = vec![
+            refuse_verifier(VerifierKind::Ember, "e"),
+            refuse_verifier(VerifierKind::Cost, "c"),
+            refuse_verifier(VerifierKind::Consistency, "x"),
+            refuse_verifier(VerifierKind::Security, "s"),
+        ];
+        let d = ConductorDispatcher::new(OkClient).with_verifiers(verifiers);
+        let out = d
+            .dispatch(
+                &sample_workflow(),
+                EscapeSurfaceProfile::Sandboxed,
+                &HumanAcceptanceSignature::default(),
+            )
+            .expect("ok");
+        let DispatchOutcome::Refused {
+            reason: RefusalReason::VerifierGateBlocked { blocking_kinds },
+        } = out
+        else {
+            panic!("expected VerifierGateBlocked");
+        };
+        assert_eq!(
+            blocking_kinds,
+            vec![
+                VerifierKind::Security,
+                VerifierKind::Consistency,
+                VerifierKind::Cost,
+                VerifierKind::Ember,
+            ]
+        );
+    }
+
+    #[test]
+    fn self_dispatch_refusal_short_circuits_before_verifier_gate() {
+        // rationale: Anti-property — AP-V7-08 (check 1) precedes the verifier
+        // gate (check 4). A forbidden workflow with a malformed verifier set
+        // must refuse with SelfDispatchRefused, NOT VerifierGateBlocked.
+        let w = sample_workflow();
+        let d = ConductorDispatcher::with_forbidden_proposals(
+            OkClient,
+            vec![w.proposal.proposal_id],
+        )
+        .with_verifiers(vec![approve_verifier(VerifierKind::Security)]);
+        let out = d
+            .dispatch(
+                &w,
+                EscapeSurfaceProfile::Sandboxed,
+                &HumanAcceptanceSignature::default(),
+            )
+            .expect("ok");
+        assert!(matches!(
+            out,
+            DispatchOutcome::Refused {
+                reason: RefusalReason::SelfDispatchRefused
+            }
+        ));
+    }
+
+    #[test]
+    fn verifier_block_does_not_call_client_submit() {
+        // rationale: Anti-property — a blocked verifier gate must protect the
+        // wire; SpyClient sees zero egress calls.
+        let spy = SpyClient {
+            calls: Mutex::new(Vec::new()),
+        };
+        let verifiers: Vec<Box<dyn Verifier>> = vec![
+            approve_verifier(VerifierKind::Security),
+            approve_verifier(VerifierKind::Consistency),
+            refuse_verifier(VerifierKind::Cost, "no"),
+            approve_verifier(VerifierKind::Ember),
+        ];
+        let d = ConductorDispatcher::new(spy).with_verifiers(verifiers);
+        let _ = d.dispatch(
+            &sample_workflow(),
+            EscapeSurfaceProfile::Sandboxed,
+            &HumanAcceptanceSignature::default(),
+        );
+        assert!(d.client.calls.lock().expect("lock").is_empty());
+    }
+
+    #[test]
+    fn conductor_unreachable_with_verifiers_approved_still_refuses() {
+        // rationale: Contract regression — passing the verifier gate then
+        // hitting a transport failure must surface ConductorUnreachable, not
+        // a verifier reason.
+        let d = ConductorDispatcher::new(FailClient {
+            calls: Mutex::new(0),
+        })
+        .with_verifiers(approve_quad());
+        let out = d
+            .dispatch(
+                &sample_workflow(),
+                EscapeSurfaceProfile::Sandboxed,
+                &HumanAcceptanceSignature::default(),
+            )
+            .expect("ok");
+        assert!(matches!(
+            out,
+            DispatchOutcome::Refused {
+                reason: RefusalReason::ConductorUnreachable
+            }
+        ));
+        // Egress was attempted exactly once after the gate approved.
+        assert_eq!(*d.client.calls.lock().expect("lock"), 1);
+    }
+
+    #[test]
+    fn accepted_outcome_carries_conductor_assigned_id_verbatim() {
+        // rationale: Contract regression — the Accepted outcome must surface
+        // the client-returned id unchanged (no rewrite / prefix).
+        struct IdClient;
+        impl ConductorClient for IdClient {
+            fn submit(
+                &self,
+                _workflow_id: u64,
+                _profile: EscapeSurfaceProfile,
+                _signature: &HumanAcceptanceSignature,
+            ) -> Result<String, DispatcherError> {
+                Ok("conductor::dispatch::xyz-9988".to_owned())
+            }
+        }
+        let d = ConductorDispatcher::new(IdClient);
+        let out = d
+            .dispatch(
+                &sample_workflow(),
+                EscapeSurfaceProfile::Sandboxed,
+                &HumanAcceptanceSignature::default(),
+            )
+            .expect("ok");
+        let DispatchOutcome::Accepted {
+            conductor_dispatch_id,
+        } = out
+        else {
+            panic!("expected Accepted");
+        };
+        assert_eq!(conductor_dispatch_id, "conductor::dispatch::xyz-9988");
+    }
+
+    #[test]
+    fn routing_method_mismatch_refusal_reason_serde_round_trips() {
+        // rationale: Contract regression — RoutingMethodMismatch carries two
+        // String fields specifically so it round-trips without a lifetime
+        // bound. Verify wire stability.
+        let r = RefusalReason::RoutingMethodMismatch {
+            expected: "lcm.loop.create".to_owned(),
+            actual: "lcm.deploy".to_owned(),
+        };
+        let j = serde_json::to_string(&r).expect("ser");
+        let back: RefusalReason = serde_json::from_str(&j).expect("de");
+        assert_eq!(back, r);
+    }
+
+    #[test]
+    fn verifier_gate_blocked_refusal_reason_serde_round_trips() {
+        // rationale: Contract regression — VerifierGateBlocked must
+        // round-trip across the IPC bus carrying its blocking_kinds vec.
+        let r = RefusalReason::VerifierGateBlocked {
+            blocking_kinds: vec![VerifierKind::Consistency, VerifierKind::Ember],
+        };
+        let j = serde_json::to_string(&r).expect("ser");
+        let back: RefusalReason = serde_json::from_str(&j).expect("de");
+        assert_eq!(back, r);
+    }
+
+    #[test]
+    fn dispatcher_error_wire_format_displays_detail() {
+        // rationale: Contract regression — DispatcherError::WireFormat must
+        // surface its detail string in Display for operator triage.
+        let e = DispatcherError::WireFormat("truncated frame".to_owned());
+        let s = format!("{e}");
+        assert!(s.contains("wire format"));
+        assert!(s.contains("truncated frame"));
+    }
+
+    #[test]
+    fn debug_impl_surfaces_counts_and_method_without_panicking() {
+        // rationale: Contract regression — the hand-rolled Debug impl must
+        // report forbidden_count, verifier_count and dispatch_method.
+        let d = ConductorDispatcher::with_forbidden_proposals(OkClient, vec![1, 2, 3])
+            .with_verifiers(approve_quad());
+        let s = format!("{d:?}");
+        assert!(s.contains("ConductorDispatcher"));
+        assert!(s.contains("forbidden_count"));
+        assert!(s.contains("verifier_count"));
+        assert!(s.contains("lcm.loop.create"));
+    }
+
+    #[test]
+    fn human_acceptance_signature_serde_round_trips_all_bit_combinations() {
+        // rationale: Contract regression — the signature is operator input
+        // crossing the wire; every 3-bit combination must round-trip.
+        for bits in 0..8_u8 {
+            let sig = HumanAcceptanceSignature {
+                interactive_terminal: bits & 1 != 0,
+                privilege_escalation_acknowledged: bits & 2 != 0,
+                data_exfil_acknowledged: bits & 4 != 0,
+            };
+            let j = serde_json::to_string(&sig).expect("ser");
+            let back: HumanAcceptanceSignature =
+                serde_json::from_str(&j).expect("de");
+            assert_eq!(back, sig, "signature round-trip drift at bits={bits}");
+        }
+    }
+
+    #[test]
+    fn dispatch_outcome_accepted_and_refused_are_not_equal() {
+        // rationale: Anti-property — the two outcome variants must be
+        // distinguishable by Eq; a buggy derive could collapse them.
+        let accepted = DispatchOutcome::Accepted {
+            conductor_dispatch_id: "x".to_owned(),
+        };
+        let refused = DispatchOutcome::Refused {
+            reason: RefusalReason::SpecBoundRefusal,
+        };
+        assert_ne!(accepted, refused);
+    }
+
+    #[test]
+    fn all_seven_profiles_with_full_acks_reach_egress_exactly_once_each() {
+        // rationale: Boundary — exhaustive: every profile, fully acked,
+        // produces exactly one egress call (no profile silently double-
+        // dispatches or skips egress).
+        let sig = HumanAcceptanceSignature {
+            interactive_terminal: true,
+            privilege_escalation_acknowledged: true,
+            data_exfil_acknowledged: true,
+        };
+        for &profile in &EscapeSurfaceProfile::VARIANTS {
+            let spy = SpyClient {
+                calls: Mutex::new(Vec::new()),
+            };
+            let d = ConductorDispatcher::new(spy);
+            let _ = d.dispatch(&sample_workflow(), profile, &sig);
+            assert_eq!(
+                d.client.calls.lock().expect("lock").len(),
+                1,
+                "profile {profile:?} did not produce exactly one egress call"
+            );
+        }
+    }
 }

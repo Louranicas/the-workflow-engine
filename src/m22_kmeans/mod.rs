@@ -668,4 +668,493 @@ mod tests {
             assert!(c.cluster < 3);
         }
     }
+
+    // ====================================================================
+    // KEYSTONE hardening pass — known-input/known-output centroid math,
+    // Lloyd's convergence invariants, k-means++ seeding, degenerate cases,
+    // assignment-stability and error-taxonomy precision.
+    // ====================================================================
+
+    /// Within-cluster sum of squared distances from each point to its
+    /// assigned centroid (k-means objective / inertia).
+    fn inertia(clustered: &[super::ClusteredPoint], centroids: &[Vec<f64>]) -> f64 {
+        clustered
+            .iter()
+            .map(|cp| {
+                centroids[cp.cluster]
+                    .iter()
+                    .zip(cp.coords.iter())
+                    .map(|(c, x)| (c - x).powi(2))
+                    .sum::<f64>()
+            })
+            .sum()
+    }
+
+    #[test]
+    // rationale: KIO — k=1 over four points: the single centroid MUST be
+    // the arithmetic mean of all points. Hand-computed: mean of
+    // {0,2,4,6} on each axis = 3.0.
+    fn kio_k1_centroid_is_arithmetic_mean() {
+        let pts = vec![
+            pt(&[0.0, 0.0]),
+            pt(&[2.0, 2.0]),
+            pt(&[4.0, 4.0]),
+            pt(&[6.0, 6.0]),
+        ];
+        let (_, centroids) =
+            kmeans(&pts, &KMeansConfig { k: 1, ..KMeansConfig::default() }).expect("ok");
+        assert_eq!(centroids.len(), 1);
+        assert!((centroids[0][0] - 3.0).abs() < 1e-9, "x mean: {}", centroids[0][0]);
+        assert!((centroids[0][1] - 3.0).abs() < 1e-9, "y mean: {}", centroids[0][1]);
+    }
+
+    #[test]
+    // rationale: KIO — two tight, far-apart clusters of two points each.
+    // After convergence each centroid must be the mean of its pair:
+    // {(0,0),(2,0)} → (1,0); {(100,0),(102,0)} → (101,0).
+    fn kio_two_clusters_centroids_are_pair_means() {
+        let pts = vec![
+            pt(&[0.0, 0.0]),
+            pt(&[2.0, 0.0]),
+            pt(&[100.0, 0.0]),
+            pt(&[102.0, 0.0]),
+        ];
+        let (clustered, centroids) =
+            kmeans(&pts, &KMeansConfig { k: 2, ..KMeansConfig::default() }).expect("ok");
+        // Find which centroid serves point 0.
+        let lo = &centroids[clustered[0].cluster];
+        let hi = &centroids[clustered[2].cluster];
+        assert!((lo[0] - 1.0).abs() < 1e-6, "low centroid x: {}", lo[0]);
+        assert!((hi[0] - 101.0).abs() < 1e-6, "high centroid x: {}", hi[0]);
+    }
+
+    #[test]
+    // rationale: Lloyd's invariant — the final clustering's inertia must be
+    // no worse than a naive all-in-one-cluster assignment.
+    fn invariant_final_inertia_beats_trivial_single_cluster() {
+        let pts = vec![
+            pt(&[0.0, 0.0]),
+            pt(&[1.0, 0.0]),
+            pt(&[50.0, 0.0]),
+            pt(&[51.0, 0.0]),
+        ];
+        let (clustered, centroids) =
+            kmeans(&pts, &KMeansConfig { k: 2, ..KMeansConfig::default() }).expect("ok");
+        let two_cluster_inertia = inertia(&clustered, &centroids);
+        let mean_x = (0.0 + 1.0 + 50.0 + 51.0) / 4.0;
+        let trivial: f64 = pts.iter().map(|p| (p[0] - mean_x).powi(2)).sum();
+        assert!(
+            two_cluster_inertia < trivial,
+            "k=2 inertia {two_cluster_inertia} not better than trivial {trivial}"
+        );
+    }
+
+    #[test]
+    // rationale: KIO — nearest-centroid assignment is correct: points at
+    // 0,1 cluster together; the outlier at 100 stays alone.
+    fn kio_nearest_centroid_assignment_picks_closer() {
+        let pts = vec![pt(&[0.0]), pt(&[1.0]), pt(&[100.0])];
+        let (clustered, _) =
+            kmeans(&pts, &KMeansConfig { k: 2, ..KMeansConfig::default() }).expect("ok");
+        assert_eq!(clustered[0].cluster, clustered[1].cluster, "0 and 1 should pair");
+        assert_ne!(clustered[0].cluster, clustered[2].cluster, "100 should be alone");
+    }
+
+    #[test]
+    // rationale: Boundary — every input point appears in the output, exactly
+    // once, with its coordinates preserved verbatim (no reordering / loss).
+    fn boundary_all_points_preserved_in_output() {
+        let pts = vec![
+            pt(&[3.0, 7.0]),
+            pt(&[1.0, 9.0]),
+            pt(&[8.0, 2.0]),
+            pt(&[5.0, 5.0]),
+        ];
+        let (clustered, _) =
+            kmeans(&pts, &KMeansConfig { k: 2, ..KMeansConfig::default() }).expect("ok");
+        assert_eq!(clustered.len(), pts.len());
+        for (cp, original) in clustered.iter().zip(pts.iter()) {
+            assert_eq!(&cp.coords, original, "coords mutated or reordered");
+        }
+    }
+
+    #[test]
+    // rationale: Invariant — every cluster index returned is in [0, k).
+    fn invariant_all_cluster_indices_below_k() {
+        let pts: Vec<Vec<f64>> = (0..40).map(|i| pt(&[f64::from(i), f64::from(i % 7)])).collect();
+        let k = 4;
+        let (clustered, _) =
+            kmeans(&pts, &KMeansConfig { k, ..KMeansConfig::default() }).expect("ok");
+        for cp in &clustered {
+            assert!(cp.cluster < k, "cluster {} >= k {k}", cp.cluster);
+        }
+    }
+
+    #[test]
+    // rationale: Invariant — exactly k centroids are returned, each with the
+    // input dimensionality.
+    fn invariant_centroid_count_and_dim_match_config() {
+        let pts: Vec<Vec<f64>> =
+            (0..12).map(|i| pt(&[f64::from(i), f64::from(i), f64::from(i)])).collect();
+        let k = 3;
+        let (_, centroids) =
+            kmeans(&pts, &KMeansConfig { k, ..KMeansConfig::default() }).expect("ok");
+        assert_eq!(centroids.len(), k);
+        for c in &centroids {
+            assert_eq!(c.len(), 3, "centroid dim mismatch");
+        }
+    }
+
+    #[test]
+    // rationale: Convergence — with max_iterations=1 the algorithm still
+    // returns a valid (if non-optimal) clustering — no panic, finite output.
+    fn convergence_single_iteration_terminates_cleanly() {
+        let pts: Vec<Vec<f64>> = (0..20).map(|i| pt(&[f64::from(i)])).collect();
+        let cfg = KMeansConfig { k: 3, max_iterations: 1, ..KMeansConfig::default() };
+        let (clustered, centroids) = kmeans(&pts, &cfg).expect("ok");
+        assert_eq!(clustered.len(), 20);
+        for c in &centroids {
+            for v in c {
+                assert!(v.is_finite());
+            }
+        }
+    }
+
+    #[test]
+    // rationale: Convergence — max_iterations=0 skips the Lloyd loop
+    // entirely; assignments come from the raw k-means++ seeds. Must still
+    // produce a valid, finite clustering with k centroids.
+    fn convergence_zero_iterations_uses_seed_centroids() {
+        let pts = vec![pt(&[0.0]), pt(&[5.0]), pt(&[10.0]), pt(&[15.0])];
+        let cfg = KMeansConfig { k: 2, max_iterations: 0, ..KMeansConfig::default() };
+        let (clustered, centroids) = kmeans(&pts, &cfg).expect("ok");
+        assert_eq!(centroids.len(), 2);
+        assert_eq!(clustered.len(), 4);
+        for cp in &clustered {
+            assert!(cp.cluster < 2);
+        }
+    }
+
+    #[test]
+    // rationale: Convergence — already-converged input (k centroids exactly
+    // on k well-separated point groups) converges immediately; centroids
+    // equal the group means and never drift.
+    fn convergence_pre_separated_input_is_stable() {
+        let pts = vec![
+            pt(&[0.0, 0.0]),
+            pt(&[0.0, 0.0]),
+            pt(&[1000.0, 1000.0]),
+            pt(&[1000.0, 1000.0]),
+        ];
+        let cfg = KMeansConfig { k: 2, max_iterations: 100, ..KMeansConfig::default() };
+        let (clustered, centroids) = kmeans(&pts, &cfg).expect("ok");
+        let mut found_origin = false;
+        let mut found_far = false;
+        for c in &centroids {
+            if c[0].abs() < 1e-9 {
+                found_origin = true;
+            }
+            if (c[0] - 1000.0).abs() < 1e-9 {
+                found_far = true;
+            }
+        }
+        assert!(found_origin && found_far, "centroids drifted: {centroids:?}");
+        assert_eq!(clustered[0].cluster, clustered[1].cluster);
+        assert_eq!(clustered[2].cluster, clustered[3].cluster);
+    }
+
+    #[test]
+    // rationale: Boundary — single point, k=1. Centroid IS the point;
+    // cluster 0.
+    fn boundary_single_point_k1() {
+        let pts = vec![pt(&[42.0, 17.0])];
+        let (clustered, centroids) =
+            kmeans(&pts, &KMeansConfig { k: 1, ..KMeansConfig::default() }).expect("ok");
+        assert_eq!(clustered.len(), 1);
+        assert_eq!(clustered[0].cluster, 0);
+        assert_eq!(centroids[0], vec![42.0, 17.0]);
+    }
+
+    #[test]
+    // rationale: Boundary — single point, k=1, 1-D — minimal non-empty case.
+    fn boundary_single_point_one_dim() {
+        let pts = vec![pt(&[7.0])];
+        let (clustered, centroids) =
+            kmeans(&pts, &KMeansConfig { k: 1, ..KMeansConfig::default() }).expect("ok");
+        assert_eq!(centroids, vec![vec![7.0]]);
+        assert_eq!(clustered[0].cluster, 0);
+    }
+
+    #[test]
+    // rationale: Error taxonomy — KExceedsN carries the EXACT k and n that
+    // were requested (not just the variant tag).
+    fn error_k_exceeds_n_carries_exact_values() {
+        let pts = vec![pt(&[1.0]), pt(&[2.0])];
+        let err = kmeans(&pts, &KMeansConfig { k: 9, ..KMeansConfig::default() })
+            .expect_err("should fail");
+        match err {
+            KMeansError::KExceedsN { k, n } => {
+                assert_eq!(k, 9);
+                assert_eq!(n, 2);
+            }
+            other => panic!("wrong error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    // rationale: Error taxonomy — DimMismatch on inconsistent dims carries
+    // the expected (first-point) dim and the offending observed dim.
+    fn error_dim_mismatch_carries_expected_and_got() {
+        let pts = vec![pt(&[1.0, 2.0, 3.0]), pt(&[1.0, 2.0])];
+        let err = kmeans(&pts, &KMeansConfig { k: 1, ..KMeansConfig::default() })
+            .expect_err("should fail");
+        match err {
+            KMeansError::DimMismatch { expected, got } => {
+                assert_eq!(expected, 3, "expected dim = first point's dim");
+                assert_eq!(got, 2, "got dim = offending point's dim");
+            }
+            other => panic!("wrong error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    // rationale: Error taxonomy — the non-finite refusal path uses the
+    // documented sentinel `got = usize::MAX` (F-m22-02 hardening), NOT a
+    // real dimension. Distinguishes "bad value" from "bad shape".
+    fn error_non_finite_uses_usize_max_sentinel() {
+        let pts = vec![pt(&[1.0, 2.0]), pt(&[f64::NAN, 2.0])];
+        let err = kmeans(&pts, &KMeansConfig { k: 1, ..KMeansConfig::default() })
+            .expect_err("should fail");
+        match err {
+            KMeansError::DimMismatch { expected, got } => {
+                assert_eq!(expected, 2);
+                assert_eq!(got, usize::MAX, "non-finite sentinel must be usize::MAX");
+            }
+            other => panic!("wrong error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    // rationale: Error precedence — shape errors are checked per point in
+    // order; a dim-mismatch point BEFORE a non-finite point yields
+    // DimMismatch with a real `got`, proving order-of-checks.
+    fn error_dim_mismatch_detected_before_later_non_finite() {
+        let pts = vec![
+            pt(&[1.0, 2.0]),
+            pt(&[1.0, 2.0, 3.0]),
+            pt(&[f64::NAN, 2.0]),
+        ];
+        let err = kmeans(&pts, &KMeansConfig { k: 1, ..KMeansConfig::default() })
+            .expect_err("should fail");
+        match err {
+            KMeansError::DimMismatch { got, .. } => {
+                assert_eq!(got, 3, "should report the dim-mismatch point, not the NaN one");
+            }
+            other => panic!("wrong error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    // rationale: Adversarial — NaN deep in the coordinate vector (not the
+    // first coord) is still caught.
+    fn adversarial_nan_in_trailing_coordinate_refused() {
+        let pts = vec![pt(&[1.0, 2.0, 3.0]), pt(&[4.0, 5.0, f64::NAN])];
+        let r = kmeans(&pts, &KMeansConfig { k: 1, ..KMeansConfig::default() });
+        assert!(matches!(r, Err(KMeansError::DimMismatch { got, .. }) if got == usize::MAX));
+    }
+
+    #[test]
+    // rationale: Determinism — cluster ASSIGNMENTS (not just centroids) are
+    // bit-stable across repeated runs with the same seed.
+    fn determinism_assignments_bit_stable_same_seed() {
+        let pts: Vec<Vec<f64>> =
+            (0..25).map(|i| pt(&[f64::from(i % 5), f64::from(i / 5)])).collect();
+        let cfg = KMeansConfig { k: 4, seed: 0xABCD, ..KMeansConfig::default() };
+        let (a, _) = kmeans(&pts, &cfg).expect("a");
+        let (b, _) = kmeans(&pts, &cfg).expect("b");
+        let asg_a: Vec<usize> = a.iter().map(|c| c.cluster).collect();
+        let asg_b: Vec<usize> = b.iter().map(|c| c.cluster).collect();
+        assert_eq!(asg_a, asg_b);
+    }
+
+    #[test]
+    // rationale: k-means++ seeding — a DIFFERENT seed can pick a different
+    // first centroid; verify the seed is genuinely consumed by observing
+    // that at least one seed-pair yields different centroid sets.
+    fn seeding_seed_influences_initial_centroid_choice() {
+        let pts: Vec<Vec<f64>> = (0..6).map(|i| pt(&[f64::from(i) * 10.0])).collect();
+        let mut seen: std::collections::HashSet<Vec<i64>> = std::collections::HashSet::new();
+        for s in 0_u64..16 {
+            let cfg =
+                KMeansConfig { k: 2, seed: s, max_iterations: 0, ..KMeansConfig::default() };
+            let (_, centroids) = kmeans(&pts, &cfg).expect("ok");
+            #[allow(clippy::cast_possible_truncation, reason = "test bucket key only")]
+            let key: Vec<i64> = centroids.iter().map(|c| c[0] as i64).collect();
+            seen.insert(key);
+        }
+        assert!(seen.len() > 1, "seed has no effect on seeding — only one centroid set seen");
+    }
+
+    #[test]
+    // rationale: k-means++ — the second seed is the point farthest (max-min
+    // distance) from the first. With one obvious far point, k=2 seeding
+    // must include it. Tested across many seeds for robustness.
+    fn seeding_kmeans_plus_plus_picks_far_point_as_second_seed() {
+        let mut pts: Vec<Vec<f64>> = (0..5).map(|i| pt(&[f64::from(i) * 0.001])).collect();
+        pts.push(pt(&[10_000.0]));
+        for s in 0_u64..20 {
+            let cfg =
+                KMeansConfig { k: 2, seed: s, max_iterations: 0, ..KMeansConfig::default() };
+            let (_, centroids) = kmeans(&pts, &cfg).expect("ok");
+            let has_outlier = centroids.iter().any(|c| (c[0] - 10_000.0).abs() < 1e-6);
+            assert!(has_outlier, "kmeans++ failed to seed the outlier at seed {s}: {centroids:?}");
+        }
+    }
+
+    #[test]
+    // rationale: Degenerate — k == n with all-identical points. Each point
+    // is its own cluster slot but values collide; no NaN, no panic.
+    fn degenerate_k_equals_n_all_identical_no_nan() {
+        let pts = vec![pt(&[5.0, 5.0]); 4];
+        let (clustered, centroids) =
+            kmeans(&pts, &KMeansConfig { k: 4, ..KMeansConfig::default() }).expect("ok");
+        assert_eq!(centroids.len(), 4);
+        for c in &centroids {
+            for v in c {
+                assert!(v.is_finite(), "identical-point degenerate produced non-finite: {v}");
+            }
+        }
+        for cp in &clustered {
+            assert!(cp.cluster < 4);
+        }
+    }
+
+    #[test]
+    // rationale: Boundary — high-dimensional points (10-D) cluster without
+    // dimensional bugs; centroids retain the full dimensionality.
+    fn boundary_high_dimensional_points_handled() {
+        let pts: Vec<Vec<f64>> = (0..8)
+            .map(|i| (0..10).map(|d| f64::from(i) + f64::from(d) * 0.1).collect())
+            .collect();
+        let (_, centroids) =
+            kmeans(&pts, &KMeansConfig { k: 3, ..KMeansConfig::default() }).expect("ok");
+        for c in &centroids {
+            assert_eq!(c.len(), 10, "high-dim centroid lost dimensions");
+            for v in c {
+                assert!(v.is_finite());
+            }
+        }
+    }
+
+    #[test]
+    // rationale: Boundary — coordinates with extreme but finite magnitude
+    // (1e300) do not overflow to infinity inside squared_l2 when the points
+    // are near each other (difference stays small).
+    fn boundary_large_finite_coords_near_each_other_no_overflow() {
+        let pts = vec![pt(&[1e300]), pt(&[1e300 + 1.0]), pt(&[1e300 + 2.0])];
+        let (clustered, centroids) =
+            kmeans(&pts, &KMeansConfig { k: 1, ..KMeansConfig::default() }).expect("ok");
+        assert_eq!(centroids.len(), 1);
+        assert!(centroids[0][0].is_finite(), "centroid overflowed: {}", centroids[0][0]);
+        for cp in &clustered {
+            assert_eq!(cp.cluster, 0);
+        }
+    }
+
+    #[test]
+    // rationale: Convergence — a large convergence_epsilon makes the loop
+    // exit on the first iteration; the result is still valid and finite.
+    fn convergence_huge_epsilon_exits_immediately() {
+        let pts: Vec<Vec<f64>> = (0..30).map(|i| pt(&[f64::from(i)])).collect();
+        let cfg = KMeansConfig {
+            k: 3,
+            convergence_epsilon: 1e9,
+            max_iterations: 100,
+            seed: 3,
+        };
+        let (clustered, centroids) = kmeans(&pts, &cfg).expect("ok");
+        assert_eq!(centroids.len(), 3);
+        for cp in &clustered {
+            assert!(cp.cluster < 3);
+        }
+    }
+
+    #[test]
+    // rationale: KIO — negative coordinates are handled correctly; a cluster
+    // straddling the origin gets a centroid at the true (negative) mean.
+    fn kio_negative_coordinates_centroid_is_true_mean() {
+        let pts = vec![pt(&[-10.0]), pt(&[-8.0]), pt(&[-6.0])];
+        let (_, centroids) =
+            kmeans(&pts, &KMeansConfig { k: 1, ..KMeansConfig::default() }).expect("ok");
+        assert!((centroids[0][0] - (-8.0)).abs() < 1e-9, "mean: {}", centroids[0][0]);
+    }
+
+    #[test]
+    // rationale: Determinism — running the SAME config on the SAME points
+    // many times yields a fixed inertia value (no hidden randomness in the
+    // tiebreak or seeding path).
+    fn determinism_inertia_constant_across_repeats() {
+        let pts: Vec<Vec<f64>> = (0..30)
+            .map(|i| pt(&[f64::from(i % 6), f64::from(i / 6)]))
+            .collect();
+        let cfg = KMeansConfig { k: 5, seed: 555, ..KMeansConfig::default() };
+        let (c0, cen0) = kmeans(&pts, &cfg).expect("first");
+        let base = inertia(&c0, &cen0);
+        for _ in 0..8 {
+            let (c, cen) = kmeans(&pts, &cfg).expect("repeat");
+            let got = inertia(&c, &cen);
+            assert!((got - base).abs() < 1e-12, "inertia drifted: {base} vs {got}");
+        }
+    }
+
+    #[test]
+    // rationale: KIO — three perfectly-separated tight groups with k=3 each
+    // resolve to a distinct cluster; cross-group points never co-cluster.
+    fn kio_three_separated_groups_resolve_distinctly() {
+        let pts = vec![
+            pt(&[0.0, 0.0]),
+            pt(&[0.1, 0.1]),
+            pt(&[50.0, 50.0]),
+            pt(&[50.1, 50.1]),
+            pt(&[200.0, 200.0]),
+            pt(&[200.1, 200.1]),
+        ];
+        let (clustered, _) =
+            kmeans(&pts, &KMeansConfig { k: 3, ..KMeansConfig::default() }).expect("ok");
+        assert_eq!(clustered[0].cluster, clustered[1].cluster);
+        assert_eq!(clustered[2].cluster, clustered[3].cluster);
+        assert_eq!(clustered[4].cluster, clustered[5].cluster);
+        let mut ids = vec![clustered[0].cluster, clustered[2].cluster, clustered[4].cluster];
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 3, "three groups collapsed into fewer clusters");
+    }
+
+    #[test]
+    // rationale: KMeansConfig::default — the default seed and parameters
+    // are the documented values; downstream consumers depend on them.
+    fn config_default_values_locked() {
+        let cfg = KMeansConfig::default();
+        assert_eq!(cfg.k, 3);
+        assert_eq!(cfg.max_iterations, super::DEFAULT_MAX_ITERATIONS);
+        assert!((cfg.convergence_epsilon - super::DEFAULT_CONVERGENCE_EPSILON).abs() < 1e-18);
+        assert_eq!(cfg.seed, 0xcbf2_9ce4_8422_2325);
+    }
+
+    #[test]
+    // rationale: Boundary — zero-dimensional points (empty coord vectors).
+    // Dim is 0, all consistent; centroids are empty vectors; no panic on
+    // the squared_l2 / mean math over empty iterators.
+    fn boundary_zero_dimensional_points_handled() {
+        let pts = vec![pt(&[]), pt(&[]), pt(&[])];
+        let (clustered, centroids) =
+            kmeans(&pts, &KMeansConfig { k: 2, ..KMeansConfig::default() }).expect("ok");
+        assert_eq!(centroids.len(), 2);
+        for c in &centroids {
+            assert!(c.is_empty(), "0-dim centroid should be empty");
+        }
+        for cp in &clustered {
+            assert!(cp.cluster < 2);
+        }
+    }
 }

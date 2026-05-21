@@ -703,4 +703,218 @@ mod tests {
             }
         }
     }
+
+    // ====================================================================
+    // Hardening pass 2 — classify band boundaries (exact threshold edges),
+    // EMA arithmetic, bootstrap_n edge, baseline_snapshot isolation.
+    // ====================================================================
+
+    // rationale: Boundary — `classify` uses `c < ema*below` for Below and
+    // `c >= ema*above` for Above. A cost EXACTLY at the below-threshold
+    // boundary is NOT below (strict `<`); it lands in NearBaseline.
+    #[test]
+    fn classify_cost_exactly_at_below_threshold_is_near_not_below() {
+        let mut b = ExplorationBaseline::new(20);
+        for _ in 0..10_u32 {
+            b.update(100, WorkflowOutcome::Explored);
+        }
+        // ema == 100; below threshold boundary == 100 * 0.8 == 80.
+        // cost 80 is NOT < 80 → NearBaseline.
+        assert_eq!(b.classify(80, 5, 0.8, 1.2), Some(CostBand::NearBaseline));
+        // cost 79 IS < 80 → BelowBaseline.
+        assert_eq!(b.classify(79, 5, 0.8, 1.2), Some(CostBand::BelowBaseline));
+    }
+
+    // rationale: Boundary — a cost EXACTLY at the above-threshold boundary
+    // IS above (inclusive `>=`).
+    #[test]
+    fn classify_cost_exactly_at_above_threshold_is_above() {
+        let mut b = ExplorationBaseline::new(20);
+        for _ in 0..10_u32 {
+            b.update(100, WorkflowOutcome::Explored);
+        }
+        // ema == 100; above boundary == 100 * 1.2 == 120.
+        // cost 120 IS >= 120 → AboveBaseline.
+        assert_eq!(b.classify(120, 5, 0.8, 1.2), Some(CostBand::AboveBaseline));
+        // cost 119 is NOT >= 120 → NearBaseline.
+        assert_eq!(b.classify(119, 5, 0.8, 1.2), Some(CostBand::NearBaseline));
+    }
+
+    // rationale: Boundary — bootstrap_n of 0 means classification is
+    // available immediately after the first exploration update (n=1 >= 0).
+    #[test]
+    fn classify_with_zero_bootstrap_n_classifies_after_first_update() {
+        let mut b = ExplorationBaseline::new(20);
+        b.update(100, WorkflowOutcome::Explored);
+        // n == 1, bootstrap_n == 0 → 1 >= 0 → classification available.
+        assert!(b.classify(100, 0, 0.8, 1.2).is_some());
+    }
+
+    // rationale: Boundary — classify returns None at n == bootstrap_n - 1
+    // and Some at n == bootstrap_n (the gate is `n < bootstrap_n`).
+    #[test]
+    fn classify_gate_is_n_less_than_bootstrap_n() {
+        let mut b = ExplorationBaseline::new(20);
+        for _ in 0..4_u32 {
+            b.update(100, WorkflowOutcome::Explored);
+        }
+        // n == 4 < bootstrap_n 5 → None.
+        assert!(b.classify(100, 5, 0.8, 1.2).is_none());
+        b.update(100, WorkflowOutcome::Explored);
+        // n == 5, NOT < 5 → Some.
+        assert!(b.classify(100, 5, 0.8, 1.2).is_some());
+    }
+
+    // rationale: Core correctness — the first exploration sample seeds the
+    // EMA verbatim (no smoothing on the first sample); the second sample
+    // applies `alpha*(sample - prev) + prev`.
+    #[test]
+    fn ema_first_sample_seeds_verbatim_second_sample_smooths() {
+        let mut b = ExplorationBaseline::new(9); // alpha = 2/10 = 0.2
+        b.update(100, WorkflowOutcome::Explored);
+        assert_eq!(b.ema, Some(100.0), "first sample seeds EMA verbatim");
+        b.update(200, WorkflowOutcome::Explored);
+        // next = 0.2 * (200 - 100) + 100 = 120
+        let ema = b.ema.expect("ema");
+        assert!((ema - 120.0).abs() < 1e-9, "ema {ema} should be 120");
+    }
+
+    // rationale: Core correctness — EMA with a step-change input
+    // monotonically approaches the new level (a rising series produces a
+    // strictly increasing EMA until it reaches the level).
+    #[test]
+    fn ema_monotonically_tracks_a_rising_input_series() {
+        let mut b = ExplorationBaseline::new(20);
+        b.update(0, WorkflowOutcome::Explored);
+        let mut prev = b.ema.expect("ema");
+        for _ in 0..50_u32 {
+            b.update(1000, WorkflowOutcome::Explored);
+            let cur = b.ema.expect("ema");
+            assert!(cur >= prev, "EMA must not decrease on a rising series");
+            prev = cur;
+        }
+        // After 50 samples of 1000 it should be well above the start.
+        assert!(prev > 500.0, "ema {prev} should have climbed toward 1000");
+    }
+
+    // rationale: Anti-property F10 — interleaving Converged updates between
+    // Explored ones does not perturb the EMA: only the Explored samples
+    // shape it. Compared against a pure-Explored control series.
+    #[test]
+    fn property_interleaved_converged_does_not_perturb_ema() {
+        let mut interleaved = ExplorationBaseline::new(20);
+        let mut control = ExplorationBaseline::new(20);
+        for i in 0..30_i64 {
+            let sample = 100 + i;
+            interleaved.update(sample, WorkflowOutcome::Explored);
+            interleaved.update(999_999, WorkflowOutcome::Converged); // noise
+            control.update(sample, WorkflowOutcome::Explored);
+        }
+        assert_eq!(
+            interleaved.ema, control.ema,
+            "F10: interleaved Converged must not perturb EMA"
+        );
+        assert_eq!(interleaved.n, control.n, "n counts only explorations");
+    }
+
+    // rationale: Boundary — n saturates rather than overflowing; it is a
+    // usize counter updated via saturating_add. (Indirect: we cannot drive
+    // it to usize::MAX in a test, but we pin that many updates increment
+    // n exactly once each.)
+    #[test]
+    fn n_increments_exactly_once_per_exploration_update() {
+        let mut b = ExplorationBaseline::new(20);
+        for expected in 1..=200_usize {
+            b.update(50, WorkflowOutcome::Explored);
+            assert_eq!(b.n, expected);
+        }
+    }
+
+    // rationale: Core correctness — record_and_update_baseline writes the
+    // post-update EMA onto the returned record's exploration_baseline
+    // field; it equals the baseline_snapshot taken right after.
+    #[test]
+    fn record_and_update_returns_post_update_ema_matching_snapshot() {
+        let r = ContextCostRecord::new(ContextCostRecordConfig::default());
+        let out = r.record_and_update_baseline(cost("s1", 150, Some(WorkflowOutcome::Explored)));
+        let snap = r.baseline_snapshot();
+        assert_eq!(out.exploration_baseline, snap.ema);
+    }
+
+    // rationale: Anti-property — record_and_update_baseline with a
+    // Repeated outcome leaves cost_band None even after many calls (no
+    // baseline ever forms, so no classification).
+    #[test]
+    fn record_and_update_repeated_never_produces_a_cost_band() {
+        let r = ContextCostRecord::new(ContextCostRecordConfig::default());
+        for i in 0..20_u32 {
+            let out = r.record_and_update_baseline(cost(
+                &format!("s{i}"),
+                100,
+                Some(WorkflowOutcome::Repeated),
+            ));
+            assert!(out.cost_band.is_none(), "Repeated never forms a baseline");
+        }
+        assert!(r.baseline_snapshot().ema.is_none());
+    }
+
+    // rationale: Core correctness — a Below-band cost is classified
+    // correctly through the full ContextCostRecord path (not just the raw
+    // ExplorationBaseline).
+    #[test]
+    fn record_and_update_classifies_below_band_through_full_path() {
+        let r = ContextCostRecord::new(ContextCostRecordConfig::default());
+        for i in 0..6_u32 {
+            let _ = r.record_and_update_baseline(cost(
+                &format!("s{i}"),
+                1000,
+                Some(WorkflowOutcome::Explored),
+            ));
+        }
+        // ema near 1000; a cost of 100 is well below 1000*0.8.
+        let out = r.record_and_update_baseline(cost("low", 100, Some(WorkflowOutcome::Explored)));
+        assert_eq!(out.cost_band, Some(CostBand::BelowBaseline));
+    }
+
+    // rationale: Boundary — ExplorationBaseline::new clamps a window of 0
+    // to 1; the snapshot of a fresh recorder built with window 0 reflects
+    // the clamped alpha (degenerate but finite).
+    #[test]
+    fn record_built_with_zero_window_clamps_alpha_finitely() {
+        let r = ContextCostRecord::new(ContextCostRecordConfig {
+            baseline_ema_window: 0,
+            ..ContextCostRecordConfig::default()
+        });
+        let snap = r.baseline_snapshot();
+        assert!(snap.alpha.is_finite());
+        assert!((snap.alpha - 1.0).abs() < 1e-12, "window 0 → alpha 1.0");
+    }
+
+    // rationale: Determinism — total_cost_proxy equals the sum of the
+    // input/output proxies in the helper-constructed record; classify
+    // operates on total_cost_proxy, so the split must not lose pennies.
+    #[test]
+    fn session_cost_record_total_equals_input_plus_output_proxy() {
+        for raw in [0_i64, 1, 7, 100, 999, 1_000_000] {
+            let rec = cost("s", raw, None);
+            assert_eq!(
+                rec.total_cost_proxy,
+                rec.token_cost_input_proxy + rec.token_cost_output_proxy,
+                "total must equal input+output split for raw={raw}"
+            );
+            assert_eq!(rec.total_cost_proxy, raw);
+        }
+    }
+
+    // rationale: Concurrency — baseline_snapshot is a consistent point-in-
+    // time clone; two snapshots taken around a single update differ by
+    // exactly one in n (no torn read).
+    #[test]
+    fn baseline_snapshot_is_a_consistent_point_in_time_clone() {
+        let r = ContextCostRecord::new(ContextCostRecordConfig::default());
+        let before = r.baseline_snapshot();
+        let _ = r.record_and_update_baseline(cost("s", 100, Some(WorkflowOutcome::Explored)));
+        let after = r.baseline_snapshot();
+        assert_eq!(after.n, before.n + 1, "exactly one update absorbed");
+    }
 }

@@ -407,4 +407,344 @@ mod tests {
             assert_eq!(pa.variant.variant_id, pb.variant.variant_id);
         }
     }
+
+    // ---- Wave: god-tier hardening pass — m23 to ≥50 tests ----
+
+    #[test]
+    // rationale: Error variant — exact n payload carried by
+    // EvidenceBelowThreshold must equal snapshot.n, not the threshold.
+    fn error_evidence_below_threshold_carries_observed_n() {
+        let s = snap(7, Some(0.5), Some(0.1));
+        match build_proposal(sample_variant(), &s, None) {
+            Err(ProposerError::EvidenceBelowThreshold { n, threshold }) => {
+                assert_eq!(n, 7, "observed n must be the snapshot's n");
+                assert_eq!(threshold, PROPOSAL_F2_THRESHOLD);
+            }
+            other => panic!("expected EvidenceBelowThreshold, got {other:?}"),
+        }
+    }
+
+    #[test]
+    // rationale: Error path — n=0 is the most degenerate sub-threshold case.
+    fn error_zero_n_refused_with_below_threshold() {
+        let s = snap(0, Some(0.9), Some(0.01));
+        assert!(matches!(
+            build_proposal(sample_variant(), &s, None),
+            Err(ProposerError::EvidenceBelowThreshold { n: 0, .. })
+        ));
+    }
+
+    #[test]
+    // rationale: Error precedence — when BOTH n is below threshold AND lift
+    // is None, the n-gate must fire FIRST (it is checked before the lift
+    // ok_or in source order). A LiftUnavailable here would be a bug.
+    fn error_n_gate_precedes_lift_gate() {
+        let s = snap(3, None, None);
+        assert!(
+            matches!(
+                build_proposal(sample_variant(), &s, None),
+                Err(ProposerError::EvidenceBelowThreshold { .. })
+            ),
+            "n-gate must be evaluated before the lift-None gate"
+        );
+    }
+
+    #[test]
+    // rationale: Error path — sufficient n but BOTH lift and ci None: the
+    // first ok_or (lift) fires, so LiftUnavailable is returned.
+    fn error_both_lift_and_ci_none_yields_lift_unavailable() {
+        let s = snap(40, None, None);
+        assert!(matches!(
+            build_proposal(sample_variant(), &s, None),
+            Err(ProposerError::LiftUnavailable)
+        ));
+    }
+
+    #[test]
+    // rationale: Boundary — n one ABOVE threshold accepted (upper side of
+    // the gate boundary, complements the at/below tests).
+    fn boundary_n_one_above_threshold_accepted() {
+        let s = snap(PROPOSAL_F2_THRESHOLD + 1, Some(0.5), Some(0.05));
+        let p = build_proposal(sample_variant(), &s, None).expect("ok");
+        assert_eq!(p.evidence_n, PROPOSAL_F2_THRESHOLD + 1);
+    }
+
+    #[test]
+    // rationale: Boundary — usize::MAX evidence_n threaded through without
+    // overflow in the proposal payload.
+    fn boundary_max_usize_n_threaded_through() {
+        let s = snap(usize::MAX, Some(0.5), Some(0.05));
+        let p = build_proposal(sample_variant(), &s, None).expect("ok");
+        assert_eq!(p.evidence_n, usize::MAX);
+    }
+
+    #[test]
+    // rationale: Field fidelity — evidence_lift and evidence_ci_half must be
+    // copied verbatim from the snapshot (no rescaling / rounding).
+    fn field_fidelity_lift_and_ci_copied_verbatim() {
+        let s = snap(30, Some(0.123_456_789), Some(0.009_876_543));
+        let p = build_proposal(sample_variant(), &s, None).expect("ok");
+        assert!((p.evidence_lift - 0.123_456_789).abs() < 1e-15);
+        assert!((p.evidence_ci_half - 0.009_876_543).abs() < 1e-15);
+    }
+
+    #[test]
+    // rationale: Determinism — proposal_id depends on (variant_id, n);
+    // changing n MUST change the id (n is folded into the FNV input).
+    fn determinism_proposal_id_changes_with_n() {
+        let s_a = snap(30, Some(0.5), Some(0.05));
+        let s_b = snap(31, Some(0.5), Some(0.05));
+        let id_a = build_proposal(sample_variant(), &s_a, None).expect("a").proposal_id;
+        let id_b = build_proposal(sample_variant(), &s_b, None).expect("b").proposal_id;
+        assert_ne!(id_a, id_b, "proposal_id must fold n into its hash");
+    }
+
+    #[test]
+    // rationale: Determinism — distinct variants (distinct variant_id) must
+    // produce distinct proposal_ids at the same evidence n.
+    fn determinism_proposal_id_changes_with_variant() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let pattern = Pattern::new(vec![StepToken(1), StepToken(2), StepToken(3)], 25, (0, 0));
+        let variants = build_variants(&pattern).expect("v");
+        assert!(variants.len() >= 2);
+        let id0 = build_proposal(variants[0].clone(), &s, None).expect("0").proposal_id;
+        let id1 = build_proposal(variants[1].clone(), &s, None).expect("1").proposal_id;
+        assert_ne!(id0, id1, "distinct variants must yield distinct proposal_ids");
+    }
+
+    #[test]
+    // rationale: Cross-module — the variant is moved into the proposal
+    // unchanged; variant_id and steps survive the build_proposal call.
+    fn cross_module_variant_preserved_in_proposal() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let v = sample_variant();
+        let v_id = v.variant_id;
+        let v_steps = v.steps.clone();
+        let p = build_proposal(v, &s, None).expect("ok");
+        assert_eq!(p.variant.variant_id, v_id);
+        assert_eq!(p.variant.steps, v_steps);
+    }
+
+    #[test]
+    // rationale: compose_proposals — every emitted pattern produces the
+    // identity variant first, so the FIRST proposal per single-pattern
+    // input must be Identity.
+    fn compose_first_proposal_per_pattern_is_identity() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let patterns = vec![Pattern::new(vec![StepToken(9), StepToken(8)], 25, (0, 0))];
+        let out = compose_proposals(&patterns, &s);
+        assert!(!out.is_empty());
+        assert!(matches!(out[0].variant.mutation, MutationKind::Identity));
+    }
+
+    #[test]
+    // rationale: compose_proposals — diversity_cluster is always None on the
+    // batched path (compose_proposals calls build_proposal with None).
+    fn compose_proposals_diversity_cluster_always_none() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let patterns = vec![Pattern::new(vec![StepToken(1), StepToken(2)], 25, (0, 0))];
+        let out = compose_proposals(&patterns, &s);
+        assert!(!out.is_empty());
+        assert!(out.iter().all(|p| p.diversity_cluster.is_none()));
+    }
+
+    #[test]
+    // rationale: compose_proposals — a multi-step pattern expands into the
+    // full m21 variant set; proposal count must match build_variants len.
+    fn compose_proposal_count_matches_variant_expansion() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let pattern = Pattern::new(vec![StepToken(1), StepToken(2), StepToken(3)], 25, (0, 0));
+        let n_variants = build_variants(&pattern).expect("v").len();
+        let out = compose_proposals(&[pattern], &s);
+        assert_eq!(out.len(), n_variants);
+    }
+
+    #[test]
+    // rationale: compose_proposals — sub-threshold evidence drops ALL
+    // proposals for a multi-pattern batch, not just some.
+    fn compose_drops_entire_batch_below_threshold() {
+        let s = snap(PROPOSAL_F2_THRESHOLD - 1, Some(0.5), Some(0.05));
+        let patterns = vec![
+            Pattern::new(vec![StepToken(1), StepToken(2)], 25, (0, 0)),
+            Pattern::new(vec![StepToken(3), StepToken(4)], 22, (0, 0)),
+            Pattern::new(vec![StepToken(5), StepToken(6)], 30, (0, 0)),
+        ];
+        assert!(compose_proposals(&patterns, &s).is_empty());
+    }
+
+    #[test]
+    // rationale: compose_proposals — lift-None snapshot drops the whole
+    // batch even at sufficient n (F2 gate also covers lift availability).
+    fn compose_drops_batch_when_lift_none() {
+        let s = snap(40, None, Some(0.05));
+        let patterns = vec![Pattern::new(vec![StepToken(1), StepToken(2)], 25, (0, 0))];
+        assert!(compose_proposals(&patterns, &s).is_empty());
+    }
+
+    #[test]
+    // rationale: compose_proposals — ci-None snapshot also drops the batch.
+    fn compose_drops_batch_when_ci_none() {
+        let s = snap(40, Some(0.5), None);
+        let patterns = vec![Pattern::new(vec![StepToken(1), StepToken(2)], 25, (0, 0))];
+        assert!(compose_proposals(&patterns, &s).is_empty());
+    }
+
+    #[test]
+    // rationale: compose_proposals — every proposal in a multi-pattern batch
+    // carries the SAME evidence snapshot (n / lift / ci) since one snapshot
+    // is broadcast across all patterns.
+    fn compose_broadcasts_one_snapshot_across_all_proposals() {
+        let s = snap(42, Some(0.66), Some(0.044));
+        let patterns = vec![
+            Pattern::new(vec![StepToken(1), StepToken(2)], 25, (0, 0)),
+            Pattern::new(vec![StepToken(3), StepToken(4)], 22, (0, 0)),
+        ];
+        let out = compose_proposals(&patterns, &s);
+        assert!(out.len() >= 2);
+        for p in &out {
+            assert_eq!(p.evidence_n, 42);
+            assert!((p.evidence_lift - 0.66).abs() < 1e-12);
+            assert!((p.evidence_ci_half - 0.044).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    // rationale: compose_proposals — proposal_ids within a single batch are
+    // unique because each variant_id is distinct (anti-collision).
+    fn compose_proposal_ids_unique_within_batch() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let pattern = Pattern::new(vec![StepToken(1), StepToken(2), StepToken(3)], 25, (0, 0));
+        let out = compose_proposals(&[pattern], &s);
+        let mut ids: Vec<u64> = out.iter().map(|p| p.proposal_id).collect();
+        let len_before = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), len_before, "proposal_ids collided within batch");
+    }
+
+    #[test]
+    // rationale: Adversarial — a very large lift (well outside [0,1]) is
+    // information, not a gate; it must pass through verbatim.
+    fn adversarial_large_lift_passes_through() {
+        let s = snap(30, Some(1e9), Some(0.05));
+        let p = build_proposal(sample_variant(), &s, None).expect("ok");
+        assert!((p.evidence_lift - 1e9).abs() < 1.0);
+    }
+
+    #[test]
+    // rationale: Adversarial — zero ci_half (perfectly tight CI) is a valid
+    // value and must not be confused with the None sentinel.
+    fn adversarial_zero_ci_half_accepted() {
+        let s = snap(30, Some(0.5), Some(0.0));
+        let p = build_proposal(sample_variant(), &s, None).expect("ok");
+        assert!((p.evidence_ci_half - 0.0).abs() < 1e-15);
+    }
+
+    #[test]
+    // rationale: F2 contract — Some(0.0) lift is distinct from None: a
+    // zero-lift snapshot builds, a None-lift snapshot refuses.
+    fn f2_some_zero_lift_distinct_from_none_lift() {
+        let with_zero = snap(30, Some(0.0), Some(0.05));
+        let with_none = snap(30, None, Some(0.05));
+        assert!(build_proposal(sample_variant(), &with_zero, None).is_ok());
+        assert!(matches!(
+            build_proposal(sample_variant(), &with_none, None),
+            Err(ProposerError::LiftUnavailable)
+        ));
+    }
+
+    #[test]
+    // rationale: Contract — ProposerError is a thiserror enum; the Display
+    // string for EvidenceBelowThreshold embeds both n and threshold.
+    fn contract_below_threshold_display_embeds_both_numbers() {
+        let e = ProposerError::EvidenceBelowThreshold { n: 13, threshold: 20 };
+        let s = format!("{e}");
+        assert!(s.contains("13"), "display missing n: {s}");
+        assert!(s.contains("20"), "display missing threshold: {s}");
+    }
+
+    #[test]
+    // rationale: Contract — LiftUnavailable Display is a stable,
+    // non-empty diagnostic mentioning the F2 gate.
+    fn contract_lift_unavailable_display_mentions_f2() {
+        let s = format!("{}", ProposerError::LiftUnavailable);
+        assert!(s.contains("F2"), "display should mention the F2 gate: {s}");
+    }
+
+    #[test]
+    // rationale: Serde — WorkflowProposal serialises every evidence field as
+    // a JSON-visible key (downstream m30 bank reads these by name).
+    fn serde_proposal_exposes_all_evidence_keys() {
+        let s = snap(33, Some(0.71), Some(0.06));
+        let p = build_proposal(sample_variant(), &s, Some(4)).expect("ok");
+        let json = serde_json::to_string(&p).expect("ser");
+        for key in [
+            "proposal_id",
+            "evidence_n",
+            "evidence_lift",
+            "evidence_ci_half",
+            "diversity_cluster",
+        ] {
+            assert!(json.contains(key), "serde missing key '{key}': {json}");
+        }
+    }
+
+    #[test]
+    // rationale: Serde — a proposal with Some(cluster) round-trips the
+    // cluster value, distinguishing it from the None case.
+    fn serde_roundtrip_preserves_some_diversity_cluster() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let p = build_proposal(sample_variant(), &s, Some(7)).expect("ok");
+        let back: super::WorkflowProposal =
+            serde_json::from_str(&serde_json::to_string(&p).expect("ser")).expect("de");
+        assert_eq!(back.diversity_cluster, Some(7));
+        assert_eq!(back, p);
+    }
+
+    #[test]
+    // rationale: PartialEq — two proposals built from the same inputs are
+    // structurally equal; differing diversity_cluster breaks equality.
+    fn equality_sensitive_to_diversity_cluster() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let a = build_proposal(sample_variant(), &s, Some(1)).expect("a");
+        let b = build_proposal(sample_variant(), &s, Some(2)).expect("b");
+        assert_ne!(a, b, "proposals differing only in cluster must be unequal");
+    }
+
+    #[test]
+    // rationale: Boundary — single-step pattern yields only the identity
+    // variant (no swap, no skip), so compose emits exactly one proposal.
+    fn compose_single_step_pattern_yields_one_proposal() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let pattern = Pattern::new(vec![StepToken(42)], 25, (0, 0));
+        let out = compose_proposals(&[pattern], &s);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(out[0].variant.mutation, MutationKind::Identity));
+    }
+
+    #[test]
+    // rationale: compose_proposals — source ordering is preserved: pattern A
+    // proposals precede pattern B proposals in the output vec.
+    fn compose_preserves_source_pattern_ordering() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let pat_a = Pattern::new(vec![StepToken(100)], 25, (0, 0));
+        let pat_b = Pattern::new(vec![StepToken(200)], 25, (0, 0));
+        let hash_a = pat_a.canonical_hash;
+        let hash_b = pat_b.canonical_hash;
+        let out = compose_proposals(&[pat_a, pat_b], &s);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].variant.source_pattern_hash, hash_a);
+        assert_eq!(out[1].variant.source_pattern_hash, hash_b);
+    }
+
+    #[test]
+    // rationale: Determinism — proposal_id is stable across a clone of the
+    // variant (clone must not perturb the FNV input).
+    fn determinism_proposal_id_stable_under_variant_clone() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let v = sample_variant();
+        let id_orig = build_proposal(v.clone(), &s, None).expect("orig").proposal_id;
+        let id_clone = build_proposal(v, &s, None).expect("clone").proposal_id;
+        assert_eq!(id_orig, id_clone);
+    }
 }

@@ -719,4 +719,318 @@ mod tests {
         let fb: Vec<_> = b.iter().map(|p| (p.steps.clone(), p.support)).collect();
         assert_eq!(fa, fb);
     }
+
+    // ====================================================================
+    // KEYSTONE hardening pass — known-input/known-output, monotonic-support
+    // invariant, projection correctness, restart semantics, depth caps.
+    // ====================================================================
+
+    /// Helper: does the result contain a pattern with exactly `steps`?
+    fn has(p: &[Pattern], steps: &[u32]) -> bool {
+        p.iter().any(|pat| pat.steps == seq(steps))
+    }
+    /// Helper: support of the pattern with exactly `steps` (panics if absent).
+    fn support_of(p: &[Pattern], steps: &[u32]) -> usize {
+        p.iter()
+            .find(|pat| pat.steps == seq(steps))
+            .unwrap_or_else(|| panic!("pattern {steps:?} not found in {p:?}"))
+            .support
+    }
+
+    #[test]
+    // rationale: KIO — three sequences all sharing [1,2,3]; the L1 [1],
+    // L2 [1,2], L3 [1,2,3] patterns must each have support exactly 3, and
+    // L2/L3 must be present (compositional sub-graph detection).
+    fn kio_three_identical_sequences_full_pattern_lattice() {
+        let seqs = vec![seq(&[1, 2, 3]), seq(&[1, 2, 3]), seq(&[1, 2, 3])];
+        let p = mine_sequences(&seqs, MinSupport(3), MaxGap(5), 8).expect("ok");
+        assert_eq!(support_of(&p, &[1]), 3);
+        assert_eq!(support_of(&p, &[2]), 3);
+        assert_eq!(support_of(&p, &[3]), 3);
+        assert_eq!(support_of(&p, &[1, 2]), 3);
+        assert_eq!(support_of(&p, &[2, 3]), 3);
+        assert_eq!(support_of(&p, &[1, 2, 3]), 3);
+    }
+
+    #[test]
+    // rationale: Algorithmic invariant — PrefixSpan support is anti-monotone:
+    // a pattern's support can never exceed any of its prefixes' support.
+    // (Apriori / downward-closure property.)
+    fn invariant_support_anti_monotone_extension_never_gains() {
+        let seqs = vec![
+            seq(&[1, 2, 3, 4]),
+            seq(&[1, 2, 3]),
+            seq(&[1, 2]),
+            seq(&[1]),
+        ];
+        let p = mine_sequences(&seqs, MinSupport(2), MaxGap(5), 8).expect("ok");
+        // For every length-n pattern, its length-(n-1) prefix must exist
+        // with support >= the longer pattern's support.
+        for pat in &p {
+            if pat.steps.len() < 2 {
+                continue;
+            }
+            let prefix_steps: Vec<u32> =
+                pat.steps[..pat.steps.len() - 1].iter().map(|t| t.0).collect();
+            let prefix_sup = support_of(&p, &prefix_steps);
+            assert!(
+                prefix_sup >= pat.support,
+                "anti-monotonicity violated: prefix {prefix_steps:?} sup={prefix_sup} \
+                 < extension {pat:?}"
+            );
+        }
+    }
+
+    #[test]
+    // rationale: KIO — a token frequent in only 1 of 3 sequences must be
+    // pruned at min_support=2 (the L1 frequency floor).
+    fn kio_l1_floor_prunes_rare_token() {
+        let seqs = vec![seq(&[1, 2]), seq(&[1, 3]), seq(&[1, 9])];
+        // token 9 appears once; tokens 2,3 once each; token 1 thrice.
+        let p = mine_sequences(&seqs, MinSupport(2), MaxGap(5), 8).expect("ok");
+        assert!(has(&p, &[1]), "frequent token 1 missing");
+        assert!(!has(&p, &[9]), "rare token 9 leaked past min_support=2");
+        assert!(!has(&p, &[2]), "rare token 2 leaked past min_support=2");
+    }
+
+    #[test]
+    // rationale: KIO — L1 support counts SEQUENCES not OCCURRENCES (per
+    // spec § 5: per-sequence occurrence). A token repeated 5× in one
+    // sequence still contributes support 1 from that sequence.
+    fn kio_l1_support_counts_sequences_not_occurrences() {
+        let seqs = vec![seq(&[7, 7, 7, 7, 7]), seq(&[7])];
+        let p = mine_sequences(&seqs, MinSupport(2), MaxGap(5), 8).expect("ok");
+        // 7 appears in both sequences → support 2, NOT 6.
+        assert_eq!(support_of(&p, &[7]), 2);
+    }
+
+    #[test]
+    // rationale: Projection correctness — the suffix after a matched
+    // multi-token prefix is exactly the tail past the LAST matched token.
+    fn projection_suffix_is_tail_past_last_prefix_token() {
+        let s = seq(&[5, 1, 6, 2, 7, 3, 8]);
+        let p = project_after_prefix(&s, &[tok(1), tok(2), tok(3)], MaxGap(5))
+            .expect("match");
+        assert_eq!(p.suffix, seq(&[8]));
+        // gaps: 1→2 skip [6] (gap 1); 2→3 skip [7] (gap 1) → max right gap 1.
+        assert_eq!(p.right_gap, 1);
+    }
+
+    #[test]
+    // rationale: Projection correctness — exhausting the sequence on the
+    // final prefix token yields an EMPTY suffix, not None.
+    fn projection_empty_suffix_when_prefix_ends_at_sequence_end() {
+        let s = seq(&[1, 2, 3]);
+        let p = project_after_prefix(&s, &[tok(1), tok(3)], MaxGap(5)).expect("match");
+        assert!(p.suffix.is_empty(), "expected empty suffix, got {:?}", p.suffix);
+    }
+
+    #[test]
+    // rationale: Projection correctness — FIRST occurrence wins. With two
+    // disjoint [1,2] matches, the suffix is taken after the FIRST.
+    fn projection_takes_first_occurrence_not_last() {
+        let s = seq(&[1, 2, 99, 1, 2, 100]);
+        let p = project_after_prefix(&s, &[tok(1), tok(2)], MaxGap(5)).expect("match");
+        // First [1,2] ends at idx 1 → suffix is everything from idx 2.
+        assert_eq!(p.suffix, seq(&[99, 1, 2, 100]));
+        assert_eq!(p.right_gap, 0);
+    }
+
+    #[test]
+    // rationale: Gap semantics — exactly max_gap intervening tokens is
+    // ACCEPTED (boundary inclusive); one more is rejected.
+    fn projection_gap_exactly_at_bound_is_accepted() {
+        // 3 intervening tokens between 1 and 2; max_gap=3 → accepted.
+        let s = seq(&[1, 9, 9, 9, 2]);
+        let p = project_after_prefix(&s, &[tok(1), tok(2)], MaxGap(3)).expect("match");
+        assert_eq!(p.right_gap, 3);
+        // max_gap=2 → 3 > 2 → rejected (no other 1 to restart from).
+        assert!(project_after_prefix(&s, &[tok(1), tok(2)], MaxGap(2)).is_none());
+    }
+
+    #[test]
+    // rationale: BUG REGRESSION GUARD — restart-on-repeated-first-token is
+    // DEAD CODE. The block at m20_prefixspan/mod.rs:251 (`if *tok ==
+    // prefix[0]` inside the over-gap branch) is only reachable when the
+    // outer `if *tok == prefix[p_idx]` (line 246) ALSO holds — i.e. only
+    // when `prefix[p_idx] == prefix[0]`. For the ordinary case prefix=[1,2]
+    // (mid-match, expecting `2`), a fresh `1` after an over-gap is
+    // `*tok == prefix[0]` but `*tok != prefix[p_idx]`, so the branch never
+    // executes and the documented re-anchor never happens.
+    //
+    // CONSEQUENCE: a sequence [1, <over-gap noise>, 1, 2] does NOT match
+    // pattern [1,2] even though a valid gap-0 occurrence exists at the tail.
+    // This UNDER-COUNTS support for any pattern whose first token recurs
+    // after a wide gap — directly weakening the KEYSTONE compositional
+    // sub-graph detector. See module doc-comment lines 227-230 which
+    // describe the intended (but unimplemented) restart semantics.
+    //
+    // This test pins the ACTUAL current behaviour (None) so the bug is
+    // visible and a future fix is caught by a flipped assertion.
+    fn bug_projection_restart_on_repeated_first_token_is_dead_code() {
+        // First 1 at idx 0; 2 is 6 positions away (over max_gap=2). Second
+        // 1 at idx 6 with 2 immediately after at idx 7 — a clean gap-0
+        // match that SHOULD be recoverable but is not.
+        let s = seq(&[1, 9, 9, 9, 9, 9, 1, 2]);
+        let r = project_after_prefix(&s, &[tok(1), tok(2)], MaxGap(2));
+        let matched = r.map(|p| p.suffix);
+        assert!(
+            matched.is_none(),
+            "BUG STATUS CHANGED: restart-on-repeated-first-token now matches \
+             — update this test to assert the recovered suffix. suffix={matched:?}"
+        );
+    }
+
+    #[test]
+    // rationale: Restart logic IS reachable for self-repeating prefixes —
+    // prefix=[1,1] where prefix[p_idx] can equal prefix[0]. This exercises
+    // the live branch of the restart code (line 251) and documents the one
+    // shape where the restart works as written.
+    fn projection_restart_reachable_for_self_repeating_prefix() {
+        // prefix [1,1]: after matching the first 1 we expect another 1.
+        // [1, 9,9,9,9,9, 1] — the second 1 is over-gap (gap 5 > max_gap 2),
+        // restart triggers because *tok == prefix[0] == 1, p_idx → 1.
+        // No third 1 follows, so the prefix is never completed → None.
+        let s = seq(&[1, 9, 9, 9, 9, 9, 1]);
+        let r = project_after_prefix(&s, &[tok(1), tok(1)], MaxGap(2));
+        assert!(r.is_none(), "expected None — no 1 after the restart anchor");
+        // [1, 9,9, 1, 1] completes [1,1] within gap: first 1 at idx0,
+        // second 1 at idx3 (gap = 3-0-1 = 2, within MaxGap(2)). The match
+        // ends at idx3, so the suffix is the tail past idx3 = [1].
+        let s2 = seq(&[1, 9, 9, 1, 1]);
+        let p = project_after_prefix(&s2, &[tok(1), tok(1)], MaxGap(2)).expect("match");
+        assert_eq!(p.suffix, seq(&[1]));
+        assert_eq!(p.right_gap, 2, "the single observed inter-prefix gap is 2");
+    }
+
+    #[test]
+    // rationale: KIO — gap-allowed mining: [1,3] is frequent across
+    // sequences where 1 and 3 are separated by varying gaps within bound.
+    fn kio_gap_allowed_two_step_pattern_mined() {
+        let seqs = vec![
+            seq(&[1, 8, 3]),       // gap 1
+            seq(&[1, 8, 8, 3]),    // gap 2
+            seq(&[1, 3]),          // gap 0
+        ];
+        let p = mine_sequences(&seqs, MinSupport(3), MaxGap(5), 8).expect("ok");
+        assert_eq!(support_of(&p, &[1, 3]), 3);
+    }
+
+    #[test]
+    // rationale: Boundary — max_length exactly 1 yields ONLY L1 patterns
+    // even when longer patterns exist in the data.
+    fn boundary_max_length_one_yields_only_l1() {
+        let seqs = vec![seq(&[1, 2, 3]), seq(&[1, 2, 3])];
+        let p = mine_sequences(&seqs, MinSupport(2), MaxGap(5), 1).expect("ok");
+        for pat in &p {
+            assert_eq!(pat.steps.len(), 1, "max_length=1 yielded {pat:?}");
+        }
+        assert!(has(&p, &[1]) && has(&p, &[2]) && has(&p, &[3]));
+    }
+
+    #[test]
+    // rationale: Boundary — max_length=2 caps at L2 even with a clean
+    // length-4 repeated pattern.
+    fn boundary_max_length_two_caps_at_l2() {
+        let seqs = vec![seq(&[1, 2, 3, 4]), seq(&[1, 2, 3, 4]), seq(&[1, 2, 3, 4])];
+        let p = mine_sequences(&seqs, MinSupport(3), MaxGap(5), 2).expect("ok");
+        for pat in &p {
+            assert!(pat.steps.len() <= 2, "L2 cap violated: {pat:?}");
+        }
+        assert!(has(&p, &[1, 2]), "L2 [1,2] must still be present");
+    }
+
+    #[test]
+    // rationale: Boundary — min_support exactly equal to the sequence count
+    // means a pattern must appear in EVERY sequence to survive.
+    fn boundary_min_support_equals_count_requires_universal_pattern() {
+        let seqs = vec![seq(&[1, 2]), seq(&[1, 3]), seq(&[1, 4])];
+        let p = mine_sequences(&seqs, MinSupport(3), MaxGap(5), 8).expect("ok");
+        // Only token 1 is in all 3 sequences.
+        assert!(has(&p, &[1]));
+        assert!(!has(&p, &[2]) && !has(&p, &[3]) && !has(&p, &[4]));
+        assert_eq!(p.len(), 1, "exactly one universal pattern expected: {p:?}");
+    }
+
+    #[test]
+    // rationale: KIO — interleaved noise. [1,2,3] is a sub-sequence of each
+    // input despite heavy noise insertion; gap-allowed mining recovers it.
+    fn kio_compositional_pattern_under_interleaved_noise() {
+        let seqs = vec![
+            seq(&[1, 90, 2, 91, 3]),
+            seq(&[1, 92, 2, 93, 3]),
+            seq(&[1, 2, 94, 3]),
+        ];
+        let p = mine_sequences(&seqs, MinSupport(3), MaxGap(5), 8).expect("ok");
+        assert_eq!(
+            support_of(&p, &[1, 2, 3]),
+            3,
+            "compositional [1,2,3] not recovered under noise"
+        );
+    }
+
+    #[test]
+    // rationale: Determinism — output ordering total even with hash-colliding
+    // support ties: equal-support, equal-length patterns are ordered by
+    // canonical_hash ascending. Verify the tie-break leg directly.
+    fn determinism_equal_support_equal_length_ordered_by_hash() {
+        let seqs = vec![
+            seq(&[1, 5]),
+            seq(&[1, 5]),
+            seq(&[2, 6]),
+            seq(&[2, 6]),
+        ];
+        let p = mine_sequences(&seqs, MinSupport(2), MaxGap(5), 8).expect("ok");
+        for w in p.windows(2) {
+            if w[0].support == w[1].support && w[0].steps.len() == w[1].steps.len() {
+                assert!(
+                    w[0].canonical_hash <= w[1].canonical_hash,
+                    "hash tie-break violated: {:?} before {:?}",
+                    w[0],
+                    w[1]
+                );
+            }
+        }
+    }
+
+    #[test]
+    // rationale: Anti-property — no pattern below min_support may EVER be
+    // emitted, at ANY depth (L1 or recursive extension).
+    fn anti_property_no_pattern_below_min_support_at_any_depth() {
+        let seqs = vec![
+            seq(&[1, 2, 3, 4, 5]),
+            seq(&[1, 2, 3, 6, 7]),
+            seq(&[1, 2, 8, 9, 10]),
+        ];
+        let p = mine_sequences(&seqs, MinSupport(2), MaxGap(5), 8).expect("ok");
+        for pat in &p {
+            assert!(
+                pat.support >= 2,
+                "below-floor pattern leaked at depth {}: {pat:?}",
+                pat.steps.len()
+            );
+        }
+    }
+
+    #[test]
+    // rationale: KIO — the L1 pattern always carries gap_bounds (0,0); only
+    // recursively-extended patterns observe a non-trivial right gap.
+    fn kio_l1_pattern_gap_bounds_are_zero() {
+        let seqs = vec![seq(&[1]), seq(&[1])];
+        let p = mine_sequences(&seqs, MinSupport(2), MaxGap(5), 8).expect("ok");
+        let l1 = p.iter().find(|pat| pat.steps == seq(&[1])).expect("L1");
+        assert_eq!(l1.gap_bounds, (0, 0));
+    }
+
+    #[test]
+    // rationale: Determinism — duplicate identical input sequences do not
+    // perturb pattern identity; support scales with the duplication count.
+    fn determinism_duplicate_sequences_scale_support() {
+        let one = vec![seq(&[1, 2]), seq(&[1, 2])];
+        let two = vec![seq(&[1, 2]), seq(&[1, 2]), seq(&[1, 2]), seq(&[1, 2])];
+        let p1 = mine_sequences(&one, MinSupport(2), MaxGap(5), 8).expect("a");
+        let p2 = mine_sequences(&two, MinSupport(2), MaxGap(5), 8).expect("b");
+        assert_eq!(support_of(&p1, &[1, 2]), 2);
+        assert_eq!(support_of(&p2, &[1, 2]), 4);
+    }
 }

@@ -36,4 +36,31 @@ mod tests {
         assert_error::<ContextCostError>();
         assert_send_sync_static::<ContextCostError>();
     }
+
+    // rationale: Core correctness — the `#[from] serde_json::Error`
+    // conversion produces the `SnapshotParse` variant; a real malformed-
+    // JSON parse failure must flow through `?` into that variant.
+    #[test]
+    fn serde_json_error_converts_into_snapshot_parse_variant() {
+        let parse_err: Result<serde_json::Value, _> = serde_json::from_str("{not json");
+        let err: ContextCostError = parse_err.unwrap_err().into();
+        assert!(
+            matches!(err, ContextCostError::SnapshotParse(_)),
+            "serde_json::Error must map to SnapshotParse"
+        );
+        assert!(err.to_string().contains("snapshot parse"));
+    }
+
+    // rationale: Core correctness — the `#[from] std::io::Error`
+    // conversion produces the `StcortexIo` variant.
+    #[test]
+    fn io_error_converts_into_stcortex_io_variant() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "missing snapshot");
+        let err: ContextCostError = io_err.into();
+        assert!(
+            matches!(err, ContextCostError::StcortexIo(_)),
+            "std::io::Error must map to StcortexIo"
+        );
+        assert!(err.to_string().contains("missing snapshot"));
+    }
 }

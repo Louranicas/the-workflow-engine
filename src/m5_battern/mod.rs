@@ -640,4 +640,323 @@ mod tests {
             assert_eq!(a.exit_code, b.exit_code);
         }
     }
+
+    // ====================================================================
+    // Hardening pass 2 — timeout-split boundary, duration arithmetic,
+    // step_index ordering, summarise aggregation, heuristic precedence.
+    // ====================================================================
+
+    // rationale: Boundary — an inter-step gap GREATER than
+    // inter_step_timeout_ms splits one battern into two.
+    #[test]
+    fn observe_splits_battern_on_inter_step_timeout() {
+        // 1s timeout; second step is 2s after the first → split.
+        let r = BatternStepRecord::new(BatternStepRecordConfig {
+            inter_step_timeout_ms: 1_000,
+            min_steps: 2,
+            ..BatternStepRecordConfig::default()
+        })
+        .expect("regex");
+        let steps = vec![
+            step(1_000_000_000, "rg foo", "s1"),
+            step(1_000_000_000 + 500_000_000, "cc-health", "s1"),
+            // 2s gap from the previous step — exceeds the 1s timeout.
+            step(1_000_000_000 + 500_000_000 + 2_000_000_000, "rg bar", "s1"),
+            step(1_000_000_000 + 500_000_000 + 2_500_000_000, "cc-health", "s1"),
+        ];
+        let obs = r.observe(&steps);
+        let ids: std::collections::HashSet<_> =
+            obs.iter().map(|o| o.battern_id.clone()).collect();
+        assert_eq!(ids.len(), 2, "inter-step timeout must split the battern");
+    }
+
+    // rationale: Boundary — a gap exactly EQUAL to the timeout does NOT
+    // split (the rule is strictly `> timeout_ns`).
+    #[test]
+    fn observe_does_not_split_on_gap_exactly_equal_to_timeout() {
+        let r = BatternStepRecord::new(BatternStepRecordConfig {
+            inter_step_timeout_ms: 1_000,
+            min_steps: 2,
+            ..BatternStepRecordConfig::default()
+        })
+        .expect("regex");
+        // Exactly 1s gap (== timeout) — must stay in one battern.
+        let steps = vec![
+            step(1_000_000_000, "rg foo", "s1"),
+            step(1_000_000_000 + 1_000_000_000, "cc-health", "s1"),
+        ];
+        let obs = r.observe(&steps);
+        let ids: std::collections::HashSet<_> =
+            obs.iter().map(|o| o.battern_id.clone()).collect();
+        assert_eq!(ids.len(), 1, "gap == timeout must not split (strict >)");
+    }
+
+    // rationale: Core correctness — duration_ms of a step is the gap to
+    // the NEXT step, converted ns→ms; the last step has duration 0 (no
+    // successor).
+    #[test]
+    fn observe_step_duration_is_gap_to_next_step() {
+        let r = rec();
+        let steps = vec![
+            step(1_000_000_000, "rg foo", "s1"),
+            // 250ms later
+            step(1_000_000_000 + 250_000_000, "cc-health", "s1"),
+        ];
+        let obs = r.observe(&steps);
+        assert_eq!(obs.len(), 2);
+        assert_eq!(obs[0].duration_ms, 250, "first step duration = gap to next");
+        assert_eq!(obs[1].duration_ms, 0, "last step has no successor → 0");
+    }
+
+    // rationale: Core correctness — step_index is a contiguous 0-based
+    // sequence within each battern.
+    #[test]
+    fn observe_assigns_contiguous_zero_based_step_indices() {
+        let r = rec();
+        let steps = vec![
+            step(1_000_000_000, "rg foo", "s1"),
+            step(2_000_000_000, "cc-dispatch A", "s1"),
+            step(3_000_000_000, "cc-health", "s1"),
+            step(4_000_000_000, "cc-harvest", "s1"),
+        ];
+        let obs = r.observe(&steps);
+        let indices: Vec<usize> = obs.iter().map(|o| o.step_index).collect();
+        assert_eq!(indices, vec![0, 1, 2, 3]);
+    }
+
+    // rationale: Core correctness — summarise sums durations and counts
+    // failed steps via non-zero exit codes across a real observation set.
+    #[test]
+    fn summarise_aggregates_failed_steps_and_total_duration() {
+        let r = rec();
+        let mut s1 = step(1_000_000_000, "cc-dispatch A", "s1");
+        s1.exit = 1;
+        let mut s2 = step(1_000_000_500_000, "cc-health", "s1");
+        s2.exit = 0;
+        let mut s3 = step(1_000_001_000_000, "cc-harvest", "s1");
+        s3.exit = 2;
+        let obs = r.observe(&[s1, s2, s3]);
+        let summary = BatternStepRecord::summarise(&obs);
+        assert_eq!(summary.total_steps, 3);
+        assert_eq!(summary.failed_steps, 2, "two non-zero exit codes");
+        assert_eq!(
+            summary.total_duration_ms,
+            obs.iter().map(|o| o.duration_ms).sum::<i64>()
+        );
+    }
+
+    // rationale: Core correctness — summarise's battern_id is taken from
+    // the FIRST observation (documented behaviour, not validated).
+    #[test]
+    fn summarise_uses_first_observations_battern_id() {
+        let id_a = BatternId("battern_aaaa".into());
+        let id_b = BatternId("battern_bbbb".into());
+        let obs = vec![
+            BatternStepObservation {
+                battern_id: id_a.clone(),
+                step_index: 0,
+                step_label: Some(BatternStepLabel::Design),
+                duration_ms: 1,
+                session: "s1".into(),
+                exit_code: 0,
+                is_partial: false,
+                recorded_at_ms: 1_700_000_000_000,
+            },
+            BatternStepObservation {
+                battern_id: id_b,
+                step_index: 1,
+                step_label: None,
+                duration_ms: 1,
+                session: "s1".into(),
+                exit_code: 0,
+                is_partial: false,
+                recorded_at_ms: 1_700_000_000_001,
+            },
+        ];
+        let summary = BatternStepRecord::summarise(&obs);
+        assert_eq!(summary.battern_id, id_a, "battern_id from first obs");
+    }
+
+    // rationale: Anti-property — summarise marks is_complete=false when
+    // any observation is partial, even if total_steps clears the floor.
+    #[test]
+    fn summarise_is_not_complete_when_any_observation_is_partial() {
+        let bid = BatternId("battern_partial".into());
+        let obs = vec![
+            BatternStepObservation {
+                battern_id: bid.clone(),
+                step_index: 0,
+                step_label: Some(BatternStepLabel::Design),
+                duration_ms: 1,
+                session: "s1".into(),
+                exit_code: 0,
+                is_partial: false,
+                recorded_at_ms: 1_700_000_000_000,
+            },
+            BatternStepObservation {
+                battern_id: bid,
+                step_index: 1,
+                step_label: Some(BatternStepLabel::Dispatch),
+                duration_ms: 1,
+                session: "s1".into(),
+                exit_code: 0,
+                is_partial: true,
+                recorded_at_ms: 1_700_000_000_001,
+            },
+        ];
+        let summary = BatternStepRecord::summarise(&obs);
+        assert_eq!(summary.total_steps, 2);
+        assert!(summary.is_partial);
+        assert!(!summary.is_complete, "partial step blocks is_complete");
+    }
+
+    // rationale: Boundary — summarise of a single-step set is NOT complete
+    // (total_steps 1 < MIN_COMPLETE_STEPS 2) even when not partial.
+    #[test]
+    fn summarise_single_step_is_not_complete_below_min_floor() {
+        let obs = vec![BatternStepObservation {
+            battern_id: BatternId("battern_one".into()),
+            step_index: 0,
+            step_label: Some(BatternStepLabel::Design),
+            duration_ms: 5,
+            session: "s1".into(),
+            exit_code: 0,
+            is_partial: false,
+            recorded_at_ms: 1_700_000_000_000,
+        }];
+        let summary = BatternStepRecord::summarise(&obs);
+        assert_eq!(summary.total_steps, 1);
+        assert!(!summary.is_complete, "1 step < MIN_COMPLETE_STEPS");
+    }
+
+    // rationale: Core correctness — the heuristic table is order-sensitive;
+    // `cc-health` matches the Gate pattern (`^cc-(health|gate-check)\b`)
+    // and NOT the Collect pattern. Pins the first-match-wins precedence.
+    #[test]
+    fn label_command_first_match_wins_cc_health_is_gate_not_collect() {
+        let r = rec();
+        assert_eq!(r.label_command("cc-health --verbose"), Some(BatternStepLabel::Gate));
+    }
+
+    // rationale: Boundary — heuristic patterns are anchored at `^`; a
+    // command with `rg` in the MIDDLE does not match Design.
+    #[test]
+    fn label_command_patterns_are_start_anchored() {
+        let r = rec();
+        assert!(
+            r.label_command("echo then rg foo").is_none(),
+            "non-anchored substring must not match"
+        );
+        assert!(
+            r.label_command("xcc-dispatch").is_none(),
+            "prefixed command must not match cc-dispatch"
+        );
+    }
+
+    // rationale: Boundary — heuristic word-boundary `\b`: `cc-dispatcher`
+    // (extra chars after the word) must NOT match the `^cc-dispatch\b`
+    // pattern. Pins the word-boundary semantics.
+    #[test]
+    fn label_command_word_boundary_rejects_cc_dispatcher() {
+        let r = rec();
+        assert!(
+            r.label_command("cc-dispatcher").is_none(),
+            "cc-dispatcher must not match ^cc-dispatch\\b"
+        );
+        // But bare `cc-dispatch` (word ends) matches.
+        assert_eq!(
+            r.label_command("cc-dispatch"),
+            Some(BatternStepLabel::Dispatch)
+        );
+    }
+
+    // rationale: Core correctness — `gate-check` is the second alternative
+    // of the Gate pattern.
+    #[test]
+    fn label_command_gate_check_alternative_matches_gate() {
+        let r = rec();
+        assert_eq!(
+            r.label_command("cc-gate-check ALPHA"),
+            Some(BatternStepLabel::Gate)
+        );
+    }
+
+    // rationale: Anti-property F1 — observe never substitutes an unmatched
+    // command with a label; a battern of entirely-unrecognised commands
+    // yields all-None step_labels but is STILL recorded (never discarded).
+    #[test]
+    fn observe_records_all_none_battern_without_discarding() {
+        let r = rec();
+        let steps = vec![
+            step(1_000_000_000, "mystery-command-1", "s1"),
+            step(2_000_000_000, "mystery-command-2", "s1"),
+        ];
+        let obs = r.observe(&steps);
+        assert_eq!(obs.len(), 2, "unlabelled battern must NOT be discarded");
+        assert!(obs.iter().all(|o| o.step_label.is_none()));
+    }
+
+    // rationale: Core correctness — exit codes flow through observe
+    // verbatim onto each observation (negative codes preserved).
+    #[test]
+    fn observe_preserves_negative_exit_codes() {
+        let r = rec();
+        let mut s1 = step(1_000_000_000, "cc-dispatch A", "s1");
+        s1.exit = -1;
+        let s2 = step(2_000_000_000, "cc-health", "s1");
+        let obs = r.observe(&[s1, s2]);
+        assert_eq!(obs[0].exit_code, -1);
+        assert_eq!(obs[1].exit_code, 0);
+    }
+
+    // rationale: Boundary — observe sorts unsorted input by timestamp
+    // before grouping; step_index reflects temporal order, not input order.
+    #[test]
+    fn observe_sorts_unsorted_input_before_indexing() {
+        let r = rec();
+        let steps = vec![
+            step(3_000_000_000, "cc-harvest", "s1"),
+            step(1_000_000_000, "rg foo", "s1"),
+            step(2_000_000_000, "cc-dispatch A", "s1"),
+        ];
+        let obs = r.observe(&steps);
+        assert_eq!(obs.len(), 3);
+        // After sorting: rg(Design) idx0, cc-dispatch idx1, cc-harvest idx2.
+        assert_eq!(obs[0].step_label, Some(BatternStepLabel::Design));
+        assert_eq!(obs[1].step_label, Some(BatternStepLabel::Dispatch));
+        assert_eq!(obs[2].step_label, Some(BatternStepLabel::Collect));
+    }
+
+    // rationale: Resource accounting — min_steps higher than a battern's
+    // size drops it; with min_steps=10 a 3-step battern produces nothing.
+    #[test]
+    fn observe_min_steps_above_battern_size_drops_battern() {
+        let r = BatternStepRecord::new(BatternStepRecordConfig {
+            min_steps: 10,
+            ..BatternStepRecordConfig::default()
+        })
+        .expect("regex");
+        let steps = vec![
+            step(1_000_000_000, "cc-dispatch A", "s1"),
+            step(2_000_000_000, "cc-health", "s1"),
+            step(3_000_000_000, "cc-harvest", "s1"),
+        ];
+        assert!(r.observe(&steps).is_empty(), "min_steps=10 drops 3-step battern");
+    }
+
+    // rationale: Determinism — derive_battern_id over a 10k-id sweep keeps
+    // collisions under 1% (the opaque-id collision budget, mirroring m4).
+    #[test]
+    fn derive_battern_id_collision_sweep_under_one_percent() {
+        use std::collections::HashSet;
+        let mut seen: HashSet<String> = HashSet::with_capacity(10_000);
+        let mut collisions = 0_usize;
+        for i in 0..10_000_i64 {
+            let id = derive_battern_id(1_700_000_000_000_000_000 + i * 13);
+            if !seen.insert(id.0) {
+                collisions += 1;
+            }
+        }
+        assert!(collisions < 100, "{collisions} collisions in 10k > 1%");
+    }
 }

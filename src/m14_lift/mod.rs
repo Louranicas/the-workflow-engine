@@ -171,7 +171,7 @@ pub struct LiftAggregatorConfig {
 impl Default for LiftAggregatorConfig {
     fn default() -> Self {
         Self {
-            window: DEFAULT_WINDOW_SIZE,
+            window: super::DEFAULT_WINDOW_SIZE,
             cascade_weight: DEFAULT_CASCADE_WEIGHT,
             cost_weight: DEFAULT_COST_WEIGHT,
         }
@@ -803,5 +803,195 @@ mod tests {
     fn max_id_in_window_zero_for_empty_input() {
         let rows: Vec<WorkflowRunRow> = vec![];
         assert_eq!(max_id_in_window(&rows, 10), 0);
+    }
+
+    // ====================================================================
+    // Hardening pass 2 — +12 tests. Composite formula, weight blends,
+    // cost-lift contribution, Wilson monotonicity, custom windows.
+    // ====================================================================
+
+    // rationale: Correctness — the composite formula is
+    // `cascade_weight*cascade_rate + cost_weight*cost_lift`. With a 50/50
+    // success split, all-equal cost (c_lift=0), default weights:
+    // composite = 0.6*0.5 + 0.4*0 = 0.30.
+    #[test]
+    fn composite_formula_half_success_equal_cost_is_point_three() {
+        let agg = LiftAggregator::new(LiftAggregatorConfig::default()).expect("agg");
+        let rows: Vec<WorkflowRunRow> = (0..30)
+            .map(|i| run(i, if i % 2 == 0 { "ok" } else { "fail" }, Some(100)))
+            .collect();
+        let lift = agg.compute_snapshot(&rows).lift.expect("lift");
+        assert!((lift - 0.30).abs() < 1e-9, "composite was {lift}");
+    }
+
+    // rationale: Correctness — custom weights blend the composite. With
+    // cascade=1.0/cost=0.0 and all-ok rows, composite = 1.0*1.0 = 1.0.
+    #[test]
+    fn composite_with_all_cascade_weight_equals_cascade_rate() {
+        let agg = LiftAggregator::new(LiftAggregatorConfig {
+            window: super::DEFAULT_WINDOW_SIZE,
+            cascade_weight: 1.0,
+            cost_weight: 0.0,
+        })
+        .expect("agg");
+        let rows: Vec<WorkflowRunRow> = (0..25).map(|i| run(i, "ok", Some(100))).collect();
+        let lift = agg.compute_snapshot(&rows).lift.expect("lift");
+        assert!((lift - 1.0).abs() < 1e-9, "all-cascade lift was {lift}");
+    }
+
+    // rationale: Correctness — cost_lift contributes to the composite.
+    // With cascade=0.0/cost=1.0, the composite equals the cost-lift of
+    // the latest run vs window-mean baseline. Latest run is cheaper than
+    // the mean → positive composite.
+    #[test]
+    fn composite_with_all_cost_weight_reflects_cost_lift() {
+        let agg = LiftAggregator::new(LiftAggregatorConfig {
+            window: super::DEFAULT_WINDOW_SIZE,
+            cascade_weight: 0.0,
+            cost_weight: 1.0,
+        })
+        .expect("agg");
+        // 24 expensive runs + 1 cheap latest run.
+        let mut rows: Vec<WorkflowRunRow> =
+            (0..24).map(|i| run(i, "ok", Some(1_000))).collect();
+        rows.push(run(24, "ok", Some(10)));
+        let lift = agg.compute_snapshot(&rows).lift.expect("lift");
+        assert!(lift > 0.0, "cheaper latest run → positive cost lift: {lift}");
+    }
+
+    // rationale: Correctness — when the latest run is more expensive than
+    // the window mean, the all-cost composite is negative.
+    #[test]
+    fn composite_negative_when_latest_run_above_baseline() {
+        let agg = LiftAggregator::new(LiftAggregatorConfig {
+            window: super::DEFAULT_WINDOW_SIZE,
+            cascade_weight: 0.0,
+            cost_weight: 1.0,
+        })
+        .expect("agg");
+        let mut rows: Vec<WorkflowRunRow> =
+            (0..24).map(|i| run(i, "ok", Some(100))).collect();
+        rows.push(run(24, "ok", Some(10_000)));
+        let lift = agg.compute_snapshot(&rows).lift.expect("lift");
+        assert!(lift < 0.0, "expensive latest run → negative lift: {lift}");
+    }
+
+    // rationale: Boundary — baseline_cost is the arithmetic mean over
+    // ONLY the costed rows; None-cost rows are skipped from the divisor.
+    #[test]
+    fn baseline_cost_mean_skips_none_cost_rows_in_divisor() {
+        let rows = [
+            run(0, "ok", Some(100)),
+            run(1, "ok", None),
+            run(2, "ok", Some(200)),
+        ];
+        let refs: Vec<&WorkflowRunRow> = rows.iter().collect();
+        let mean = baseline_cost_from_window(&refs).expect("ok").expect("some");
+        // Mean of {100,200} = 150, NOT (100+0+200)/3.
+        assert!((mean - 150.0).abs() < 1e-9, "mean was {mean}");
+    }
+
+    // rationale: Boundary — Wilson CI half-width is widest at p=0.5 and
+    // narrower at the extremes for the same n (maximum-variance point).
+    #[test]
+    fn wilson_ci_is_widest_at_proportion_half() {
+        let n = 100;
+        let at_half = wilson_ci_half(50, n).expect("half");
+        let at_low = wilson_ci_half(5, n).expect("low");
+        let at_high = wilson_ci_half(95, n).expect("high");
+        assert!(at_half > at_low, "p=0.5 wider than p=0.05: {at_half} {at_low}");
+        assert!(at_half > at_high, "p=0.5 wider than p=0.95: {at_half} {at_high}");
+    }
+
+    // rationale: Correctness — Wilson CI half-width shrinks as n grows
+    // for a fixed proportion (more evidence → tighter interval).
+    #[test]
+    fn wilson_ci_narrows_as_sample_size_grows() {
+        let small = wilson_ci_half(20, 40).expect("small");
+        let large = wilson_ci_half(200, 400).expect("large");
+        assert!(large < small, "larger n → tighter CI: {large} < {small}");
+    }
+
+    // rationale: Boundary — a smaller custom window evicts more rows; n
+    // is capped at the window size even with many input rows.
+    #[test]
+    fn custom_window_caps_n_at_window_size() {
+        let agg = LiftAggregator::new(LiftAggregatorConfig {
+            window: 30,
+            cascade_weight: 0.6,
+            cost_weight: 0.4,
+        })
+        .expect("agg");
+        let rows: Vec<WorkflowRunRow> = (0..200).map(|i| run(i, "ok", Some(100))).collect();
+        let snap = agg.compute_snapshot(&rows);
+        assert_eq!(snap.n, 30, "n capped at custom window size");
+        assert_eq!(snap.latest_ts_ms, 199, "latest id is from the tail");
+    }
+
+    // rationale: Boundary — when the window size is smaller than
+    // MIN_SAMPLE_SIZE, the aggregator can never emit a lift (the F2 gate
+    // dominates the window cap).
+    #[test]
+    fn window_below_min_sample_always_refuses() {
+        let agg = LiftAggregator::new(LiftAggregatorConfig {
+            window: 10,
+            cascade_weight: 0.6,
+            cost_weight: 0.4,
+        })
+        .expect("agg");
+        let rows: Vec<WorkflowRunRow> = (0..1_000).map(|i| run(i, "ok", Some(100))).collect();
+        let snap = agg.compute_snapshot(&rows);
+        assert!(snap.lift.is_none(), "window<MIN_SAMPLE_SIZE always refuses");
+        assert_eq!(snap.n, 10);
+    }
+
+    // rationale: Correctness — config() borrows back the exact config the
+    // aggregator was constructed with.
+    #[test]
+    fn aggregator_config_accessor_returns_construction_config() {
+        let cfg = LiftAggregatorConfig {
+            window: 77,
+            cascade_weight: 0.25,
+            cost_weight: 0.75,
+        };
+        let agg = LiftAggregator::new(cfg).expect("agg");
+        assert_eq!(agg.config().window, 77);
+        assert!((agg.config().cascade_weight - 0.25).abs() < 1e-12);
+        assert!((agg.config().cost_weight - 0.75).abs() < 1e-12);
+    }
+
+    // rationale: Boundary — weights summing to 1.0 within the 1e-9
+    // tolerance are accepted; just outside it are rejected.
+    #[test]
+    fn aggregator_weight_sum_tolerance_is_one_e_minus_nine() {
+        // Inside tolerance: accepted.
+        assert!(LiftAggregator::new(LiftAggregatorConfig {
+            window: 120,
+            cascade_weight: 0.6,
+            cost_weight: 0.400_000_000_5,
+        })
+        .is_ok());
+        // Outside tolerance: rejected.
+        assert!(LiftAggregator::new(LiftAggregatorConfig {
+            window: 120,
+            cascade_weight: 0.6,
+            cost_weight: 0.401,
+        })
+        .is_err());
+    }
+
+    // rationale: Anti-property — try_compute_snapshot surfaces the typed
+    // overflow error rather than degrading silently (the fallible API
+    // does NOT collapse to None like compute_snapshot does).
+    #[test]
+    fn try_compute_snapshot_surfaces_overflow_typed_not_degraded() {
+        let agg = LiftAggregator::new(LiftAggregatorConfig::default()).expect("agg");
+        let mut rows: Vec<WorkflowRunRow> = (0..20).map(|i| run(i, "ok", Some(1))).collect();
+        rows.push(run(20, "ok", Some(i64::MAX)));
+        let err = agg.try_compute_snapshot(&rows).unwrap_err();
+        assert!(
+            matches!(err, LiftError::InvalidCostArithmetic { .. }),
+            "fallible API must surface typed overflow, got {err:?}"
+        );
     }
 }

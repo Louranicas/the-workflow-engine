@@ -868,4 +868,351 @@ mod tests {
         let m = CorrelationMemory::from_row(&run(), &ns, false);
         assert_eq!(m.memory_type, "semantic");
     }
+
+    // ====================================================================
+    // Hardening pass 2 — +24 tests. 3-band boundaries, defer semantics,
+    // memory id propagation, content shape, F9, error variants.
+    // ====================================================================
+
+    // rationale: Boundary — density just below the floor defers; the
+    // strict `<` puts it in the defer band.
+    #[test]
+    fn band_just_below_floor_defers() {
+        let w = writer(Some(LTP_PHASE_1_FLOOR - 1e-9), false);
+        let out = w.promote_run(&run(), &canonical_ns()).expect("promote");
+        assert!(
+            matches!(
+                out,
+                PromoteOutcome::Deferred {
+                    reason: DeferReason::LtpBelowFloor { .. }
+                }
+            ),
+            "just below floor must defer; got {out:?}"
+        );
+    }
+
+    // rationale: Boundary — density just below the phase-3 target writes
+    // under pressure, not normally.
+    #[test]
+    fn band_just_below_phase_3_target_writes_under_pressure() {
+        let w = writer(Some(LTP_PHASE_3_TARGET - 1e-9), false);
+        let out = w.promote_run(&run(), &canonical_ns()).expect("promote");
+        assert!(
+            matches!(out, PromoteOutcome::WrittenUnderPressure { .. }),
+            "just below target must be under-pressure; got {out:?}"
+        );
+    }
+
+    // rationale: Correctness — band-1 normal write carries the
+    // substrate-assigned memory id (RecordingWriter increments from 0, so
+    // the first write returns id 1).
+    #[test]
+    fn written_outcome_carries_substrate_memory_id() {
+        let w = writer(Some(0.50), false);
+        let out = w.promote_run(&run(), &canonical_ns()).expect("promote");
+        match out {
+            PromoteOutcome::Written { memory_id } => assert_eq!(memory_id, 1),
+            other => panic!("expected Written, got {other:?}"),
+        }
+    }
+
+    // rationale: Correctness — band-2 under-pressure write also carries
+    // the assigned memory id alongside the observed density.
+    #[test]
+    fn under_pressure_outcome_carries_memory_id_and_density() {
+        let w = writer(Some(0.07), false);
+        let out = w.promote_run(&run(), &canonical_ns()).expect("promote");
+        match out {
+            PromoteOutcome::WrittenUnderPressure {
+                memory_id,
+                ltp_density,
+            } => {
+                assert_eq!(memory_id, 1);
+                assert!((ltp_density - 0.07).abs() < 1e-12);
+            }
+            other => panic!("expected WrittenUnderPressure, got {other:?}"),
+        }
+    }
+
+    // rationale: Correctness — sequential writes get monotonically
+    // increasing memory ids (substrate AUTOINCREMENT semantics).
+    #[test]
+    fn sequential_writes_get_increasing_memory_ids() {
+        let w = writer(Some(0.50), false);
+        let a = w.promote_run(&run(), &canonical_ns()).expect("a");
+        let b = w.promote_run(&run(), &canonical_ns()).expect("b");
+        let id_a = match a {
+            PromoteOutcome::Written { memory_id } => memory_id,
+            o => panic!("a: {o:?}"),
+        };
+        let id_b = match b {
+            PromoteOutcome::Written { memory_id } => memory_id,
+            o => panic!("b: {o:?}"),
+        };
+        assert!(id_b > id_a, "ids must increase: {id_a} -> {id_b}");
+    }
+
+    // rationale: Anti-property — band-1 normal write does NOT set the
+    // under_pressure flag on the CorrelationMemory.
+    #[test]
+    fn band_1_write_memory_not_flagged_under_pressure() {
+        let w = writer(Some(0.50), false);
+        let _ = w.promote_run(&run(), &canonical_ns()).expect("promote");
+        let written = w.writer.written.lock().expect("lock");
+        assert_eq!(written.len(), 1);
+        assert!(
+            !written[0].under_pressure,
+            "band-1 write must not be flagged under_pressure"
+        );
+    }
+
+    // rationale: Correctness — band-2 write DOES flag the
+    // CorrelationMemory under_pressure (the warn-and-proceed band).
+    #[test]
+    fn band_2_write_memory_flagged_under_pressure() {
+        let w = writer(Some(0.05), false);
+        let _ = w.promote_run(&run(), &canonical_ns()).expect("promote");
+        let written = w.writer.written.lock().expect("lock");
+        assert_eq!(written.len(), 1);
+        assert!(
+            written[0].under_pressure,
+            "band-2 write must be flagged under_pressure"
+        );
+    }
+
+    // rationale: Anti-property — a deferred run produces NO substrate
+    // write; the RecordingWriter records zero memories.
+    #[test]
+    fn deferred_run_does_not_write_to_substrate() {
+        let w = writer(Some(0.001), false);
+        let _ = w.promote_run(&run(), &canonical_ns()).expect("promote");
+        let written = w.writer.written.lock().expect("lock");
+        assert!(written.is_empty(), "defer must not touch the substrate writer");
+    }
+
+    // rationale: Anti-property — ORAC-unreachable defer also produces no
+    // substrate write, only an outbox line.
+    #[test]
+    fn orac_unreachable_defer_writes_outbox_not_substrate() {
+        let w = writer(None, false);
+        let _ = w.promote_run(&run(), &canonical_ns()).expect("promote");
+        assert!(
+            w.writer.written.lock().expect("lock").is_empty(),
+            "unreachable defer must not write substrate"
+        );
+        let contents = std::fs::read_to_string(w.outbox_path()).expect("read");
+        assert!(contents.contains("OracUnreachable"), "outbox: {contents}");
+    }
+
+    // rationale: Correctness — the outbox JSONL `memory` object carries
+    // the validated namespace from m9 (munged form).
+    #[test]
+    fn defer_outbox_memory_carries_validated_namespace() {
+        let w = writer(Some(0.001), false);
+        let _ = w.promote_run(&run(), "workflow-trace-deferns").expect("defer");
+        let contents = std::fs::read_to_string(w.outbox_path()).expect("read");
+        let line = contents.lines().next().expect("line");
+        let parsed: serde_json::Value = serde_json::from_str(line).expect("parse");
+        let ns = parsed
+            .get("memory")
+            .and_then(|m| m.get("namespace"))
+            .and_then(serde_json::Value::as_str)
+            .expect("namespace");
+        assert_eq!(ns, "workflow_trace_deferns", "munged namespace in outbox");
+    }
+
+    // rationale: Correctness — the LtpBelowFloor outbox reason carries
+    // the observed density value verbatim for downstream reconciliation.
+    #[test]
+    fn defer_outbox_ltp_reason_carries_observed_density() {
+        let w = writer(Some(0.007), false);
+        let _ = w.promote_run(&run(), &canonical_ns()).expect("defer");
+        let contents = std::fs::read_to_string(w.outbox_path()).expect("read");
+        let line = contents.lines().next().expect("line");
+        let parsed: serde_json::Value = serde_json::from_str(line).expect("parse");
+        let density = parsed
+            .pointer("/reason/LtpBelowFloor/density")
+            .and_then(serde_json::Value::as_f64)
+            .expect("density");
+        assert!((density - 0.007).abs() < 1e-12, "density {density}");
+    }
+
+    // rationale: Concurrency — concurrent defers from many threads append
+    // exactly N lines with no byte-interleaving (each line valid JSON).
+    #[test]
+    fn concurrent_defers_append_n_well_formed_lines() {
+        let w = Arc::new(writer(Some(0.001), false));
+        let mut handles = Vec::new();
+        for _ in 0..6_u32 {
+            let wc = Arc::clone(&w);
+            handles.push(thread::spawn(move || {
+                for _ in 0..10_u32 {
+                    let _ = wc.promote_run(&run(), &canonical_ns()).expect("defer");
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("join");
+        }
+        let contents = std::fs::read_to_string(w.outbox_path()).expect("read");
+        assert_eq!(contents.lines().count(), 60, "6*10 outbox lines");
+        for line in contents.lines() {
+            let _: serde_json::Value =
+                serde_json::from_str(line).expect("each line is valid JSON");
+        }
+    }
+
+    // rationale: Correctness — CorrelationMemory.content is valid JSON
+    // carrying the run id, outcome, and cost_tokens of the source row.
+    #[test]
+    fn correlation_memory_content_is_json_with_run_fields() {
+        let ns = assert_workflow_trace_namespace(&canonical_ns()).expect("ns");
+        let m = CorrelationMemory::from_row(&run(), &ns, false);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&m.content).expect("content is JSON");
+        assert_eq!(parsed.get("run_id").and_then(serde_json::Value::as_i64), Some(42));
+        assert_eq!(
+            parsed.get("outcome").and_then(serde_json::Value::as_str),
+            Some("ok")
+        );
+        assert_eq!(
+            parsed.get("cost_tokens").and_then(serde_json::Value::as_i64),
+            Some(100)
+        );
+    }
+
+    // rationale: F9 zero-weight — when the source row has no outcome,
+    // content carries "unknown" and relevance maps to the 0.1 bucket.
+    #[test]
+    fn correlation_memory_none_outcome_maps_to_unknown_and_lowest_relevance() {
+        let ns = assert_workflow_trace_namespace(&canonical_ns()).expect("ns");
+        let mut r = run();
+        r.outcome = None;
+        let m = CorrelationMemory::from_row(&r, &ns, false);
+        assert!((m.relevance - 0.1).abs() < 1e-6, "None outcome relevance");
+        let parsed: serde_json::Value = serde_json::from_str(&m.content).expect("json");
+        assert_eq!(
+            parsed.get("outcome").and_then(serde_json::Value::as_str),
+            Some("unknown"),
+            "None outcome rendered as 'unknown' in content"
+        );
+    }
+
+    // rationale: F9 zero-weight — content's cost_tokens stays JSON null
+    // when the source row's cost is None (never collapses to 0).
+    #[test]
+    fn correlation_memory_content_cost_tokens_null_when_none() {
+        let ns = assert_workflow_trace_namespace(&canonical_ns()).expect("ns");
+        let mut r = run();
+        r.cost_tokens = None;
+        let m = CorrelationMemory::from_row(&r, &ns, false);
+        let parsed: serde_json::Value = serde_json::from_str(&m.content).expect("json");
+        assert!(
+            parsed.get("cost_tokens").expect("field present").is_null(),
+            "None cost must serialise as JSON null, not 0"
+        );
+    }
+
+    // rationale: Correctness — session_id on the memory is derived from
+    // the source row id (string form).
+    #[test]
+    fn correlation_memory_session_id_is_row_id_string() {
+        let ns = assert_workflow_trace_namespace(&canonical_ns()).expect("ns");
+        let m = CorrelationMemory::from_row(&run(), &ns, false);
+        assert_eq!(m.session_id, "42", "session_id is row id 42 as string");
+    }
+
+    // rationale: Contract regression — CorrelationMemory round-trips
+    // through serde (it crosses the SpacetimeDB SDK boundary).
+    #[test]
+    fn correlation_memory_serde_round_trip() {
+        let ns = assert_workflow_trace_namespace(&canonical_ns()).expect("ns");
+        let m = CorrelationMemory::from_row(&run(), &ns, true);
+        let s = serde_json::to_string(&m).expect("ser");
+        let back: CorrelationMemory = serde_json::from_str(&s).expect("de");
+        assert_eq!(back.namespace, m.namespace);
+        assert_eq!(back.content, m.content);
+        assert!((back.relevance - m.relevance).abs() < 1e-6);
+        assert_eq!(back.under_pressure, m.under_pressure);
+        assert!(back.tensor.is_none());
+    }
+
+    // rationale: Error variant — StcortexWriterError Display strings are
+    // human-readable and name the failure class.
+    #[test]
+    fn writer_error_display_strings_name_the_failure() {
+        let we = StcortexWriterError::WriteFailed("boom".into());
+        assert!(we.to_string().contains("substrate write failed"));
+        assert!(we.to_string().contains("boom"));
+    }
+
+    // rationale: Error variant — NamespaceViolation converts into
+    // StcortexWriterError via the #[from] impl (the AP30 boundary).
+    #[test]
+    fn namespace_violation_converts_into_writer_error() {
+        let nv = crate::m9_watcher_namespace_guard::assert_workflow_trace_namespace(
+            "orac_bad",
+        )
+        .unwrap_err();
+        let we: StcortexWriterError = nv.into();
+        assert!(matches!(we, StcortexWriterError::NamespaceViolation(_)));
+    }
+
+    // rationale: Anti-property — a write failure on the band-2
+    // (under-pressure) path also propagates the typed error, not just
+    // band-1.
+    #[test]
+    fn under_pressure_write_failure_propagates_typed_error() {
+        let w = writer(Some(0.05), true);
+        let err = w
+            .promote_run(&run(), &canonical_ns())
+            .expect_err("expected write fail in band-2");
+        assert!(matches!(err, StcortexWriterError::WriteFailed(_)));
+    }
+
+    // rationale: Anti-property — when a band-3 write fails, NOTHING is
+    // written to the outbox either (write-fail is a typed error, not a
+    // silent defer).
+    #[test]
+    fn write_failure_does_not_silently_defer_to_outbox() {
+        let w = writer(Some(0.50), true);
+        let _ = w
+            .promote_run(&run(), &canonical_ns())
+            .expect_err("write must fail");
+        // The outbox file may not exist at all (no defer happened); if it
+        // does it must be empty.
+        let contents = std::fs::read_to_string(w.outbox_path()).unwrap_or_default();
+        assert!(
+            contents.is_empty(),
+            "write-fail must surface typed error, not silently defer: {contents}"
+        );
+    }
+
+    // rationale: Boundary — DeferReason equality is structural; two
+    // LtpBelowFloor with the same density compare equal, different
+    // densities do not (PartialEq contract used in outcome matching).
+    #[test]
+    fn defer_reason_equality_is_structural() {
+        let a = DeferReason::LtpBelowFloor { density: 0.01 };
+        let b = DeferReason::LtpBelowFloor { density: 0.01 };
+        let c = DeferReason::LtpBelowFloor { density: 0.02 };
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(DeferReason::OracUnreachable, DeferReason::StcortexUnreachable);
+    }
+
+    // rationale: Cross-module surface — a namespace with leading/trailing
+    // whitespace is rejected by m9 before any probe or write fires.
+    #[test]
+    fn whitespace_namespace_rejected_before_probe() {
+        let w = writer(Some(0.50), false);
+        let err = w
+            .promote_run(&run(), "workflow_trace x")
+            .expect_err("whitespace must be rejected");
+        assert!(matches!(err, StcortexWriterError::NamespaceViolation(_)));
+        assert!(
+            w.writer.written.lock().expect("lock").is_empty(),
+            "rejected namespace must not write"
+        );
+    }
 }

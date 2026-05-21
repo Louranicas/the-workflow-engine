@@ -538,4 +538,438 @@ mod tests {
         assert!(s.contains("10000 runs recorded"));
         assert_eq!(s.lines().count(), 1);
     }
+
+    // ====================================================================
+    // Hardening pass 2 — +30 tests. Boundary / error / F9 / determinism.
+    // ====================================================================
+
+    // rationale: Boundary — histogram bucket edges. cost 0 → bucket 0,
+    // cost 999 → bucket 0, cost 1000 → bucket 1 (lo inclusive, hi
+    // exclusive: `cost >= lo && cost < hi`).
+    #[test]
+    fn histogram_bucket_lower_bound_inclusive_upper_exclusive() {
+        let runs = vec![
+            run(1, Some(0), Some("ok"), "{}"),
+            run(2, Some(999), Some("ok"), "{}"),
+            run(3, Some(1_000), Some("ok"), "{}"),
+        ];
+        let s = render_cost_histogram(&runs);
+        let l0 = s.lines().find(|l| l.contains("0 - 1k")).expect("b0");
+        let l1 = s.lines().find(|l| l.contains("1k - 5k")).expect("b1");
+        assert!(l0.contains("2 runs"), "0 and 999 land in bucket 0: {l0}");
+        assert!(l1.contains("1 runs"), "1000 lands in bucket 1: {l1}");
+    }
+
+    // rationale: Boundary — i64::MAX cost lands in the top open-ended
+    // bucket (`50_000..i64::MAX`); MAX itself is excluded by `< hi`, so
+    // the largest value that counts is `i64::MAX - 1`.
+    #[test]
+    fn histogram_top_bucket_excludes_exact_i64_max() {
+        let runs = vec![
+            run(1, Some(i64::MAX), Some("ok"), "{}"),
+            run(2, Some(i64::MAX - 1), Some("ok"), "{}"),
+        ];
+        let s = render_cost_histogram(&runs);
+        let top = s.lines().find(|l| l.contains("> 50k")).expect("top");
+        // Only MAX-1 counts; MAX is excluded (< i64::MAX is strict).
+        assert!(top.contains("1 runs"), "exact i64::MAX excluded: {top}");
+    }
+
+    // rationale: F9 zero-weight — None cost is NOT counted in any
+    // histogram bucket; bucket counts sum only over Some(cost) rows.
+    #[test]
+    fn histogram_none_cost_not_counted_in_any_bucket() {
+        let runs = vec![
+            run(1, None, Some("ok"), "{}"),
+            run(2, None, Some("fail"), "{}"),
+            run(3, Some(500), Some("ok"), "{}"),
+        ];
+        let s = render_cost_histogram(&runs);
+        // Exactly one Some-cost row -> exactly one "1 runs" bucket line.
+        let one_run_lines = s.lines().filter(|l| l.contains("1 runs")).count();
+        assert_eq!(one_run_lines, 1, "only Some(500) counts: {s}");
+    }
+
+    // rationale: Correctness — histogram header reflects total run count
+    // INCLUDING None-cost rows (it is `runs.len()`, not the costed count).
+    #[test]
+    fn histogram_header_counts_all_rows_including_none_cost() {
+        let runs = vec![
+            run(1, None, Some("ok"), "{}"),
+            run(2, None, Some("ok"), "{}"),
+            run(3, Some(100), Some("ok"), "{}"),
+        ];
+        let s = render_cost_histogram(&runs);
+        assert!(s.contains("last 3 runs"), "header counts all rows: {s}");
+    }
+
+    // rationale: Correctness — median/p95 footer over a known dataset.
+    // costs [10,20,30,40,50]; n=5; median = costs[5/2]=costs[2]=30;
+    // p95_idx = (5*95/100).min(4) = 4 → costs[4]=50.
+    #[test]
+    fn histogram_median_and_p95_for_known_dataset() {
+        let runs: Vec<WorkflowRunRow> = (1..=5)
+            .map(|i| run(i, Some(i * 10), Some("ok"), "{}"))
+            .collect();
+        let s = render_cost_histogram(&runs);
+        assert!(s.contains("median: 30 tokens"), "median wrong: {s}");
+        assert!(s.contains("p95: 50 tokens"), "p95 wrong: {s}");
+    }
+
+    // rationale: Boundary — median/p95 are 0/0 when no row carries a
+    // cost; the empty-cohort path returns the (0,0) tuple.
+    #[test]
+    fn histogram_median_p95_zero_when_no_cost_signal() {
+        let runs = vec![run(1, None, Some("ok"), "{}"), run(2, None, Some("ok"), "{}")];
+        let s = render_cost_histogram(&runs);
+        assert!(s.contains("median: 0 tokens"), "no-cost median: {s}");
+        assert!(s.contains("p95: 0 tokens"), "no-cost p95: {s}");
+    }
+
+    // rationale: Resource accounting — every histogram bar is bounded by
+    // HISTOGRAM_BAR_MAX glyphs; a single dominant bucket does not blow
+    // the bar width.
+    #[test]
+    fn histogram_bar_never_exceeds_bar_max_width() {
+        let runs: Vec<WorkflowRunRow> = (0..500_i64)
+            .map(|i| run(i, Some(100), Some("ok"), "{}"))
+            .collect();
+        let s = render_cost_histogram(&runs);
+        for line in s.lines().filter(|l| l.contains('|')) {
+            let bar = line.matches('\u{2588}').count();
+            assert!(bar <= 20, "bar exceeds HISTOGRAM_BAR_MAX: {line}");
+        }
+    }
+
+    // rationale: Correctness — the fullest bucket gets exactly the max
+    // bar width (20) when it holds the maximum count.
+    #[test]
+    fn histogram_dominant_bucket_gets_full_bar() {
+        let runs: Vec<WorkflowRunRow> = (0..40_i64)
+            .map(|i| run(i, Some(100), Some("ok"), "{}"))
+            .collect();
+        let s = render_cost_histogram(&runs);
+        let line = s.lines().find(|l| l.contains("0 - 1k")).expect("b0");
+        assert_eq!(line.matches('\u{2588}').count(), 20, "full bar: {line}");
+    }
+
+    // rationale: Determinism — histogram render is byte-identical across
+    // repeated calls on the same input.
+    #[test]
+    fn histogram_render_is_deterministic() {
+        let runs: Vec<WorkflowRunRow> = (0..30_i64)
+            .map(|i| run(i, Some(i * 1_000), Some("ok"), "{}"))
+            .collect();
+        let first = render_cost_histogram(&runs);
+        for _ in 0..50_u32 {
+            assert_eq!(render_cost_histogram(&runs), first);
+        }
+    }
+
+    // rationale: F9 zero-weight — timeline uses started_at as the
+    // fallback timestamp when ended_at is None (open run).
+    #[test]
+    fn timeline_open_run_uses_started_at_timestamp() {
+        let runs = vec![run(7, None, None, "{}")];
+        let s = render_outcome_timeline(&runs);
+        // run(7,...) sets started_at = "2026-05-17T00:07:00Z".
+        assert!(
+            s.contains("2026-05-17T00:07:00Z"),
+            "open run must show started_at: {s}"
+        );
+    }
+
+    // rationale: Correctness — a completed run shows ended_at, not
+    // started_at, as its timeline timestamp.
+    #[test]
+    fn timeline_completed_run_uses_ended_at_timestamp() {
+        let runs = vec![run(9, Some(100), Some("ok"), "{}")];
+        let s = render_outcome_timeline(&runs);
+        // run() sets ended_at = "2026-05-17T01:09:00Z" when outcome Some.
+        assert!(
+            s.contains("2026-05-17T01:09:00Z"),
+            "completed run must show ended_at: {s}"
+        );
+        assert!(
+            !s.contains("2026-05-17T00:09:00Z"),
+            "must not show started_at when ended_at present: {s}"
+        );
+    }
+
+    // rationale: Boundary — empty input timeline still emits the header
+    // and separator, zero data rows.
+    #[test]
+    fn timeline_empty_input_has_header_no_data_rows() {
+        let s = render_outcome_timeline(&[]);
+        assert!(s.contains("last 0 runs"));
+        let data_rows = s.lines().filter(|l| l.starts_with("2026-")).count();
+        assert_eq!(data_rows, 0);
+    }
+
+    // rationale: Correctness — timeline emits exactly one line per run
+    // plus two header lines.
+    #[test]
+    fn timeline_line_count_is_header_plus_one_per_run() {
+        let runs: Vec<WorkflowRunRow> = (0..13_i64)
+            .map(|i| run(i, Some(50), Some("ok"), "{}"))
+            .collect();
+        let s = render_outcome_timeline(&runs);
+        assert_eq!(s.lines().count(), 2 + 13, "2 header + 13 data: {s}");
+    }
+
+    // rationale: Correctness — cluster table sums cost per cluster
+    // independently; two clusters keep separate totals.
+    #[test]
+    fn cluster_cost_table_keeps_separate_totals_per_cluster() {
+        let ci_a =
+            r#"{"cascade":{"cluster_id":"cascade_cluster_aaaaaa","session_range":[0,1]}}"#;
+        let ci_b =
+            r#"{"cascade":{"cluster_id":"cascade_cluster_bbbbbb","session_range":[0,1]}}"#;
+        let runs = vec![
+            run(1, Some(100), Some("ok"), ci_a),
+            run(2, Some(50), Some("ok"), ci_a),
+            run(3, Some(777), Some("ok"), ci_b),
+        ];
+        let s = render_cluster_cost_table(&runs);
+        let line_a = s.lines().find(|l| l.contains("aaaaaa")).expect("a");
+        let line_b = s.lines().find(|l| l.contains("bbbbbb")).expect("b");
+        assert!(line_a.contains("150"), "cluster a sums to 150: {line_a}");
+        assert!(line_b.contains("777"), "cluster b sums to 777: {line_b}");
+    }
+
+    // rationale: F9 zero-weight — a None-cost row still increments the
+    // cluster run count but contributes 0 to total cost (additive
+    // identity, not a fabricated sentinel).
+    #[test]
+    fn cluster_cost_table_none_cost_counts_run_but_zero_cost() {
+        let ci =
+            r#"{"cascade":{"cluster_id":"cascade_cluster_ffffff","session_range":[0,1]}}"#;
+        let runs = vec![
+            run(1, None, Some("ok"), ci),
+            run(2, Some(200), Some("ok"), ci),
+        ];
+        let s = render_cluster_cost_table(&runs);
+        let line = s.lines().find(|l| l.contains("ffffff")).expect("cl");
+        // 2 runs, total cost 200 (None contributes 0).
+        assert!(line.contains('2'), "run count includes None row: {line}");
+        assert!(line.contains("200"), "total cost is 200: {line}");
+    }
+
+    // rationale: Determinism — cluster table is BTreeMap-backed; clusters
+    // render in sorted order regardless of input order.
+    #[test]
+    fn cluster_cost_table_renders_clusters_sorted() {
+        let mk = |tail: &str| {
+            format!(
+                r#"{{"cascade":{{"cluster_id":"cascade_cluster_{tail}","session_range":[0,1]}}}}"#
+            )
+        };
+        let runs = vec![
+            run(1, Some(10), Some("ok"), &mk("zzzzzz")),
+            run(2, Some(10), Some("ok"), &mk("aaaaaa")),
+            run(3, Some(10), Some("ok"), &mk("mmmmmm")),
+        ];
+        let s = render_cluster_cost_table(&runs);
+        let pa = s.find("aaaaaa").expect("a");
+        let pm = s.find("mmmmmm").expect("m");
+        let pz = s.find("zzzzzz").expect("z");
+        assert!(pa < pm && pm < pz, "clusters must render sorted: {s}");
+    }
+
+    // rationale: Adversarial input — cluster_id present but not a string
+    // (a number) falls to (ungrouped) rather than crashing.
+    #[test]
+    fn cluster_cost_table_non_string_cluster_id_falls_to_ungrouped() {
+        let ci = r#"{"cascade":{"cluster_id":12345,"session_range":[0,1]}}"#;
+        let runs = vec![run(1, Some(100), Some("ok"), ci)];
+        let s = render_cluster_cost_table(&runs);
+        assert!(s.contains("ungrouped"), "numeric cluster_id → ungrouped: {s}");
+    }
+
+    // rationale: Adversarial input — cascade discriminant present but
+    // cluster_id field missing → (ungrouped).
+    #[test]
+    fn cluster_cost_table_missing_cluster_id_field_falls_to_ungrouped() {
+        let ci = r#"{"cascade":{"session_range":[0,1]}}"#;
+        let runs = vec![run(1, Some(100), Some("ok"), ci)];
+        let s = render_cluster_cost_table(&runs);
+        assert!(s.contains("ungrouped"), "missing cluster_id → ungrouped: {s}");
+    }
+
+    // rationale: Adversarial input — a cluster_id with no underscore at
+    // all uses the whole string as its own tail (split.next_back on a
+    // single segment yields that segment).
+    #[test]
+    fn cluster_cost_table_id_without_underscore_uses_whole_string() {
+        let ci = r#"{"cascade":{"cluster_id":"plainid","session_range":[0,1]}}"#;
+        let runs = vec![run(1, Some(100), Some("ok"), ci)];
+        let s = render_cluster_cost_table(&runs);
+        // "plainid" truncated to 6 chars -> "plaini".
+        assert!(s.contains("plaini"), "no-underscore id uses whole string: {s}");
+    }
+
+    // rationale: Boundary — a cluster_id whose tail is the empty string
+    // (id ends with `_`) yields None → (ungrouped), per extract spec.
+    #[test]
+    fn cluster_cost_table_empty_tail_falls_to_ungrouped() {
+        let ci = r#"{"cascade":{"cluster_id":"cascade_cluster_","session_range":[0,1]}}"#;
+        let runs = vec![run(1, Some(100), Some("ok"), ci)];
+        let s = render_cluster_cost_table(&runs);
+        assert!(
+            s.contains("ungrouped"),
+            "empty tail after split must fall to ungrouped: {s}"
+        );
+    }
+
+    // rationale: Correctness — cluster table without any ungrouped rows
+    // omits the "(ungrouped)" line entirely (count > 0 guard).
+    #[test]
+    fn cluster_cost_table_omits_ungrouped_line_when_all_grouped() {
+        let ci =
+            r#"{"cascade":{"cluster_id":"cascade_cluster_grpd01","session_range":[0,1]}}"#;
+        let runs = vec![run(1, Some(100), Some("ok"), ci)];
+        let s = render_cluster_cost_table(&runs);
+        assert!(!s.contains("(ungrouped)"), "no ungrouped line expected: {s}");
+    }
+
+    // rationale: Correctness — summary line counts the "unknown" outcome
+    // distinctly from "open" (None outcome).
+    #[test]
+    fn summary_line_distinguishes_unknown_from_open() {
+        let runs = vec![
+            run(1, Some(10), Some("unknown"), "{}"),
+            run(2, Some(10), None, "{}"),
+        ];
+        let s = render_summary_line(&runs);
+        assert!(s.contains("unknown=1"), "explicit unknown counted: {s}");
+        assert!(s.contains("open=1"), "None outcome counted as open: {s}");
+    }
+
+    // rationale: Adversarial input — an unrecognised outcome string
+    // (future m7 variant) collapses to the `open` bucket via the `_`
+    // match arm; it is NOT counted as ok/fail/abort/unknown.
+    #[test]
+    fn summary_line_unrecognised_outcome_collapses_to_open() {
+        let runs = vec![run(1, Some(10), Some("future_variant_q"), "{}")];
+        let s = render_summary_line(&runs);
+        assert!(s.contains("open=1"), "unknown variant → open: {s}");
+        assert!(s.contains("ok=0 fail=0 abort=0 unknown=0"), "{s}");
+    }
+
+    // rationale: Boundary — empty summary line still has the canonical
+    // shape with all-zero counts.
+    #[test]
+    fn summary_line_empty_input_all_zero_counts() {
+        let s = render_summary_line(&[]);
+        assert_eq!(
+            s,
+            "0 runs recorded: ok=0 fail=0 abort=0 unknown=0 open=0 median_cost=0"
+        );
+    }
+
+    // rationale: Correctness — summary counts sum to total run count
+    // (partition invariant: every run lands in exactly one bucket).
+    #[test]
+    fn summary_line_bucket_counts_partition_total() {
+        let runs = vec![
+            run(1, Some(1), Some("ok"), "{}"),
+            run(2, Some(1), Some("fail"), "{}"),
+            run(3, Some(1), Some("abort"), "{}"),
+            run(4, Some(1), Some("unknown"), "{}"),
+            run(5, Some(1), None, "{}"),
+            run(6, Some(1), Some("ok"), "{}"),
+        ];
+        let s = render_summary_line(&runs);
+        // 6 runs: ok=2 fail=1 abort=1 unknown=1 open=1 → sums to 6.
+        assert!(s.contains("6 runs recorded"));
+        assert!(s.contains("ok=2"));
+        assert!(s.contains("fail=1"));
+        assert!(s.contains("abort=1"));
+        assert!(s.contains("unknown=1"));
+        assert!(s.contains("open=1"));
+    }
+
+    // rationale: Correctness — render_machine Table format delegates to
+    // render_summary_line (single source of truth).
+    #[test]
+    fn render_machine_table_format_equals_summary_line() {
+        let runs = vec![
+            run(1, Some(100), Some("ok"), "{}"),
+            run(2, Some(200), Some("fail"), "{}"),
+        ];
+        assert_eq!(
+            render_machine(&runs, OutputFormat::Table),
+            render_summary_line(&runs)
+        );
+    }
+
+    // rationale: Boundary — render_machine Json on empty input emits a
+    // valid empty JSON array, parseable back to a zero-length vec.
+    #[test]
+    fn render_machine_json_empty_input_is_empty_array() {
+        let s = render_machine(&[], OutputFormat::Json);
+        let parsed: Vec<WorkflowRunRow> = serde_json::from_str(&s).expect("parse");
+        assert!(parsed.is_empty());
+    }
+
+    // rationale: Boundary — render_machine NdJson on empty input is the
+    // empty string (zero lines), not a phantom blank line.
+    #[test]
+    fn render_machine_ndjson_empty_input_is_empty_string() {
+        let s = render_machine(&[], OutputFormat::NdJson);
+        assert!(s.is_empty(), "empty NdJson must be empty string, got {s:?}");
+        assert_eq!(s.lines().count(), 0);
+    }
+
+    // rationale: Correctness — every NdJson line is independently
+    // parseable JSON (newline-delimited, not a single document).
+    #[test]
+    fn render_machine_ndjson_each_line_is_standalone_json() {
+        let runs: Vec<WorkflowRunRow> = (0..5_i64)
+            .map(|i| run(i, Some(i * 10), Some("ok"), "{}"))
+            .collect();
+        let s = render_machine(&runs, OutputFormat::NdJson);
+        for line in s.lines() {
+            let _: WorkflowRunRow = serde_json::from_str(line).expect("line parse");
+        }
+    }
+
+    // rationale: Contract regression — Json output is pretty-printed
+    // (multi-line) while NdJson is compact (one line per row).
+    #[test]
+    fn render_machine_json_is_pretty_ndjson_is_compact() {
+        let runs = vec![run(1, Some(100), Some("ok"), "{}")];
+        let json = render_machine(&runs, OutputFormat::Json);
+        let ndjson = render_machine(&runs, OutputFormat::NdJson);
+        assert!(json.lines().count() > 1, "Json must be pretty: {json}");
+        assert_eq!(ndjson.lines().count(), 1, "NdJson compact: {ndjson}");
+    }
+
+    // rationale: Contract — OutputFormat enum value equality is stable
+    // (used as a config selector; must satisfy Eq/Hash).
+    #[test]
+    fn output_format_variants_are_distinct_and_eq() {
+        assert_eq!(OutputFormat::Json, OutputFormat::Json);
+        assert_ne!(OutputFormat::Json, OutputFormat::NdJson);
+        assert_ne!(OutputFormat::Table, OutputFormat::NdJson);
+        let mut set = std::collections::HashSet::new();
+        set.insert(OutputFormat::Table);
+        set.insert(OutputFormat::Json);
+        set.insert(OutputFormat::NdJson);
+        assert_eq!(set.len(), 3, "three distinct format variants");
+    }
+
+    // rationale: F9 zero-weight — Json round-trip preserves the
+    // None-vs-Some distinction on cost_tokens and outcome (None must not
+    // collapse to a numeric or string sentinel through serde).
+    #[test]
+    fn render_machine_json_preserves_none_fields() {
+        let runs = vec![run(1, None, None, "{}")];
+        let s = render_machine(&runs, OutputFormat::Json);
+        let parsed: Vec<WorkflowRunRow> = serde_json::from_str(&s).expect("parse");
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].cost_tokens.is_none(), "None cost preserved");
+        assert!(parsed[0].outcome.is_none(), "None outcome preserved");
+        assert!(parsed[0].ended_at.is_none(), "None ended_at preserved");
+    }
 }

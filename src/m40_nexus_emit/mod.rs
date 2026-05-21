@@ -570,4 +570,863 @@ mod tests {
         assert!(s.starts_with("server rejected (2xx body-shape):"));
         assert!(s.contains("queue_full"));
     }
+
+    // ====================================================================
+    // God-tier hardening pass — m40 nexus emit.
+    // Error variants, boundary conditions, AP-V7-13 body-shape edge cases.
+    // ====================================================================
+
+    // rationale: Adversarial input — a NexusEvent with an unknown extra
+    // field must still deserialize (serde is non-strict by default). This
+    // pins the current lenient behaviour as deliberate, not accidental.
+    #[test]
+    fn nexus_event_tolerates_unknown_extra_field() {
+        // rationale: Anti-property (current-behaviour regression anchor)
+        let s = r#"{"source":"a","kind":"b","payload":null,"ts_ms":1,"extra":99}"#;
+        let r: Result<NexusEvent, _> = serde_json::from_str(s);
+        assert!(r.is_ok(), "extra field should not break deserialization");
+        assert_eq!(r.expect("ok").ts_ms, 1);
+    }
+
+    // rationale: Adversarial input — missing the `source` field must error,
+    // not zero-fill to an empty string (the F-POVM-07 silent-fill class).
+    #[test]
+    fn nexus_event_rejects_missing_source_field() {
+        // rationale: Adversarial input (silent-fill guard)
+        let s = r#"{"kind":"b","payload":null,"ts_ms":1}"#;
+        let r: Result<NexusEvent, _> = serde_json::from_str(s);
+        assert!(r.is_err(), "missing source must NOT zero-fill silently");
+    }
+
+    // rationale: Adversarial input — missing the `kind` field must error.
+    #[test]
+    fn nexus_event_rejects_missing_kind_field() {
+        // rationale: Adversarial input (silent-fill guard)
+        let s = r#"{"source":"a","payload":null,"ts_ms":1}"#;
+        let r: Result<NexusEvent, _> = serde_json::from_str(s);
+        assert!(r.is_err(), "missing kind must NOT zero-fill silently");
+    }
+
+    // rationale: Adversarial input — missing the `payload` field must error;
+    // payload is required even though its value type is permissive.
+    #[test]
+    fn nexus_event_rejects_missing_payload_field() {
+        // rationale: Adversarial input (silent-fill guard)
+        let s = r#"{"source":"a","kind":"b","ts_ms":1}"#;
+        let r: Result<NexusEvent, _> = serde_json::from_str(s);
+        assert!(r.is_err(), "missing payload must NOT zero-fill silently");
+    }
+
+    // rationale: Adversarial input — `ts_ms` typed as a string must fail
+    // (i64 field; string is a type mismatch).
+    #[test]
+    fn nexus_event_rejects_string_typed_ts_ms() {
+        // rationale: Adversarial input (type-mismatch)
+        let s = r#"{"source":"a","kind":"b","payload":null,"ts_ms":"123"}"#;
+        let r: Result<NexusEvent, _> = serde_json::from_str(s);
+        assert!(r.is_err(), "string ts_ms must not coerce to i64");
+    }
+
+    // rationale: Boundary — ts_ms must accept the full i64 range. Min and
+    // max values round-trip without overflow or precision loss.
+    #[test]
+    fn ts_ms_round_trips_at_i64_extremes() {
+        // rationale: Boundary (i64 min/max)
+        for &ts in &[i64::MIN, i64::MAX, 0_i64, -1_i64] {
+            let e = build_event("src", "kind", serde_json::json!(null), ts);
+            let s = serde_json::to_string(&e).expect("ser");
+            let back: NexusEvent = serde_json::from_str(&s).expect("de");
+            assert_eq!(back.ts_ms, ts, "ts_ms drift at {ts}");
+        }
+    }
+
+    // rationale: Boundary — a negative ts_ms is structurally legal (no
+    // validator); pin the current permissive behaviour.
+    #[test]
+    fn build_event_accepts_negative_ts_ms() {
+        // rationale: Boundary (no ts validator)
+        let e = build_event("src", "kind", serde_json::json!(null), -42);
+        assert_eq!(e.ts_ms, -42);
+    }
+
+    // rationale: Determinism — build_event must set source / kind / ts_ms
+    // exactly from its arguments (no normalization, no defaulting).
+    #[test]
+    fn build_event_sets_all_fields_from_arguments() {
+        // rationale: Determinism (constructor identity)
+        let e = build_event(
+            "workflow-trace",
+            "workflow.completed",
+            serde_json::json!({"k": "v"}),
+            999_999,
+        );
+        assert_eq!(e.source, "workflow-trace");
+        assert_eq!(e.kind, "workflow.completed");
+        assert_eq!(e.ts_ms, 999_999);
+        assert_eq!(e.payload, serde_json::json!({"k": "v"}));
+    }
+
+    // rationale: Boundary — an empty `source` string is accepted at the type
+    // layer (mirrors empty_kind_permitted_at_type_layer for symmetry).
+    #[test]
+    fn empty_source_permitted_at_type_layer() {
+        // rationale: Boundary (no source validator)
+        let e = build_event("", "kind", serde_json::json!(null), 0);
+        let s = serde_json::to_string(&e).expect("ser");
+        assert!(s.contains("\"source\":\"\""));
+    }
+
+    // rationale: Determinism — a payload that is a JSON array (not an
+    // object) must survive build_event + round-trip verbatim. The payload
+    // field is serde_json::Value, so any JSON value is legal.
+    #[test]
+    fn payload_can_be_array_value() {
+        // rationale: Determinism (payload is arbitrary JSON)
+        let p = serde_json::json!([1, "two", {"three": 3}, null]);
+        let e = build_event("src", "kind", p.clone(), 0);
+        let back: NexusEvent =
+            serde_json::from_str(&serde_json::to_string(&e).expect("ser"))
+                .expect("de");
+        assert_eq!(back.payload, p);
+    }
+
+    // rationale: Determinism — a scalar payload (bare number / string /
+    // bool) is also legal serde_json::Value and must round-trip.
+    #[test]
+    fn payload_can_be_scalar_value() {
+        // rationale: Determinism (payload is arbitrary JSON)
+        for p in [
+            serde_json::json!(42),
+            serde_json::json!("scalar"),
+            serde_json::json!(true),
+            serde_json::json!(std::f64::consts::PI),
+        ] {
+            let e = build_event("src", "kind", p.clone(), 0);
+            let back: NexusEvent =
+                serde_json::from_str(&serde_json::to_string(&e).expect("ser"))
+                    .expect("de");
+            assert_eq!(back.payload, p);
+        }
+    }
+
+    // rationale: Adversarial input — a unicode-heavy source/kind/payload
+    // must round-trip byte-for-byte (no escaping corruption).
+    #[test]
+    fn unicode_fields_round_trip() {
+        // rationale: Adversarial input (unicode integrity)
+        let e = build_event(
+            "工作流-trace ☤",
+            "workflow.dispatched·完了",
+            serde_json::json!({"note": "émigré — naïve \u{1F600}"}),
+            1,
+        );
+        let back: NexusEvent =
+            serde_json::from_str(&serde_json::to_string(&e).expect("ser"))
+                .expect("de");
+        assert_eq!(back, e);
+    }
+
+    // rationale: Anti-property — NexusEvent Clone must be a deep copy; the
+    // payload of a clone is independent of the original (Value is owned).
+    #[test]
+    fn nexus_event_clone_is_independent() {
+        // rationale: Anti-property (deep clone)
+        let original = build_event("src", "kind", serde_json::json!({"n": 1}), 7);
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+        // Mutating one does not affect the other.
+        let mut mutated = cloned;
+        mutated.ts_ms = 8;
+        assert_ne!(original.ts_ms, mutated.ts_ms);
+    }
+
+    // rationale: Anti-property — two events differing only in ts_ms must NOT
+    // compare equal (Eq must consider every field).
+    #[test]
+    fn nexus_events_differing_in_ts_ms_are_unequal() {
+        // rationale: Anti-property (full-field equality)
+        let a = build_event("s", "k", serde_json::json!(null), 1);
+        let b = build_event("s", "k", serde_json::json!(null), 2);
+        assert_ne!(a, b);
+    }
+
+    // rationale: Anti-property — two events differing only in payload must
+    // NOT compare equal.
+    #[test]
+    fn nexus_events_differing_in_payload_are_unequal() {
+        // rationale: Anti-property (full-field equality)
+        let a = build_event("s", "k", serde_json::json!({"x": 1}), 0);
+        let b = build_event("s", "k", serde_json::json!({"x": 2}), 0);
+        assert_ne!(a, b);
+    }
+
+    // rationale: Contract regression — the three NexusEmitError variants
+    // produce distinct Display prefixes so log scrapers can classify them.
+    #[test]
+    fn all_error_variants_have_distinct_display_prefixes() {
+        // rationale: Contract regression (operator-facing classification)
+        let transport = NexusEmitError::Transport("e".into()).to_string();
+        let non_success = NexusEmitError::NonSuccess(500).to_string();
+        let rejected = NexusEmitError::ServerRejected {
+            body: "{}".into(),
+        }
+        .to_string();
+        assert!(transport.starts_with("transport:"));
+        assert!(non_success.starts_with("non-2xx status:"));
+        assert!(rejected.starts_with("server rejected"));
+        // Pairwise distinct.
+        assert_ne!(transport, non_success);
+        assert_ne!(non_success, rejected);
+        assert_ne!(transport, rejected);
+    }
+
+    // rationale: Boundary — NonSuccess must carry the exact u16 status; pin
+    // representative codes at the edges of the non-2xx ranges.
+    #[test]
+    fn non_success_carries_exact_status_for_edge_codes() {
+        // rationale: Boundary (status-code fidelity)
+        for code in [100_u16, 301, 400, 404, 418, 500, 503, 599] {
+            let e = NexusEmitError::NonSuccess(code);
+            assert!(e.to_string().contains(&code.to_string()));
+        }
+    }
+
+    // rationale: Boundary — the build_event source argument accepts both
+    // &str and String (impl Into<String>); both must produce equal events.
+    #[test]
+    fn build_event_accepts_str_and_string_args_equivalently() {
+        // rationale: Boundary (generic Into<String> surface)
+        let from_str = build_event("src", "kind", serde_json::json!(null), 0);
+        let from_string = build_event(
+            String::from("src"),
+            String::from("kind"),
+            serde_json::json!(null),
+            0,
+        );
+        assert_eq!(from_str, from_string);
+    }
+
+    // rationale: Adversarial input (AP-V7-13) — a 200 OK whose body has the
+    // `error` field nested INSIDE another object must NOT trigger
+    // ServerRejected; the check only inspects the TOP-LEVEL `error` key.
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_ignores_nested_error_field() {
+        // rationale: Adversarial input (top-level-only error inspection)
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/nexus/push"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"data":{"error":"inner"},"ok":true}"#)
+                    .insert_header("content-type", "application/json"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v3/nexus/push", server.uri());
+        let r = tokio::task::spawn_blocking(move || {
+            let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
+            let e =
+                build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            c.push(&e)
+        })
+        .await
+        .expect("join");
+        assert!(r.is_ok(), "nested error field must not reject, got {r:?}");
+    }
+
+    // rationale: Adversarial input — a 2xx response with a non-JSON body
+    // (garbled text) is treated as success per the documented contract
+    // ("reject only on a visibly-rejecting JSON body").
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_treats_non_json_body_as_success() {
+        // rationale: Adversarial input (non-JSON body contract)
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/nexus/push"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("OK <<not json>>")
+                    .insert_header("content-type", "text/plain"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v3/nexus/push", server.uri());
+        let r = tokio::task::spawn_blocking(move || {
+            let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
+            let e =
+                build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            c.push(&e)
+        })
+        .await
+        .expect("join");
+        assert!(r.is_ok(), "non-JSON body must be treated as success, got {r:?}");
+    }
+
+    // rationale: Adversarial input — a 200 OK with an empty JSON object
+    // {} carries no `error` key and must be accepted.
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_succeeds_on_200_empty_json_object() {
+        // rationale: Adversarial input (no error key = success)
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/nexus/push"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("{}")
+                    .insert_header("content-type", "application/json"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v3/nexus/push", server.uri());
+        let r = tokio::task::spawn_blocking(move || {
+            let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
+            let e =
+                build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            c.push(&e)
+        })
+        .await
+        .expect("join");
+        assert!(r.is_ok(), "empty JSON object must be success, got {r:?}");
+    }
+
+    // rationale: Contract regression — a non-2xx status (500) must surface
+    // NexusEmitError::NonSuccess carrying the exact code, BEFORE any body
+    // inspection. An error body on a 500 is irrelevant — status wins.
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_returns_non_success_on_500() {
+        // rationale: Contract regression (status check precedes body check)
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/nexus/push"))
+            .respond_with(
+                ResponseTemplate::new(500)
+                    .set_body_string(r#"{"ok":true}"#)
+                    .insert_header("content-type", "application/json"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v3/nexus/push", server.uri());
+        let r = tokio::task::spawn_blocking(move || {
+            let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
+            let e =
+                build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            c.push(&e)
+        })
+        .await
+        .expect("join");
+        match r {
+            Err(NexusEmitError::NonSuccess(code)) => assert_eq!(code, 500),
+            other => panic!("expected NonSuccess(500), got {other:?}"),
+        }
+    }
+
+    // rationale: Boundary — a 404 (route not found, e.g. wrong path) must
+    // also surface NonSuccess(404), proving non-2xx codes other than 500
+    // are handled uniformly.
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_returns_non_success_on_404() {
+        // rationale: Boundary (non-2xx uniformity)
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/nexus/push"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v3/nexus/push", server.uri());
+        let r = tokio::task::spawn_blocking(move || {
+            let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
+            let e =
+                build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            c.push(&e)
+        })
+        .await
+        .expect("join");
+        assert!(matches!(r, Err(NexusEmitError::NonSuccess(404))));
+    }
+
+    // rationale: Adversarial input — the AP-V7-13 check must reject when the
+    // top-level `error` is a non-string truthy value (e.g. a JSON object or
+    // number). Any non-null `error` is a rejection per the contract.
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_rejects_when_error_field_is_object() {
+        // rationale: Adversarial input (non-null error of any JSON type)
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/nexus/push"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"error":{"code":7,"msg":"busy"}}"#)
+                    .insert_header("content-type", "application/json"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v3/nexus/push", server.uri());
+        let r = tokio::task::spawn_blocking(move || {
+            let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
+            let e =
+                build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            c.push(&e)
+        })
+        .await
+        .expect("join");
+        match r {
+            Err(NexusEmitError::ServerRejected { body }) => {
+                assert!(body.contains("busy"), "rejection carries the body");
+            }
+            other => panic!("expected ServerRejected, got {other:?}"),
+        }
+    }
+
+    // rationale: Transport — a push to a connection-refused address (no
+    // server bound) must surface NexusEmitError::Transport, not a panic.
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_returns_transport_error_on_connection_refused() {
+        // rationale: Transport (unbound port = connection refused)
+        let r = tokio::task::spawn_blocking(|| {
+            // 127.0.0.1:1 is reserved/privileged — reliably refuses.
+            let c = super::HttpNexusClient::new(
+                "http://127.0.0.1:1/v3/nexus/push",
+                std::time::Duration::from_secs(2),
+            );
+            let e =
+                build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            c.push(&e)
+        })
+        .await
+        .expect("join");
+        assert!(
+            matches!(r, Err(NexusEmitError::Transport(_))),
+            "connection refused must be a Transport error, got {r:?}"
+        );
+    }
+
+    // rationale: Transport — a malformed URL (no scheme/host) must surface a
+    // typed Transport error rather than panicking inside reqwest.
+    #[test]
+    fn push_returns_transport_error_on_malformed_url() {
+        // rationale: Transport (URL parse failure)
+        let c = super::HttpNexusClient::new(
+            "not-a-valid-url",
+            std::time::Duration::from_secs(1),
+        );
+        let e = build_event("src", "k", serde_json::json!(null), 0);
+        let r = c.push(&e);
+        assert!(
+            matches!(r, Err(NexusEmitError::Transport(_))),
+            "malformed URL must yield a Transport error, got {r:?}"
+        );
+    }
+
+    // rationale: Cross-module — the push() body of HttpNexusClient sends the
+    // event as JSON to the configured path. A wiremock body matcher
+    // confirms the wire payload carries the NexusEvent shape.
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_sends_event_json_to_configured_path() {
+        // rationale: Cross-module (wire payload contract)
+        use wiremock::matchers::{body_string_contains, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/nexus/push"))
+            .and(body_string_contains("workflow.dispatched"))
+            .and(body_string_contains("workflow-trace"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v3/nexus/push", server.uri());
+        let r = tokio::task::spawn_blocking(move || {
+            let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
+            let e = build_event(
+                "workflow-trace",
+                "workflow.dispatched",
+                serde_json::json!({"workflow_id": 7}),
+                1_700_000_000_000,
+            );
+            c.push(&e)
+        })
+        .await
+        .expect("join");
+        assert!(r.is_ok(), "push to a 200 server must succeed, got {r:?}");
+        // wiremock verifies the .expect(1) on drop.
+    }
+
+    // rationale: Boundary — a 201 Created (a 2xx that is not 200) is a
+    // success status; push() must accept it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_succeeds_on_201_created() {
+        // rationale: Boundary (2xx range, not just 200)
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/nexus/push"))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v3/nexus/push", server.uri());
+        let r = tokio::task::spawn_blocking(move || {
+            let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
+            let e =
+                build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            c.push(&e)
+        })
+        .await
+        .expect("join");
+        assert!(r.is_ok(), "201 Created is a 2xx success, got {r:?}");
+    }
+
+    // rationale: Anti-property — a RecordingClient that returns Ok must not
+    // mutate the event it is handed; the recorded copy equals the input.
+    #[test]
+    fn recording_client_preserves_event_verbatim() {
+        // rationale: Anti-property (push does not mutate input)
+        let c = RecordingClient {
+            events: Mutex::new(Vec::new()),
+        };
+        let e = build_event(
+            "workflow-trace",
+            "workflow.completed",
+            serde_json::json!({"nested": [1, 2]}),
+            1_700_000_123_456,
+        );
+        c.push(&e).expect("push");
+        let recorded = c.events.lock().expect("lock");
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0], e, "push must not alter the event");
+    }
+
+    // ====================================================================
+    // W1 floor-closure pass — m40 nexus emit (+10 meaningful tests).
+    // Categories: Adversarial body-shape · Boundary · Transport · Cross-module.
+    // ====================================================================
+
+    // rationale: Adversarial input — a 200 OK whose body is a JSON array
+    // (valid JSON, not an object) has no top-level `error` key; `Value::get`
+    // on a non-object returns None, so push() must treat it as success.
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_succeeds_on_200_json_array_body() {
+        // rationale: Adversarial input (non-object JSON body)
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/nexus/push"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("[1,2,3]")
+                    .insert_header("content-type", "application/json"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v3/nexus/push", server.uri());
+        let r = tokio::task::spawn_blocking(move || {
+            let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
+            let e = build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            c.push(&e)
+        })
+        .await
+        .expect("join");
+        assert!(r.is_ok(), "JSON-array body has no error key, got {r:?}");
+    }
+
+    // rationale: Adversarial input — a 200 OK whose body is a bare JSON
+    // string is a scalar Value with no `error` key. Even though the text
+    // contains a problem-sounding word, the body-shape check must not fire.
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_succeeds_on_200_bare_json_string_body() {
+        // rationale: Adversarial input (scalar JSON string body)
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/nexus/push"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("\"queue_full\"")
+                    .insert_header("content-type", "application/json"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v3/nexus/push", server.uri());
+        let r = tokio::task::spawn_blocking(move || {
+            let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
+            let e = build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            c.push(&e)
+        })
+        .await
+        .expect("join");
+        assert!(r.is_ok(), "bare JSON string is not a rejection object, got {r:?}");
+    }
+
+    // rationale: Adversarial input — a 200 OK with a bare JSON `null` body
+    // deserializes to Value::Null; `.get("error")` is None, so it succeeds.
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_succeeds_on_200_json_null_body() {
+        // rationale: Adversarial input (JSON null body)
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/nexus/push"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("null")
+                    .insert_header("content-type", "application/json"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v3/nexus/push", server.uri());
+        let r = tokio::task::spawn_blocking(move || {
+            let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
+            let e = build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            c.push(&e)
+        })
+        .await
+        .expect("join");
+        assert!(r.is_ok(), "JSON null body carries no error key, got {r:?}");
+    }
+
+    // rationale: Adversarial input — the body-shape check rejects on ANY
+    // non-null `error` value. A boolean `false` is non-null, so `{"error":
+    // false}` is a rejection — pins that the check is null-ness, not truthy.
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_rejects_when_error_field_is_false() {
+        // rationale: Adversarial input (non-null `false` still rejects)
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/nexus/push"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"error":false}"#)
+                    .insert_header("content-type", "application/json"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v3/nexus/push", server.uri());
+        let r = tokio::task::spawn_blocking(move || {
+            let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
+            let e = build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            c.push(&e)
+        })
+        .await
+        .expect("join");
+        assert!(
+            matches!(r, Err(NexusEmitError::ServerRejected { .. })),
+            "a non-null `false` error field is still a rejection, got {r:?}"
+        );
+    }
+
+    // rationale: Adversarial input — an empty-string `error` value is
+    // non-null and therefore a rejection per the body-shape contract.
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_rejects_when_error_field_is_empty_string() {
+        // rationale: Adversarial input (non-null empty string rejects)
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/nexus/push"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"error":""}"#)
+                    .insert_header("content-type", "application/json"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v3/nexus/push", server.uri());
+        let r = tokio::task::spawn_blocking(move || {
+            let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
+            let e = build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            c.push(&e)
+        })
+        .await
+        .expect("join");
+        assert!(
+            matches!(r, Err(NexusEmitError::ServerRejected { .. })),
+            "a non-null empty-string error field is still a rejection, got {r:?}"
+        );
+    }
+
+    // rationale: Adversarial input — a numeric `0` error value is non-null
+    // and therefore a rejection (the check is null-ness, not falsiness).
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_rejects_when_error_field_is_zero() {
+        // rationale: Adversarial input (non-null zero rejects)
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/nexus/push"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"error":0}"#)
+                    .insert_header("content-type", "application/json"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v3/nexus/push", server.uri());
+        let r = tokio::task::spawn_blocking(move || {
+            let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
+            let e = build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            c.push(&e)
+        })
+        .await
+        .expect("join");
+        assert!(
+            matches!(r, Err(NexusEmitError::ServerRejected { .. })),
+            "a non-null `0` error field is still a rejection, got {r:?}"
+        );
+    }
+
+    // rationale: Transport — a server slower than the client timeout must
+    // surface NexusEmitError::Transport, never hang or panic.
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_times_out_to_transport_error_on_slow_server() {
+        // rationale: Transport (client timeout fires before a slow response)
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/nexus/push"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(std::time::Duration::from_secs(3)),
+            )
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v3/nexus/push", server.uri());
+        let r = tokio::task::spawn_blocking(move || {
+            let c = super::HttpNexusClient::new(url, std::time::Duration::from_millis(500));
+            let e = build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            c.push(&e)
+        })
+        .await
+        .expect("join");
+        assert!(
+            matches!(r, Err(NexusEmitError::Transport(_))),
+            "a response slower than the timeout must be a Transport error, got {r:?}"
+        );
+    }
+
+    // rationale: Cross-module — push() must send the event with a JSON
+    // content-type so synthex-v2's handler parses it. A header matcher
+    // confirms the request carries `content-type: application/json`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_sends_application_json_content_type() {
+        // rationale: Cross-module (request content-type contract)
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/nexus/push"))
+            .and(header("content-type", "application/json"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v3/nexus/push", server.uri());
+        let r = tokio::task::spawn_blocking(move || {
+            let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
+            let e = build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            c.push(&e)
+        })
+        .await
+        .expect("join");
+        assert!(
+            r.is_ok(),
+            "push must send content-type: application/json to match, got {r:?}"
+        );
+    }
+
+    // rationale: Cross-module — NexusClient must be object-safe so callers
+    // can hold a `Box<dyn NexusClient>` (e.g. for test/prod swapping).
+    #[test]
+    fn nexus_client_usable_as_boxed_trait_object() {
+        // rationale: Cross-module (trait object-safety + dyn dispatch)
+        let client: Box<dyn NexusClient> = Box::new(RecordingClient {
+            events: Mutex::new(Vec::new()),
+        });
+        let e = build_event("src", "kind", serde_json::json!(null), 1);
+        client.push(&e).expect("boxed dyn push must succeed");
+        client.push(&e).expect("second boxed dyn push must succeed");
+    }
+
+    // rationale: Contract — a failing NexusClient impl surfaces its typed
+    // error through the trait's Result; the trait must not swallow or panic.
+    #[test]
+    fn nexus_client_trait_surfaces_configured_error() {
+        // rationale: Contract (trait-level error propagation)
+        struct FailingClient;
+        impl NexusClient for FailingClient {
+            fn push(&self, _event: &NexusEvent) -> Result<(), NexusEmitError> {
+                Err(NexusEmitError::NonSuccess(503))
+            }
+        }
+        let client = FailingClient;
+        let e = build_event("src", "kind", serde_json::json!(null), 1);
+        match client.push(&e) {
+            Err(NexusEmitError::NonSuccess(code)) => assert_eq!(code, 503),
+            other => panic!("expected NonSuccess(503) through the trait, got {other:?}"),
+        }
+    }
 }

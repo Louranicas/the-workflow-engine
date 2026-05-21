@@ -209,6 +209,52 @@ mod tests {
         path
     }
 
+    // S1002388 hardening: a SubstrateWriter mock whose recorded-memories
+    // Vec is shared via Arc so a test can inspect what landed AFTER the
+    // writer is moved into the StcortexWriter. The production
+    // StcortexWriter keeps its inner writer field private, so m42 tests
+    // cannot reach it through the writer; the shared handle is the seam.
+    use std::sync::Arc as StdArc;
+
+    #[derive(Clone)]
+    struct SharedRecordingWriter {
+        next_id: StdArc<StdMutex<i64>>,
+        written: StdArc<StdMutex<Vec<CorrelationMemory>>>,
+    }
+    impl SharedRecordingWriter {
+        fn new() -> Self {
+            Self {
+                next_id: StdArc::new(StdMutex::new(0)),
+                written: StdArc::new(StdMutex::new(Vec::new())),
+            }
+        }
+    }
+    impl SubstrateWriter for SharedRecordingWriter {
+        fn write_memory(
+            &self,
+            memory: &CorrelationMemory,
+        ) -> Result<i64, crate::m13_stcortex_writer::StcortexWriterError> {
+            let mut id = self.next_id.lock().expect("lock");
+            *id += 1;
+            self.written.lock().expect("lock").push(memory.clone());
+            Ok(*id)
+        }
+    }
+
+    /// Build a writer at the given density plus a handle that observes
+    /// every `CorrelationMemory` the substrate sink records.
+    fn shared_writer(
+        density: Option<f64>,
+    ) -> (
+        StcortexWriter<StaticDensity, SharedRecordingWriter>,
+        StdArc<StdMutex<Vec<CorrelationMemory>>>,
+    ) {
+        let mock = SharedRecordingWriter::new();
+        let handle = StdArc::clone(&mock.written);
+        let writer = StcortexWriter::new(StaticDensity(density), mock, temp_outbox());
+        (writer, handle)
+    }
+
     fn run_row(outcome: Option<&str>) -> WorkflowRunRow {
         WorkflowRunRow {
             id: 42,
@@ -560,5 +606,707 @@ mod tests {
             let s = outcome_summary(v);
             assert!(!s.is_empty(), "summary must not be empty for {v:?}");
         }
+    }
+
+    // ====================================================================
+    // S1002388 hardening pass — m42 stcortex emit (+35 tests → ≥50).
+    // emit_feedback 3-band routing · signal-arg no-op invariant ·
+    // outbox/emit policy · Phase-A self-check semantics · outcome_summary
+    // exact format · HebbianSignal serde adversarial · m9 boundary.
+    // ====================================================================
+
+    // -- emit_feedback: m13 3-band gate routing through m42 --------------
+
+    // rationale: Cross-module surface — emit_feedback at a pressure-band
+    // density (0.05, in [0.015, 0.10)) routes through m13 and returns
+    // WrittenUnderPressure carrying the observed density.
+    #[test]
+    fn emit_feedback_under_pressure_band_returns_written_under_pressure() {
+        // rationale: Cross-module surface (m42 -> m13 3-band gate band-2)
+        let (writer, _recorded) = shared_writer(Some(0.05));
+        let workflow = accepted_workflow_fixture();
+        let run = run_row(Some("ok"));
+        let outcome = super::emit_feedback(
+            &writer,
+            &workflow,
+            &run,
+            "workflow_trace_outcomes",
+            HebbianSignal::Reinforce,
+        )
+        .expect("emit");
+        match outcome {
+            PromoteOutcome::WrittenUnderPressure { ltp_density, .. } => {
+                assert!((ltp_density - 0.05).abs() < 1e-12);
+            }
+            other => panic!("expected WrittenUnderPressure, got {other:?}"),
+        }
+    }
+
+    // rationale: Cross-module surface — emit_feedback at a below-floor
+    // density (0.001 < 0.015) defers to the m13 JSONL outbox with the
+    // LtpBelowFloor reason; the call does NOT raise an error (defer is a
+    // success outcome per the outbox-first durability policy).
+    #[test]
+    fn emit_feedback_below_floor_defers_to_outbox_without_error() {
+        // rationale: Cross-module surface (m42 outbox-first defer policy)
+        let (writer, _recorded) = shared_writer(Some(0.001));
+        let workflow = accepted_workflow_fixture();
+        let run = run_row(Some("fail"));
+        let outcome = super::emit_feedback(
+            &writer,
+            &workflow,
+            &run,
+            "workflow_trace_outcomes",
+            HebbianSignal::Depress,
+        )
+        .expect("below-floor defer must not error");
+        match outcome {
+            PromoteOutcome::Deferred {
+                reason: DeferReason::LtpBelowFloor { density },
+            } => assert!((density - 0.001).abs() < 1e-12),
+            other => panic!("expected Deferred LtpBelowFloor, got {other:?}"),
+        }
+    }
+
+    // rationale: Boundary — emit_feedback at exactly the Phase-1 floor
+    // (0.015) does NOT defer (m13 uses a strict `<` check); it writes
+    // under pressure. Exact-threshold regression anchor through m42.
+    #[test]
+    fn emit_feedback_at_exact_floor_writes_under_pressure() {
+        // rationale: Boundary (3-band exact threshold via m42)
+        let (writer, _recorded) =
+            shared_writer(Some(crate::m13_stcortex_writer::LTP_PHASE_1_FLOOR));
+        let workflow = accepted_workflow_fixture();
+        let run = run_row(Some("ok"));
+        let outcome = super::emit_feedback(
+            &writer,
+            &workflow,
+            &run,
+            "workflow_trace_outcomes",
+            HebbianSignal::Reinforce,
+        )
+        .expect("emit at floor");
+        assert!(
+            matches!(outcome, PromoteOutcome::WrittenUnderPressure { .. }),
+            "exact floor must NOT defer; got {outcome:?}"
+        );
+    }
+
+    // rationale: Boundary — emit_feedback at exactly the Phase-3 target
+    // (0.10) writes normally (m13 strict `<` on the upper band edge).
+    #[test]
+    fn emit_feedback_at_exact_phase_3_target_writes_normally() {
+        // rationale: Boundary (3-band upper edge via m42)
+        let (writer, _recorded) =
+            shared_writer(Some(crate::m13_stcortex_writer::LTP_PHASE_3_TARGET));
+        let workflow = accepted_workflow_fixture();
+        let run = run_row(Some("ok"));
+        let outcome = super::emit_feedback(
+            &writer,
+            &workflow,
+            &run,
+            "workflow_trace_outcomes",
+            HebbianSignal::Reinforce,
+        )
+        .expect("emit at target");
+        assert!(matches!(outcome, PromoteOutcome::Written { .. }));
+    }
+
+    // -- emit_feedback: signal-arg Phase-A no-op invariant --------------
+
+    // rationale: Anti-property (F9 zero-weight / Phase-A self-check) — the
+    // `signal` argument is documented as a call-site self-check that is
+    // NOT routed to the substrate. Reinforce and Depress with otherwise
+    // identical inputs MUST produce identical PromoteOutcomes; the signal
+    // must not leak into the write path in Phase A.
+    #[test]
+    fn emit_feedback_signal_arg_is_phase_a_noop_on_outcome() {
+        // rationale: Anti-property (Phase-A signal is self-check only)
+        let workflow = accepted_workflow_fixture();
+        let run = run_row(Some("ok"));
+        let (reinforce_writer, _handle_a) = shared_writer(Some(0.20));
+        let reinforce = super::emit_feedback(
+            &reinforce_writer,
+            &workflow,
+            &run,
+            "workflow_trace_outcomes",
+            HebbianSignal::Reinforce,
+        )
+        .expect("reinforce");
+        let (depress_writer, _handle_b) = shared_writer(Some(0.20));
+        let depress = super::emit_feedback(
+            &depress_writer,
+            &workflow,
+            &run,
+            "workflow_trace_outcomes",
+            HebbianSignal::Depress,
+        )
+        .expect("depress");
+        // Both must be Written; memory_id is allocated by the mock from 0,
+        // so both fresh writers yield id 1 — outcomes are equal.
+        assert_eq!(
+            reinforce, depress,
+            "signal arg must not affect the Phase-A outcome (self-check only)"
+        );
+    }
+
+    // rationale: Anti-property — the `signal` arg does not influence the
+    // recorded CorrelationMemory either: the memory's relevance is derived
+    // by m13 from the run outcome, NOT from the Hebbian signal. A Depress
+    // signal with an "ok" run still records relevance 1.0.
+    #[test]
+    fn emit_feedback_signal_arg_does_not_alter_recorded_relevance() {
+        // rationale: Anti-property (m13 derives relevance from outcome)
+        let (writer, recorded) = shared_writer(Some(0.20));
+        let workflow = accepted_workflow_fixture();
+        let run = run_row(Some("ok"));
+        // Pass the contradictory signal: an "ok" run with Depress.
+        let _ = super::emit_feedback(
+            &writer,
+            &workflow,
+            &run,
+            "workflow_trace_outcomes",
+            HebbianSignal::Depress,
+        )
+        .expect("emit");
+        let written = recorded.lock().expect("lock");
+        assert_eq!(written.len(), 1);
+        assert!(
+            (written[0].relevance - 1.0).abs() < 1e-6,
+            "relevance must reflect the run outcome (ok=1.0), not the signal"
+        );
+    }
+
+    // -- emit_feedback: recorded write content / namespace ---------------
+
+    // rationale: Cross-module surface — emit_feedback records exactly one
+    // CorrelationMemory carrying the validated namespace; the namespace is
+    // forwarded to m13 unchanged (no m42-side rewrite).
+    #[test]
+    fn emit_feedback_records_one_memory_with_forwarded_namespace() {
+        // rationale: Cross-module surface (namespace pass-through)
+        let (writer, recorded) = shared_writer(Some(0.20));
+        let workflow = accepted_workflow_fixture();
+        let run = run_row(Some("ok"));
+        let _ = super::emit_feedback(
+            &writer,
+            &workflow,
+            &run,
+            "workflow_trace_emit_test",
+            HebbianSignal::Reinforce,
+        )
+        .expect("emit");
+        let written = recorded.lock().expect("lock");
+        assert_eq!(written.len(), 1);
+        assert_eq!(written[0].namespace, "workflow_trace_emit_test");
+    }
+
+    // rationale: Cross-module surface — m9 hyphen-munge is transitively
+    // applied: a hyphenated namespace passed to emit_feedback lands in the
+    // recorded memory as the underscored form.
+    #[test]
+    fn emit_feedback_records_munged_namespace_for_hyphenated_input() {
+        // rationale: Cross-module surface (m9 munge transitive — verified)
+        let (writer, recorded) = shared_writer(Some(0.20));
+        let workflow = accepted_workflow_fixture();
+        let run = run_row(Some("ok"));
+        let _ = super::emit_feedback(
+            &writer,
+            &workflow,
+            &run,
+            "workflow-trace-hyphen-ns",
+            HebbianSignal::Reinforce,
+        )
+        .expect("emit");
+        let written = recorded.lock().expect("lock");
+        assert_eq!(written.len(), 1);
+        assert_eq!(
+            written[0].namespace, "workflow_trace_hyphen_ns",
+            "hyphens must be munged to underscores transitively via m9"
+        );
+    }
+
+    // rationale: Anti-property (AP30) — emit_feedback rejects an empty
+    // namespace at the m9 boundary with a NamespaceViolation::Empty.
+    #[test]
+    fn emit_feedback_rejects_empty_namespace_via_m9() {
+        // rationale: Anti-property (AP30 — empty namespace)
+        let (writer, _recorded) = shared_writer(Some(0.20));
+        let workflow = accepted_workflow_fixture();
+        let run = run_row(Some("ok"));
+        let err = super::emit_feedback(&writer, &workflow, &run, "", HebbianSignal::Reinforce)
+            .expect_err("empty namespace must fail at m9");
+        assert!(matches!(
+            err,
+            SubstrateEmitError::Writer(
+                crate::m13_stcortex_writer::StcortexWriterError::NamespaceViolation(
+                    crate::m9_watcher_namespace_guard::NamespaceViolation::Empty
+                )
+            )
+        ));
+    }
+
+    // rationale: Anti-property (AP30) — emit_feedback rejects the bare
+    // "scratch" namespace via m9's ScratchForbidden variant; the m42 path
+    // must inherit every m9 refusal class, not just WrongPrefix.
+    #[test]
+    fn emit_feedback_rejects_scratch_namespace_via_m9() {
+        // rationale: Anti-property (AP30 — scratch forbidden)
+        let (writer, _recorded) = shared_writer(Some(0.20));
+        let workflow = accepted_workflow_fixture();
+        let run = run_row(Some("ok"));
+        let err =
+            super::emit_feedback(&writer, &workflow, &run, "scratch", HebbianSignal::Reinforce)
+                .expect_err("scratch must fail at m9");
+        assert!(matches!(
+            err,
+            SubstrateEmitError::Writer(
+                crate::m13_stcortex_writer::StcortexWriterError::NamespaceViolation(
+                    crate::m9_watcher_namespace_guard::NamespaceViolation::ScratchForbidden
+                )
+            )
+        ));
+    }
+
+    // rationale: Anti-property (AP30) — emit_feedback rejects a namespace
+    // carrying an embedded NUL control byte via m9's ControlChar variant.
+    #[test]
+    fn emit_feedback_rejects_control_char_namespace_via_m9() {
+        // rationale: Anti-property (AP30 — control-char contamination)
+        let (writer, _recorded) = shared_writer(Some(0.20));
+        let workflow = accepted_workflow_fixture();
+        let run = run_row(Some("ok"));
+        let err = super::emit_feedback(
+            &writer,
+            &workflow,
+            &run,
+            "workflow_trace\0evil",
+            HebbianSignal::Reinforce,
+        )
+        .expect_err("control char must fail at m9");
+        assert!(matches!(
+            err,
+            SubstrateEmitError::Writer(
+                crate::m13_stcortex_writer::StcortexWriterError::NamespaceViolation(
+                    crate::m9_watcher_namespace_guard::NamespaceViolation::ControlChar { .. }
+                )
+            )
+        ));
+    }
+
+    // rationale: Anti-property — a foreign-namespace rejection happens
+    // BEFORE any substrate write: the recording sink stays empty when m9
+    // refuses, so no partial / leaked write occurs.
+    #[test]
+    fn emit_feedback_foreign_namespace_records_no_write() {
+        // rationale: Anti-property (fail-closed — no partial write)
+        let (writer, recorded) = shared_writer(Some(0.20));
+        let workflow = accepted_workflow_fixture();
+        let run = run_row(Some("ok"));
+        let _ = super::emit_feedback(
+            &writer,
+            &workflow,
+            &run,
+            "orac_foreign",
+            HebbianSignal::Reinforce,
+        )
+        .expect_err("foreign namespace must fail");
+        assert!(
+            recorded.lock().expect("lock").is_empty(),
+            "no substrate write may occur when m9 refuses the namespace"
+        );
+    }
+
+    // -- emit_feedback: outbox durability on ORAC-unreachable ------------
+
+    // rationale: Cross-module surface — when ORAC is unreachable the m13
+    // outbox file actually receives a JSONL line; emit_feedback's defer
+    // path is durable, not a no-op. Verifies the file content.
+    #[test]
+    fn emit_feedback_orac_unreachable_writes_durable_outbox_line() {
+        // rationale: Cross-module surface (outbox durability)
+        let mock = SharedRecordingWriter::new();
+        let outbox = temp_outbox();
+        let writer = StcortexWriter::new(StaticDensity(None), mock, outbox.clone());
+        let workflow = accepted_workflow_fixture();
+        let run = run_row(Some("ok"));
+        let _ = super::emit_feedback(
+            &writer,
+            &workflow,
+            &run,
+            "workflow_trace_outcomes",
+            HebbianSignal::Reinforce,
+        )
+        .expect("emit defers");
+        let contents = std::fs::read_to_string(&outbox).expect("read outbox");
+        assert!(contents.contains("OracUnreachable"), "outbox missing reason");
+        assert!(
+            contents.contains("workflow_trace_outcomes"),
+            "outbox missing namespace"
+        );
+        assert_eq!(contents.lines().count(), 1, "exactly one outbox line");
+    }
+
+    // rationale: Cross-module surface — repeated ORAC-unreachable emits
+    // append to the outbox; the JSONL stream grows one line per call.
+    #[test]
+    fn emit_feedback_appends_one_outbox_line_per_deferred_call() {
+        // rationale: Cross-module surface (append-only outbox)
+        let mock = SharedRecordingWriter::new();
+        let outbox = temp_outbox();
+        let writer = StcortexWriter::new(StaticDensity(None), mock, outbox.clone());
+        let workflow = accepted_workflow_fixture();
+        let run = run_row(Some("ok"));
+        for _ in 0..3 {
+            let _ = super::emit_feedback(
+                &writer,
+                &workflow,
+                &run,
+                "workflow_trace_outcomes",
+                HebbianSignal::Reinforce,
+            )
+            .expect("emit");
+        }
+        let contents = std::fs::read_to_string(&outbox).expect("read");
+        assert_eq!(
+            contents.lines().count(),
+            3,
+            "three deferred emits -> three lines"
+        );
+    }
+
+    // rationale: Adversarial input — each outbox line on a deferred emit
+    // is itself valid JSON carrying ts_ms / memory / reason keys.
+    #[test]
+    fn emit_feedback_outbox_line_is_valid_json_with_expected_keys() {
+        // rationale: Adversarial input (outbox JSONL shape)
+        let mock = SharedRecordingWriter::new();
+        let outbox = temp_outbox();
+        let writer = StcortexWriter::new(StaticDensity(None), mock, outbox.clone());
+        let workflow = accepted_workflow_fixture();
+        let run = run_row(Some("ok"));
+        let _ = super::emit_feedback(
+            &writer,
+            &workflow,
+            &run,
+            "workflow_trace_outcomes",
+            HebbianSignal::Reinforce,
+        )
+        .expect("emit");
+        let contents = std::fs::read_to_string(&outbox).expect("read");
+        let line = contents.lines().next().expect("one line");
+        let parsed: serde_json::Value = serde_json::from_str(line).expect("valid JSON");
+        assert!(parsed.get("ts_ms").is_some(), "missing ts_ms");
+        assert!(parsed.get("memory").is_some(), "missing memory");
+        assert!(parsed.get("reason").is_some(), "missing reason");
+    }
+
+    // -- signal_for_outcome edge cases ----------------------------------
+
+    // rationale: Boundary — signal_for_outcome with a None outcome (open
+    // run / outcome not yet recorded) maps to Depress, not Reinforce.
+    #[test]
+    fn signal_for_outcome_none_is_depress() {
+        // rationale: Boundary (open-run / missing outcome)
+        assert_eq!(signal_for_outcome(None), HebbianSignal::Depress);
+    }
+
+    // rationale: Adversarial input — outcome strings differing from "ok"
+    // only by case or surrounding whitespace must NOT collapse to
+    // Reinforce; the match is exact-string.
+    #[test]
+    fn signal_for_outcome_is_case_and_whitespace_sensitive() {
+        // rationale: Adversarial input (exact-string discipline)
+        for near_miss in ["OK", "Ok", " ok", "ok ", "ok\n", "\tok"] {
+            assert_eq!(
+                signal_for_outcome(Some(near_miss)),
+                HebbianSignal::Depress,
+                "near-miss {near_miss:?} must not match the exact 'ok' literal"
+            );
+        }
+    }
+
+    // rationale: Adversarial input — an empty outcome string maps to
+    // Depress (it is not the literal "ok").
+    #[test]
+    fn signal_for_outcome_empty_string_is_depress() {
+        // rationale: Adversarial input (empty outcome)
+        assert_eq!(signal_for_outcome(Some("")), HebbianSignal::Depress);
+    }
+
+    // rationale: Adversarial input — Unicode / non-ASCII outcome strings
+    // map to Depress without panic (UTF-8 safety on the match path).
+    #[test]
+    fn signal_for_outcome_unicode_outcome_is_depress() {
+        // rationale: Adversarial input (Unicode safety)
+        for s in ["\u{2713}", "\u{6210}\u{529f}", "\u{f6}k", "\u{1F600}"] {
+            assert_eq!(signal_for_outcome(Some(s)), HebbianSignal::Depress);
+        }
+    }
+
+    // -- HebbianSignal serde adversarial --------------------------------
+
+    // rationale: Adversarial input — HebbianSignal deserialization rejects
+    // an unknown wire value; the enum is closed at the wire boundary.
+    #[test]
+    fn hebbian_signal_deserialization_rejects_unknown_variant() {
+        // rationale: Adversarial input (closed wire enum)
+        let r: Result<HebbianSignal, _> = serde_json::from_str("\"potentiate\"");
+        assert!(r.is_err(), "unknown HebbianSignal wire value must fail");
+    }
+
+    // rationale: Contract regression — HebbianSignal deserialization is
+    // case-sensitive: "Reinforce" (capitalised) is NOT the snake_case
+    // wire form and must fail.
+    #[test]
+    fn hebbian_signal_deserialization_is_case_sensitive() {
+        // rationale: Contract regression (snake_case wire form)
+        assert!(serde_json::from_str::<HebbianSignal>("\"Reinforce\"").is_err());
+        assert!(serde_json::from_str::<HebbianSignal>("\"DEPRESS\"").is_err());
+    }
+
+    // rationale: Contract regression — HebbianSignal deserialization
+    // accepts exactly the two canonical snake_case wire values.
+    #[test]
+    fn hebbian_signal_deserialization_accepts_canonical_wire_values() {
+        // rationale: Contract regression (canonical wire values)
+        assert_eq!(
+            serde_json::from_str::<HebbianSignal>("\"reinforce\"").expect("de"),
+            HebbianSignal::Reinforce
+        );
+        assert_eq!(
+            serde_json::from_str::<HebbianSignal>("\"depress\"").expect("de"),
+            HebbianSignal::Depress
+        );
+    }
+
+    // rationale: Determinism — HebbianSignal is Copy + Eq + Hash; it can
+    // be used as a HashMap key and the two variants are distinct keys.
+    #[test]
+    fn hebbian_signal_is_usable_as_distinct_hash_keys() {
+        // rationale: Determinism (Copy + Eq + Hash contract)
+        let mut map = std::collections::HashMap::new();
+        map.insert(HebbianSignal::Reinforce, "ltp");
+        map.insert(HebbianSignal::Depress, "ltd");
+        assert_eq!(map.len(), 2, "two variants must be distinct keys");
+        assert_eq!(map.get(&HebbianSignal::Reinforce), Some(&"ltp"));
+    }
+
+    // rationale: Anti-property — Reinforce and Depress are not equal; the
+    // PartialEq derive distinguishes the two polarities.
+    #[test]
+    fn hebbian_signal_variants_are_not_equal() {
+        // rationale: Anti-property (polarity distinctness)
+        assert_ne!(HebbianSignal::Reinforce, HebbianSignal::Depress);
+    }
+
+    // -- outcome_summary exact-format pinning ----------------------------
+
+    // rationale: Contract regression — outcome_summary(Written) emits the
+    // exact "wrote memory_id=<id>" form; log scrapers parse this literally.
+    #[test]
+    fn outcome_summary_written_exact_format() {
+        // rationale: Contract regression (Written summary format)
+        let s = outcome_summary(&PromoteOutcome::Written { memory_id: 1_700 });
+        assert_eq!(s, "wrote memory_id=1700");
+    }
+
+    // rationale: Contract regression — outcome_summary(WrittenUnderPressure)
+    // formats ltp_density to exactly 4 decimal places.
+    #[test]
+    fn outcome_summary_under_pressure_formats_density_to_four_decimals() {
+        // rationale: Contract regression (4-decimal density format)
+        let s = outcome_summary(&PromoteOutcome::WrittenUnderPressure {
+            memory_id: 9,
+            ltp_density: 0.017_345_6,
+        });
+        assert_eq!(s, "wrote_under_pressure memory_id=9 ltp=0.0173");
+    }
+
+    // rationale: Contract regression — outcome_summary(Deferred /
+    // LtpBelowFloor) emits the exact "deferred ltp_below_floor density=..."
+    // form with 4-decimal density.
+    #[test]
+    fn outcome_summary_deferred_below_floor_exact_format() {
+        // rationale: Contract regression (LtpBelowFloor summary format)
+        let s = outcome_summary(&PromoteOutcome::Deferred {
+            reason: DeferReason::LtpBelowFloor { density: 0.001 },
+        });
+        assert_eq!(s, "deferred ltp_below_floor density=0.0010");
+    }
+
+    // rationale: Contract regression — the two unreachable defer reasons
+    // emit distinct, exact summary strings so an operator can tell ORAC
+    // from stcortex outages apart.
+    #[test]
+    fn outcome_summary_distinguishes_orac_from_stcortex_unreachable() {
+        // rationale: Contract regression (unreachable reason disambiguation)
+        let orac = outcome_summary(&PromoteOutcome::Deferred {
+            reason: DeferReason::OracUnreachable,
+        });
+        let stc = outcome_summary(&PromoteOutcome::Deferred {
+            reason: DeferReason::StcortexUnreachable,
+        });
+        assert_eq!(orac, "deferred orac_unreachable");
+        assert_eq!(stc, "deferred stcortex_unreachable");
+        assert_ne!(orac, stc, "the two outages must be distinguishable");
+    }
+
+    // rationale: Boundary — outcome_summary handles memory_id = i64::MAX
+    // without truncation or panic (operator-facing format under extreme
+    // ids).
+    #[test]
+    fn outcome_summary_handles_i64_max_memory_id() {
+        // rationale: Boundary (extreme memory_id)
+        let s = outcome_summary(&PromoteOutcome::Written {
+            memory_id: i64::MAX,
+        });
+        assert_eq!(s, format!("wrote memory_id={}", i64::MAX));
+    }
+
+    // -- SubstrateEmitError surface -------------------------------------
+
+    // rationale: Contract regression — SubstrateEmitError::Writer Display
+    // is prefixed "stcortex writer:" and embeds the inner error text so
+    // operator runbooks can grep the failure class.
+    #[test]
+    fn substrate_emit_error_display_is_prefixed_and_embeds_inner() {
+        // rationale: Contract regression (error Display format)
+        let inner = crate::m13_stcortex_writer::StcortexWriterError::WriteFailed(
+            "transport reset".into(),
+        );
+        let err: SubstrateEmitError = inner.into();
+        let s = err.to_string();
+        assert!(s.starts_with("stcortex writer: "), "missing prefix: {s}");
+        assert!(s.contains("transport reset"), "inner text dropped: {s}");
+    }
+
+    // rationale: Anti-property — emit_feedback propagates a substrate
+    // WriteFailed from m13 as a typed SubstrateEmitError::Writer, not a
+    // swallowed error or a default outcome.
+    #[test]
+    fn emit_feedback_propagates_substrate_write_failure() {
+        // rationale: Anti-property (typed error propagation)
+        struct FailingWriter;
+        impl SubstrateWriter for FailingWriter {
+            fn write_memory(
+                &self,
+                _m: &CorrelationMemory,
+            ) -> Result<i64, crate::m13_stcortex_writer::StcortexWriterError> {
+                Err(crate::m13_stcortex_writer::StcortexWriterError::WriteFailed(
+                    "synthetic substrate failure".into(),
+                ))
+            }
+        }
+        let writer =
+            StcortexWriter::new(StaticDensity(Some(0.20)), FailingWriter, temp_outbox());
+        let workflow = accepted_workflow_fixture();
+        let run = run_row(Some("ok"));
+        let err = super::emit_feedback(
+            &writer,
+            &workflow,
+            &run,
+            "workflow_trace_outcomes",
+            HebbianSignal::Reinforce,
+        )
+        .expect_err("substrate failure must propagate");
+        assert!(matches!(
+            err,
+            SubstrateEmitError::Writer(
+                crate::m13_stcortex_writer::StcortexWriterError::WriteFailed(_)
+            )
+        ));
+    }
+
+    // rationale: Cross-module surface — the m42 -> m13 path correctly
+    // derives a low relevance from a "fail" run outcome: emit_feedback of
+    // a failed run records relevance 0.5, distinct from an "ok" run's 1.0.
+    #[test]
+    fn emit_feedback_records_fail_outcome_relevance_half() {
+        // rationale: Cross-module surface (outcome -> relevance mapping)
+        let (writer, recorded) = shared_writer(Some(0.20));
+        let workflow = accepted_workflow_fixture();
+        let run = run_row(Some("fail"));
+        let _ = super::emit_feedback(
+            &writer,
+            &workflow,
+            &run,
+            "workflow_trace_outcomes",
+            HebbianSignal::Depress,
+        )
+        .expect("emit");
+        let written = recorded.lock().expect("lock");
+        assert_eq!(written.len(), 1);
+        assert!(
+            (written[0].relevance - 0.5).abs() < 1e-6,
+            "fail -> relevance 0.5"
+        );
+    }
+
+    // rationale: Cross-module surface — a run with no outcome (None) routes
+    // through m42 -> m13 and records the "unknown" relevance bucket (0.1).
+    #[test]
+    fn emit_feedback_records_unknown_relevance_for_open_run() {
+        // rationale: Cross-module surface (None outcome -> unknown bucket)
+        let (writer, recorded) = shared_writer(Some(0.20));
+        let workflow = accepted_workflow_fixture();
+        let run = run_row(None);
+        let _ = super::emit_feedback(
+            &writer,
+            &workflow,
+            &run,
+            "workflow_trace_outcomes",
+            HebbianSignal::Depress,
+        )
+        .expect("emit");
+        let written = recorded.lock().expect("lock");
+        assert_eq!(written.len(), 1);
+        assert!(
+            (written[0].relevance - 0.1).abs() < 1e-6,
+            "None outcome -> 0.1"
+        );
+    }
+
+    // rationale: F9 zero-weight — emit_feedback records a CorrelationMemory
+    // whose `tensor` field is None: no fitness signal leaks through the
+    // m42 substrate-feedback path in Phase A.
+    #[test]
+    fn emit_feedback_recorded_memory_carries_no_fitness_tensor() {
+        // rationale: F9 zero-weight (no tensor leak via m42)
+        let (writer, recorded) = shared_writer(Some(0.20));
+        let workflow = accepted_workflow_fixture();
+        let run = run_row(Some("ok"));
+        let _ = super::emit_feedback(
+            &writer,
+            &workflow,
+            &run,
+            "workflow_trace_outcomes",
+            HebbianSignal::Reinforce,
+        )
+        .expect("emit");
+        let written = recorded.lock().expect("lock");
+        assert!(written[0].tensor.is_none(), "F9: tensor must stay None");
+    }
+
+    // rationale: Cross-module surface — emit_feedback returns a Written
+    // outcome whose memory_id matches the substrate-assigned id; the id
+    // is not fabricated or zeroed on the m42 -> m13 return path.
+    #[test]
+    fn emit_feedback_written_outcome_carries_substrate_assigned_id() {
+        // rationale: Cross-module surface (id propagation fidelity)
+        let (writer, _recorded) = shared_writer(Some(0.20));
+        let workflow = accepted_workflow_fixture();
+        let run = run_row(Some("ok"));
+        let outcome = super::emit_feedback(
+            &writer,
+            &workflow,
+            &run,
+            "workflow_trace_outcomes",
+            HebbianSignal::Reinforce,
+        )
+        .expect("emit");
+        // SharedRecordingWriter allocates ids from 0, so the first write
+        // is id 1.
+        assert_eq!(outcome, PromoteOutcome::Written { memory_id: 1 });
     }
 }

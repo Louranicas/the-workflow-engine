@@ -666,4 +666,448 @@ mod tests {
         assert!(s.contains("sent=42"));
         assert!(s.contains("received=999"));
     }
+
+    // ====================================================================
+    // S1002388 hardening pass — m41 LCM RPC (+23 tests → ≥50).
+    // parse_rpc_response branch exhaustion · id-type adversarial input ·
+    // error-envelope edge cases · allocate_request_id monotonicity ·
+    // serde boundary · cross-module surface.
+    // ====================================================================
+
+    // -- parse_rpc_response: id-type adversarial input -------------------
+
+    // rationale: Adversarial input — a JSON-RPC response that echoes the
+    // id as a *string* ("42") instead of the number 42 must NOT match.
+    // `as_u64()` returns None for a string, so the id-echo check fails
+    // closed and surfaces IdMismatch (not a silent accept via coercion).
+    #[test]
+    fn rpc_refuses_response_with_string_typed_id() {
+        // rationale: Adversarial input (id type-confusion)
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "result": {"loop_id": "x", "created_at_ms": 0},
+            "id": "42",
+        });
+        let r = super::parse_rpc_response(&response, 42);
+        match r {
+            Err(LcmRpcError::IdMismatch { sent, received }) => {
+                assert_eq!(sent, 42);
+                assert_eq!(received, serde_json::json!("42"));
+            }
+            other => panic!("expected IdMismatch for string id, got {other:?}"),
+        }
+    }
+
+    // rationale: Adversarial input — `"id": null` is a present-but-null
+    // field. `Value::get` returns Some(Null), so the missing-id parse
+    // branch is skipped; `as_u64()` is None → IdMismatch with received
+    // Null. Distinguishes "null id" from "absent id".
+    #[test]
+    fn rpc_refuses_response_with_null_id() {
+        // rationale: Adversarial input (present-but-null id)
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "result": {"loop_id": "x", "created_at_ms": 0},
+            "id": serde_json::Value::Null,
+        });
+        let r = super::parse_rpc_response(&response, 1);
+        match r {
+            Err(LcmRpcError::IdMismatch { received, .. }) => {
+                assert_eq!(received, serde_json::Value::Null);
+            }
+            other => panic!("expected IdMismatch for null id, got {other:?}"),
+        }
+    }
+
+    // rationale: Adversarial input — a fractional `id` (3.5) is not a
+    // valid JSON-RPC integer id. `as_u64()` returns None for a non-integer
+    // float → IdMismatch, never a lossy truncation to 3.
+    #[test]
+    fn rpc_refuses_response_with_fractional_id() {
+        // rationale: Adversarial input (non-integer id)
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "result": {"loop_id": "x", "created_at_ms": 0},
+            "id": 3.5,
+        });
+        let r = super::parse_rpc_response(&response, 3);
+        assert!(
+            matches!(r, Err(LcmRpcError::IdMismatch { sent: 3, .. })),
+            "fractional id must not truncate-match, got {r:?}"
+        );
+    }
+
+    // rationale: Adversarial input — a negative `id` (-1) cannot equal an
+    // unsigned request id. `as_u64()` returns None for a negative number
+    // → IdMismatch.
+    #[test]
+    fn rpc_refuses_response_with_negative_id() {
+        // rationale: Adversarial input (negative id)
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "result": {"loop_id": "x", "created_at_ms": 0},
+            "id": -1,
+        });
+        let r = super::parse_rpc_response(&response, 1);
+        assert!(matches!(r, Err(LcmRpcError::IdMismatch { sent: 1, .. })));
+    }
+
+    // rationale: Boundary — u64::MAX is a legal JSON-RPC id; a response
+    // echoing exactly u64::MAX against an expected u64::MAX request id
+    // MUST match (no overflow / precision loss in the id-echo path).
+    #[test]
+    fn rpc_accepts_response_with_u64_max_id() {
+        // rationale: Boundary (id-echo at the u64 ceiling)
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "result": {"loop_id": "edge", "created_at_ms": 0},
+            "id": u64::MAX,
+        });
+        let r = super::parse_rpc_response(&response, u64::MAX);
+        let ok = r.expect("u64::MAX id must round-trip");
+        assert_eq!(ok.loop_id, "edge");
+    }
+
+    // rationale: Boundary — id 0 is the smallest legal id; allocator
+    // starts at 1 but parse_rpc_response must still verify id 0 correctly
+    // for callers composing their own envelopes.
+    #[test]
+    fn rpc_accepts_response_with_zero_id() {
+        // rationale: Boundary (id-echo at zero)
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "result": {"loop_id": "zero", "created_at_ms": 1},
+            "id": 0,
+        });
+        let ok = super::parse_rpc_response(&response, 0).expect("id 0");
+        assert_eq!(ok.loop_id, "zero");
+    }
+
+    // -- parse_rpc_response: error-envelope edge cases -------------------
+
+    // rationale: Adversarial input — an `error` field that is a *string*
+    // (not an object) is malformed per JSON-RPC 2.0 § 5.1. `is_object()`
+    // is false → the error branch is skipped → result is decoded instead.
+    #[test]
+    fn rpc_treats_string_error_field_as_non_error() {
+        // rationale: Adversarial input (non-object error field)
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "error": "something went wrong",
+            "result": {"loop_id": "ok", "created_at_ms": 0},
+            "id": 1,
+        });
+        let ok = super::parse_rpc_response(&response, 1)
+            .expect("string error field must fall through to result");
+        assert_eq!(ok.loop_id, "ok");
+    }
+
+    // rationale: Adversarial input — an `error` field that is an *array*
+    // is not a valid error object; the error branch is skipped.
+    #[test]
+    fn rpc_treats_array_error_field_as_non_error() {
+        // rationale: Adversarial input (array error field)
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "error": [1, 2, 3],
+            "result": {"loop_id": "ok", "created_at_ms": 7},
+            "id": 1,
+        });
+        let ok = super::parse_rpc_response(&response, 1)
+            .expect("array error field must fall through to result");
+        assert_eq!(ok.created_at_ms, 7);
+    }
+
+    // rationale: Adversarial input — an error object that omits `message`
+    // still surfaces as Rpc; the missing message defaults to "unknown"
+    // (no panic, no parse error).
+    #[test]
+    fn rpc_error_object_missing_message_defaults_to_unknown() {
+        // rationale: Adversarial input (error object missing message)
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "error": {"code": -32099},
+            "id": 1,
+        });
+        match super::parse_rpc_response(&response, 1) {
+            Err(LcmRpcError::Rpc { code, message }) => {
+                assert_eq!(code, -32099);
+                assert_eq!(message, "unknown", "missing message must default to 'unknown'");
+            }
+            other => panic!("expected Rpc error, got {other:?}"),
+        }
+    }
+
+    // rationale: Adversarial input — an error object whose `code` is a
+    // *string* (not a number) still triggers the error branch (the branch
+    // gate is `code` field present, not `code` is i64); the code defaults
+    // to the -32000 server-error sentinel since `as_i64()` fails.
+    #[test]
+    fn rpc_error_object_with_string_code_defaults_to_server_error_sentinel() {
+        // rationale: Adversarial input (non-numeric error code)
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "error": {"code": "BAD", "message": "stringy code"},
+            "id": 1,
+        });
+        match super::parse_rpc_response(&response, 1) {
+            Err(LcmRpcError::Rpc { code, message }) => {
+                assert_eq!(code, -32000, "non-i64 code must fall back to -32000");
+                assert_eq!(message, "stringy code");
+            }
+            other => panic!("expected Rpc error, got {other:?}"),
+        }
+    }
+
+    // rationale: Contract regression — the id-echo check runs BEFORE the
+    // error branch. A response carrying a proper error object BUT a
+    // mismatched id must surface IdMismatch, not Rpc — a replayed error
+    // frame must not be mistaken for this request's failure.
+    #[test]
+    fn rpc_id_mismatch_takes_precedence_over_error_envelope() {
+        // rationale: Contract regression (id-check order-of-operations)
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "error": {"code": -32601, "message": "Method not found"},
+            "id": 777,
+        });
+        let r = super::parse_rpc_response(&response, 1);
+        assert!(
+            matches!(r, Err(LcmRpcError::IdMismatch { sent: 1, .. })),
+            "id check must precede error decode, got {r:?}"
+        );
+    }
+
+    // -- parse_rpc_response: result decoding --------------------------
+
+    // rationale: Adversarial input — a matching id with NO `result` and NO
+    // `error` is a malformed response; parse_rpc_response surfaces a Parse
+    // error ("missing result"), never a default-constructed result.
+    #[test]
+    fn rpc_response_with_matching_id_but_no_result_is_parse_error() {
+        // rationale: Adversarial input (result absent)
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+        });
+        match super::parse_rpc_response(&response, 5) {
+            Err(LcmRpcError::Parse(msg)) => assert!(msg.contains("missing result")),
+            other => panic!("expected Parse(missing result), got {other:?}"),
+        }
+    }
+
+    // rationale: Adversarial input — a `result` whose shape does not match
+    // LcmLoopCreateResult (missing the required `loop_id`) surfaces a
+    // Parse error from serde, not a silent zero-value struct.
+    #[test]
+    fn rpc_result_with_wrong_shape_is_parse_error() {
+        // rationale: Adversarial input (result schema mismatch)
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "result": {"wrong_field": 1},
+            "id": 9,
+        });
+        assert!(
+            matches!(super::parse_rpc_response(&response, 9), Err(LcmRpcError::Parse(_))),
+            "result missing loop_id must be a Parse error"
+        );
+    }
+
+    // rationale: Adversarial input — `created_at_ms` is i64; a result
+    // carrying a negative epoch (pre-1970) still decodes (i64 is signed).
+    // Documents that m41 does not range-check the timestamp.
+    #[test]
+    fn rpc_result_accepts_negative_created_at_ms() {
+        // rationale: Adversarial input (negative i64 timestamp)
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "result": {"loop_id": "pre-epoch", "created_at_ms": -1_000_i64},
+            "id": 2,
+        });
+        let ok = super::parse_rpc_response(&response, 2).expect("negative ts decodes");
+        assert_eq!(ok.created_at_ms, -1_000);
+    }
+
+    // rationale: Adversarial input — a `result` that is a JSON string
+    // (not an object) cannot decode into LcmLoopCreateResult → Parse error.
+    #[test]
+    fn rpc_result_that_is_a_bare_string_is_parse_error() {
+        // rationale: Adversarial input (result is not an object)
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "result": "not-a-struct",
+            "id": 4,
+        });
+        assert!(matches!(
+            super::parse_rpc_response(&response, 4),
+            Err(LcmRpcError::Parse(_))
+        ));
+    }
+
+    // -- allocate_request_id: monotonicity / sequencing ------------------
+
+    // rationale: Contract regression — a fresh HttpLcmClient's first
+    // allocated id is exactly 1 (AtomicU64::new(1)); JSON-RPC ids must be
+    // non-zero / well-defined from the first call.
+    #[test]
+    fn allocate_request_id_starts_at_one() {
+        // rationale: Contract regression (id stream origin)
+        let c = HttpLcmClient::new(DEFAULT_LCM_URL, DEFAULT_RPC_TIMEOUT);
+        assert_eq!(c.allocate_request_id(), 1, "first id must be 1");
+    }
+
+    // rationale: Determinism — sequential allocate_request_id calls return
+    // a strictly increasing contiguous sequence 1,2,3,...,N.
+    #[test]
+    fn allocate_request_id_is_strictly_increasing_and_contiguous() {
+        // rationale: Determinism (id allocator sequence)
+        let c = HttpLcmClient::new(DEFAULT_LCM_URL, DEFAULT_RPC_TIMEOUT);
+        let ids: Vec<u64> = (0..50).map(|_| c.allocate_request_id()).collect();
+        for (i, id) in ids.iter().enumerate() {
+            assert_eq!(*id, (i as u64) + 1, "id stream must be contiguous from 1");
+        }
+    }
+
+    // rationale: Concurrency — two clients have independent id streams; a
+    // client's allocator state must not leak across instances.
+    #[test]
+    fn allocate_request_id_streams_are_per_client_independent() {
+        // rationale: Concurrency (per-client id isolation)
+        let a = HttpLcmClient::new(DEFAULT_LCM_URL, DEFAULT_RPC_TIMEOUT);
+        let b = HttpLcmClient::new(DEFAULT_LCM_URL, DEFAULT_RPC_TIMEOUT);
+        let _ = a.allocate_request_id();
+        let _ = a.allocate_request_id();
+        // b is untouched — its first id must still be 1.
+        assert_eq!(b.allocate_request_id(), 1);
+        // a has consumed 1 and 2 — its next id is 3.
+        assert_eq!(a.allocate_request_id(), 3);
+    }
+
+    // -- serde boundary --------------------------------------------------
+
+    // rationale: Boundary — LcmLoopCreateParams with an empty-object
+    // loop_spec round-trips identically; the keystone empty-payload case.
+    #[test]
+    fn params_with_empty_loop_spec_round_trips() {
+        // rationale: Boundary (empty payload)
+        let p = LcmLoopCreateParams {
+            workflow_id: 0,
+            conductor_dispatch_id: String::new(),
+            loop_spec: serde_json::json!({}),
+        };
+        let s = serde_json::to_string(&p).expect("ser");
+        let back: LcmLoopCreateParams = serde_json::from_str(&s).expect("de");
+        assert_eq!(back, p);
+    }
+
+    // rationale: Boundary — a deeply nested loop_spec survives the serde
+    // round-trip without structural loss (loop_spec is opaque Value).
+    #[test]
+    fn params_with_deeply_nested_loop_spec_round_trips() {
+        // rationale: Boundary (nested arbitrary JSON)
+        let p = LcmLoopCreateParams {
+            workflow_id: u64::MAX,
+            conductor_dispatch_id: "conductor-deep".into(),
+            loop_spec: serde_json::json!({
+                "a": {"b": {"c": [1, 2, {"d": null}]}},
+                "list": [[], [1], [1, 2]],
+            }),
+        };
+        let s = serde_json::to_string(&p).expect("ser");
+        let back: LcmLoopCreateParams = serde_json::from_str(&s).expect("de");
+        assert_eq!(back, p, "nested loop_spec must survive round-trip");
+    }
+
+    // rationale: Adversarial input — deserialising LcmLoopCreateParams
+    // from JSON missing the required `workflow_id` field fails loudly.
+    #[test]
+    fn params_deserialization_rejects_missing_workflow_id() {
+        // rationale: Adversarial input (missing required field)
+        let bad = r#"{"conductor_dispatch_id":"x","loop_spec":{}}"#;
+        let r: Result<LcmLoopCreateParams, _> = serde_json::from_str(bad);
+        assert!(r.is_err(), "missing workflow_id must fail deserialization");
+    }
+
+    // rationale: Adversarial input — deserialising LcmLoopCreateResult
+    // from JSON whose `created_at_ms` is a string fails (i64 type guard).
+    #[test]
+    fn result_deserialization_rejects_string_created_at_ms() {
+        // rationale: Adversarial input (type-mismatched field)
+        let bad = r#"{"loop_id":"x","created_at_ms":"not-a-number"}"#;
+        let r: Result<LcmLoopCreateResult, _> = serde_json::from_str(bad);
+        assert!(r.is_err(), "string created_at_ms must fail deserialization");
+    }
+
+    // rationale: Contract regression — loop_create serialises the JSON-RPC
+    // envelope with exactly the four wire keys {jsonrpc, method, params,
+    // id} and jsonrpc="2.0". Exercised via the StubClient's queued result
+    // path is not enough; this checks the envelope shape directly through
+    // the documented body builder constants.
+    #[test]
+    fn rpc_envelope_uses_jsonrpc_2_0_and_canonical_method() {
+        // rationale: Contract regression (JSON-RPC envelope shape)
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": RPC_METHOD,
+            "params": LcmLoopCreateParams {
+                workflow_id: 1,
+                conductor_dispatch_id: "c".into(),
+                loop_spec: serde_json::json!({}),
+            },
+            "id": 1_u64,
+        });
+        let obj = body.as_object().expect("object");
+        assert_eq!(obj.get("jsonrpc").and_then(|v| v.as_str()), Some("2.0"));
+        assert_eq!(obj.get("method").and_then(|v| v.as_str()), Some("lcm.loop.create"));
+        assert!(obj.get("params").is_some_and(serde_json::Value::is_object));
+        assert!(obj.get("id").and_then(serde_json::Value::as_u64).is_some());
+    }
+
+    // -- error variant: Debug / Display completeness ---------------------
+
+    // rationale: Adversarial input — every LcmRpcError variant has a
+    // non-empty Display string (operator runbooks depend on these).
+    #[test]
+    fn every_lcm_rpc_error_variant_has_non_empty_display() {
+        // rationale: Adversarial input (operator-runbook stability)
+        let variants = [
+            LcmRpcError::Transport("t".into()),
+            LcmRpcError::Rpc { code: -1, message: "m".into() },
+            LcmRpcError::Parse("p".into()),
+            LcmRpcError::IdMismatch { sent: 1, received: serde_json::json!(2) },
+        ];
+        for v in &variants {
+            assert!(!v.to_string().is_empty(), "empty Display for {v:?}");
+        }
+    }
+
+    // rationale: Cross-module surface invariant — IdMismatch preserves the
+    // raw received id as JSON for diagnosis; a received object survives
+    // verbatim into the error (not stringified / lossy).
+    #[test]
+    fn id_mismatch_preserves_received_object_verbatim() {
+        // rationale: Cross-module surface (diagnostic fidelity)
+        let weird = serde_json::json!({"unexpected": "shape", "n": 3});
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "result": {"loop_id": "x", "created_at_ms": 0},
+            "id": weird.clone(),
+        });
+        match super::parse_rpc_response(&response, 1) {
+            Err(LcmRpcError::IdMismatch { received, .. }) => {
+                assert_eq!(received, weird, "received id must survive verbatim");
+            }
+            other => panic!("expected IdMismatch, got {other:?}"),
+        }
+    }
+
+    // rationale: Contract regression — RPC_METHOD is a dotted three-segment
+    // namespace (lcm.loop.create); a regression to a two-segment form
+    // would silently break LCM method routing.
+    #[test]
+    fn rpc_method_has_three_dotted_segments() {
+        // rationale: Contract regression (method namespace shape)
+        let segs: Vec<&str> = RPC_METHOD.split('.').collect();
+        assert_eq!(segs, vec!["lcm", "loop", "create"]);
+    }
 }

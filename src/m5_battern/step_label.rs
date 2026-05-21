@@ -87,4 +87,30 @@ mod tests {
         s.insert(b);
         assert_eq!(s.len(), 1);
     }
+
+    // rationale: Core correctness — `as_str` round-trips against the
+    // canonical ALL array; every label's wire-form is distinct and
+    // matches the variant name exactly (no casing/typo drift).
+    #[test]
+    fn as_str_is_distinct_and_matches_variant_for_all_labels() {
+        use std::collections::HashSet;
+        let strs: HashSet<&'static str> =
+            BatternStepLabel::ALL.iter().map(|l| l.as_str()).collect();
+        assert_eq!(strs.len(), 6, "all six wire-forms must be distinct");
+        // Spot-check the per-variant mapping.
+        assert_eq!(BatternStepLabel::Synthesize.as_str(), "Synthesize");
+        assert_eq!(BatternStepLabel::Collect.as_str(), "Collect");
+    }
+
+    // rationale: Anti-property F1 — the ALL array has EXACTLY six entries.
+    // F1 forbids an `Other` variant; this pins the closed-enum cardinality
+    // against silent growth (any new variant breaks the count assertion).
+    #[test]
+    fn all_array_cardinality_is_exactly_six_f1_closed_enum() {
+        assert_eq!(
+            BatternStepLabel::ALL.len(),
+            6,
+            "F1: closed enum must stay at six variants — no Other"
+        );
+    }
 }

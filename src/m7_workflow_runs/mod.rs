@@ -772,4 +772,320 @@ mod tests {
         assert_eq!(row.ended_at.as_deref(), Some(""));
         assert_eq!(row.outcome.as_deref(), Some("ok"));
     }
+
+    // ====================================================================
+    // Hardening pass 3 (S1002600) — JSON merge semantics, ordering,
+    // filter precision, schema CHECK enforcement, parse_row fidelity.
+    // ====================================================================
+
+    // rationale: Core correctness — merging two DISTINCT discriminants
+    // accumulates both keys in consumer_inputs (merge is additive, not
+    // replace-whole-blob).
+    #[test]
+    fn merge_observation_accumulates_distinct_discriminants() {
+        let conn = mem();
+        let id = insert_run(&conn, "2026-05-17T00:00:00Z").expect("ins");
+        merge_observation(
+            &conn,
+            id,
+            &ClusterBObservation::Cascade {
+                cluster_id: "cascade_cluster_a".into(),
+                session_range: (1_700_000_000, 1_700_000_100),
+            },
+        )
+        .expect("merge cascade");
+        merge_observation(
+            &conn,
+            id,
+            &ClusterBObservation::ContextCost {
+                session_id: 7,
+                cost_tokens: 999,
+            },
+        )
+        .expect("merge cost");
+        let row = find_by_id(&conn, id).expect("find");
+        let v: serde_json::Value = serde_json::from_str(&row.consumer_inputs).expect("json");
+        let obj = v.as_object().expect("object");
+        assert!(obj.contains_key("cascade"), "cascade key kept");
+        assert!(obj.contains_key("context_cost"), "context_cost key added");
+        assert_eq!(obj.len(), 2, "both discriminants present");
+    }
+
+    // rationale: Core correctness — merging the SAME discriminant twice
+    // overwrites under that key (last write wins); the blob does not grow
+    // an array or duplicate the key.
+    #[test]
+    fn merge_observation_same_discriminant_overwrites_last_write_wins() {
+        let conn = mem();
+        let id = insert_run(&conn, "2026-05-17T00:00:00Z").expect("ins");
+        merge_observation(
+            &conn,
+            id,
+            &ClusterBObservation::InjectionChain { chain_id: 1 },
+        )
+        .expect("merge 1");
+        merge_observation(
+            &conn,
+            id,
+            &ClusterBObservation::InjectionChain { chain_id: 42 },
+        )
+        .expect("merge 2");
+        let row = find_by_id(&conn, id).expect("find");
+        let v: serde_json::Value = serde_json::from_str(&row.consumer_inputs).expect("json");
+        let obj = v.as_object().expect("object");
+        assert_eq!(obj.len(), 1, "single discriminant key");
+        let chain = &obj["injection_chain"];
+        assert_eq!(chain["chain_id"], serde_json::json!(42), "last write wins");
+    }
+
+    // rationale: Core correctness — the ClusterBObservation serde tag is
+    // `kind` (snake_case); the merged blob's payload carries that tag.
+    #[test]
+    fn merge_observation_serializes_with_kind_tag() {
+        let conn = mem();
+        let id = insert_run(&conn, "2026-05-17T00:00:00Z").expect("ins");
+        merge_observation(
+            &conn,
+            id,
+            &ClusterBObservation::BatternStep {
+                battern_id: "battern_xyz".into(),
+                step_index: 3,
+                duration_ms: 250,
+                outcome: "ok".into(),
+            },
+        )
+        .expect("merge");
+        let row = find_by_id(&conn, id).expect("find");
+        let v: serde_json::Value = serde_json::from_str(&row.consumer_inputs).expect("json");
+        assert_eq!(
+            v["battern_step"]["kind"],
+            serde_json::json!("battern_step"),
+            "snake_case kind tag must be present"
+        );
+        assert_eq!(v["battern_step"]["step_index"], serde_json::json!(3));
+    }
+
+    // rationale: Boundary — find_open orders by started_at DESC; the most
+    // recently started open run is first.
+    #[test]
+    fn find_open_orders_by_started_at_descending() {
+        let conn = mem();
+        let _early = insert_run(&conn, "2026-05-17T00:00:00Z").expect("ins");
+        let mid = insert_run(&conn, "2026-05-17T12:00:00Z").expect("ins");
+        let late = insert_run(&conn, "2026-05-17T23:00:00Z").expect("ins");
+        let rows = find_open(&conn, 10).expect("find_open");
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].id, late, "latest started_at first");
+        assert_eq!(rows[1].id, mid);
+    }
+
+    // rationale: Boundary — find_open respects the limit cap; with 5 open
+    // runs and limit 2, exactly 2 rows return.
+    #[test]
+    fn find_open_respects_limit_cap() {
+        let conn = mem();
+        for i in 0..5_i64 {
+            insert_run(&conn, &format!("2026-05-17T0{i}:00:00Z")).expect("ins");
+        }
+        let rows = find_open(&conn, 2).expect("find_open");
+        assert_eq!(rows.len(), 2, "limit 2 caps the result set");
+    }
+
+    // rationale: Core correctness — find_by_outcome accepts every valid
+    // CHECK-set outcome and returns only matching rows.
+    #[test]
+    fn find_by_outcome_matches_each_valid_outcome_string() {
+        let conn = mem();
+        let cases = [("ok", "ok"), ("fail", "fail"), ("abort", "abort"), ("unknown", "unknown")];
+        let mut ids = Vec::new();
+        for (i, (_, oc)) in cases.iter().enumerate() {
+            let id = insert_run(&conn, &format!("2026-05-17T0{i}:00:00Z")).expect("ins");
+            close_run(&conn, id, &format!("2026-05-17T1{i}:00:00Z"), oc).expect("close");
+            ids.push((id, *oc));
+        }
+        for (id, oc) in ids {
+            let rows = find_by_outcome(&conn, oc, 10).expect("find");
+            assert_eq!(rows.len(), 1, "exactly one {oc} row");
+            assert_eq!(rows[0].id, id);
+        }
+    }
+
+    // rationale: Boundary — find_by_outcome returns empty Vec (not error)
+    // when no run has the requested valid outcome.
+    #[test]
+    fn find_by_outcome_returns_empty_when_no_match() {
+        let conn = mem();
+        let id = insert_run(&conn, "2026-05-17T00:00:00Z").expect("ins");
+        close_run(&conn, id, "2026-05-17T01:00:00Z", "ok").expect("close");
+        let rows = find_by_outcome(&conn, "abort", 10).expect("find");
+        assert!(rows.is_empty(), "no abort runs → empty Vec");
+    }
+
+    // rationale: Adversarial input — the SQL CHECK constraint rejects an
+    // out-of-set outcome written via a RAW UPDATE that bypasses
+    // Outcome::parse. The DB layer is the last line of F9 defence.
+    #[test]
+    fn raw_update_with_invalid_outcome_is_rejected_by_sql_check() {
+        let conn = mem();
+        let id = insert_run(&conn, "2026-05-17T00:00:00Z").expect("ins");
+        let res = conn.execute(
+            "UPDATE workflow_runs SET outcome = ?1 WHERE id = ?2",
+            rsq_params!["bogus", id],
+        );
+        assert!(res.is_err(), "SQL CHECK must reject out-of-set outcome");
+    }
+
+    // rationale: Core correctness — the SQL CHECK constraint explicitly
+    // permits NULL outcome (`outcome IS NULL OR outcome IN (...)`); a run
+    // can be left open indefinitely.
+    #[test]
+    fn sql_check_permits_null_outcome_for_open_runs() {
+        let conn = mem();
+        let id = insert_run(&conn, "2026-05-17T00:00:00Z").expect("ins");
+        let row = find_by_id(&conn, id).expect("find");
+        assert!(row.outcome.is_none(), "open run outcome is NULL — allowed");
+    }
+
+    // rationale: Core correctness — find_by_outcome orders completed runs
+    // by ended_at DESC (most recently closed first).
+    #[test]
+    fn find_by_outcome_orders_by_ended_at_descending() {
+        let conn = mem();
+        let first = insert_run(&conn, "2026-05-17T00:00:00Z").expect("ins");
+        let second = insert_run(&conn, "2026-05-17T00:00:01Z").expect("ins");
+        close_run(&conn, first, "2026-05-17T05:00:00Z", "ok").expect("close");
+        close_run(&conn, second, "2026-05-17T23:00:00Z", "ok").expect("close");
+        let rows = find_by_outcome(&conn, "ok", 10).expect("find");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, second, "later ended_at first");
+    }
+
+    // rationale: Core correctness — parse_row faithfully extracts every
+    // column; a row carrying all fields populated round-trips through
+    // find_by_id with no field loss or type coercion error.
+    #[test]
+    fn parse_row_extracts_all_columns_faithfully() {
+        let conn = mem();
+        let id = insert_run(&conn, "2026-05-17T08:15:30Z").expect("ins");
+        update_cost_tokens(&conn, id, 4096).expect("cost");
+        merge_observation(
+            &conn,
+            id,
+            &ClusterBObservation::Cascade {
+                cluster_id: "cascade_cluster_full".into(),
+                session_range: (1_700_000_000, 1_700_000_500),
+            },
+        )
+        .expect("merge");
+        close_run(&conn, id, "2026-05-17T09:00:00Z", "abort").expect("close");
+        let row = find_by_id(&conn, id).expect("find");
+        assert_eq!(row.id, id);
+        assert_eq!(row.started_at, "2026-05-17T08:15:30Z");
+        assert_eq!(row.ended_at.as_deref(), Some("2026-05-17T09:00:00Z"));
+        assert_eq!(row.outcome.as_deref(), Some("abort"));
+        assert_eq!(row.cost_tokens, Some(4096));
+        assert!(row.consumer_inputs.contains("cascade_cluster_full"));
+        assert!(row.fitness_dimension.abs() < f64::EPSILON);
+    }
+
+    // rationale: Boundary — insert_run accepts an empty started_at string
+    // (no NOT-NULL-empty check); the value persists verbatim.
+    #[test]
+    fn insert_run_accepts_empty_started_at() {
+        let conn = mem();
+        let id = insert_run(&conn, "").expect("insert");
+        let row = find_by_id(&conn, id).expect("find");
+        assert_eq!(row.started_at, "");
+    }
+
+    // rationale: Core correctness — update_cost_tokens accepts a negative
+    // value (column is plain INTEGER); the value persists verbatim. This
+    // pins that no clamping happens at the DB layer.
+    #[test]
+    fn update_cost_tokens_persists_negative_value_verbatim() {
+        let conn = mem();
+        let id = insert_run(&conn, "2026-05-17T00:00:00Z").expect("ins");
+        update_cost_tokens(&conn, id, -500).expect("update");
+        let row = find_by_id(&conn, id).expect("find");
+        assert_eq!(row.cost_tokens, Some(-500));
+    }
+
+    // rationale: Boundary — update_cost_tokens against a non-existent run
+    // affects zero rows and returns Ok (UPDATE matching nothing is not an
+    // error); the contract is silent no-op, pinned here as a regression
+    // anchor.
+    #[test]
+    fn update_cost_tokens_on_missing_run_is_silent_noop() {
+        let conn = mem();
+        let res = update_cost_tokens(&conn, 99_999, 100);
+        assert!(res.is_ok(), "UPDATE matching no rows is not an error");
+        // Confirm nothing was created.
+        assert!(matches!(
+            find_by_id(&conn, 99_999),
+            Err(WorkflowError::RowNotFound { id: 99_999 })
+        ));
+    }
+
+    // rationale: Boundary — close_run against a non-existent run validates
+    // the outcome string first, then the UPDATE is a silent no-op (matches
+    // zero rows). A VALID outcome on a missing id → Ok.
+    #[test]
+    fn close_run_on_missing_run_with_valid_outcome_is_noop_ok() {
+        let conn = mem();
+        let res = close_run(&conn, 88_888, "2026-05-17T01:00:00Z", "ok");
+        assert!(res.is_ok(), "valid outcome + missing id → silent no-op Ok");
+    }
+
+    // rationale: Anti-property F9 — across a full lifecycle on a file-backed
+    // DB (open → insert → merge → cost → close → reopen), fitness_dimension
+    // remains 0.0; the F9 zero-weight invariant survives DB reopen.
+    #[test]
+    fn f9_fitness_dimension_stays_zero_across_db_reopen() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("f9.db");
+        let id;
+        {
+            let conn = open_database(&path).expect("open");
+            id = insert_run(&conn, "2026-05-17T00:00:00Z").expect("ins");
+            update_cost_tokens(&conn, id, 777).expect("cost");
+            close_run(&conn, id, "2026-05-17T01:00:00Z", "ok").expect("close");
+        }
+        let conn2 = open_database(&path).expect("reopen");
+        let row = find_by_id(&conn2, id).expect("find");
+        assert!(
+            row.fitness_dimension.abs() < f64::EPSILON,
+            "F9: fitness_dimension must survive reopen at 0.0"
+        );
+    }
+
+    // rationale: Core correctness — find_by_id returns the exact row for a
+    // mid-range id when multiple runs exist (no off-by-one in the WHERE).
+    #[test]
+    fn find_by_id_selects_the_exact_requested_row() {
+        let conn = mem();
+        let mut ids = Vec::new();
+        for i in 0..5_i64 {
+            ids.push(insert_run(&conn, &format!("2026-05-17T0{i}:00:00Z")).expect("ins"));
+        }
+        let target = ids[2];
+        let row = find_by_id(&conn, target).expect("find");
+        assert_eq!(row.id, target);
+        assert_eq!(row.started_at, "2026-05-17T02:00:00Z");
+    }
+
+    // rationale: Core correctness — find_open ignores closed runs even
+    // when their started_at is the most recent; closing a run removes it
+    // from the open set regardless of ordering.
+    #[test]
+    fn find_open_excludes_a_run_closed_after_a_later_open_run() {
+        let conn = mem();
+        // Closed run with the LATEST started_at.
+        let closed_latest = insert_run(&conn, "2026-05-17T23:00:00Z").expect("ins");
+        // Open run with an earlier started_at.
+        let open_earlier = insert_run(&conn, "2026-05-17T08:00:00Z").expect("ins");
+        close_run(&conn, closed_latest, "2026-05-18T00:00:00Z", "ok").expect("close");
+        let rows = find_open(&conn, 10).expect("find_open");
+        assert_eq!(rows.len(), 1, "only the open run is returned");
+        assert_eq!(rows[0].id, open_earlier);
+    }
 }

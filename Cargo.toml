@@ -39,7 +39,10 @@ regex = "1"
 # rust-subscriber Cargo.toml. module_bindings are vendored under
 # `src/m2_stcortex_consumer/module_bindings/` (canonical SpacetimeDB
 # consumer pattern).
-spacetimedb-sdk = { path = "/home/louranicas/claude-code-workspace/spacetimedb/sdks/rust" }
+# RELATIVE path (T4-PORT, Zen assessment improvement #4): `spacetimedb/` is a
+# sibling of `the-workflow-engine/` under `claude-code-workspace/`, so this
+# resolves on any host without a hard-coded `/home/louranicas/...` prefix.
+spacetimedb-sdk = { path = "../spacetimedb/sdks/rust" }
 tokio = { version = "1", features = ["full"] }
 
 [build-dependencies]

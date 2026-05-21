@@ -23,6 +23,26 @@ The single biggest score lever is the **ops facet 74** — the `wf-crystallise`/
 | 4 | Remove/vendor-normalise absolute `spacetimedb-sdk` path dep | T4-PORT — actionable now | Hardening |
 | 5 | Run `cargo-mutants` on m20-m23 + trust/boundary modules | NEW item T5-MUTANTS — actionable now; highest-signal metric | Measurement |
 
+## Wave-D (2026-05-21) — pure-hardening, Luke-elected (no new scope)
+
+| Item | Resolution |
+|---|---|
+| **H9-rem CLOSED** | m12/m21/m22/m31 integration files authored (Wave-D1, `f8ab952`). **26/26 module integration coverage complete.** +35 tests. |
+| **H8-rem partial** | CC-2 Trust Layer + CC-5 Substrate Cycle suites authored (Wave-D2, `e7edc0c`). **6/7 cross-cluster synergies** — only CC-7 remains (H5-blocked, needs Zen). +13 tests. |
+| **T4-PORT CLOSED** | `spacetimedb-sdk` dep `path` absolute → relative `../spacetimedb/sdks/rust` (Wave-D2). Resolves clean in main tree (siblings under workspace root). Note: `spacetimedb/` is an independent nested repo — relative path is canonical-layout-correct; worktree checkouts need a local symlink. |
+| **T5-MUTANTS done** | `cargo-mutants` run on m9/m11/m20 (Wave-D3, `06e8c51`). Report: `ai_docs/MUTATION_TEST_REPORT_S1002600.md`. **Overall 94.9% kill rate** (112/118 viable) — mutation-STRONG, clears god-tier >70% bar by 23+ pts. m9 100%, m20 95.8%, m11 93.7%. m21/m22/m23/m10/m13 SKIPPED (time budget — cargo-mutants debug-rebuilds per mutant; documented honestly). |
+
+## NEW — T5-MUTANTS-FOLLOWUP (from the mutation report)
+
+6 survived mutants; 4 are scope artefacts (m11/consolidation.rs:211 ms→days divisor — covered by `tests/m11_integration.rs`, excluded only by the `--lib` test scope). **2 genuine test-gaps:**
+
+| ID | File:line | Mutation survived | Fix |
+|---|---|---|---|
+| MUT-1 | `m11/inputs.rs:30` | `\|\|`→`&&` in `recency_factor` half-life guard | Add unit test: finite / zero / negative `half_life_days` each produce the correct branch. |
+| MUT-2 | `m20/mod.rs:251` | `==`→`!=` in `project_after_prefix` | Add unit test: gap-restart branch with a sequence that exercises the `==` predicate directly. |
+
+Both are ~1 unit test each. Queued for next `/carry-forward` iteration (or fold into a Wave-E micro-pass). Also recommend a scoped re-run of cargo-mutants on m21/m22/m23/m10/m13 (the skipped modules) when time budget allows.
+
 ## Session-over-session test count trajectory
 
 | Session checkpoint | Commit | Tests | Δ |

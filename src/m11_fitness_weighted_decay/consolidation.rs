@@ -17,18 +17,43 @@ use super::sunset::{AcceptedWorkflowDecay, SunsetPhase, SunsetStats};
 ///
 /// - `plain_decay_rate = 0.02` → 228-cycle floor per spec § 5.3 calibration.
 /// - `recency_half_life_days = 30.0` aligns with the Phase 6 D120 sunset.
-/// - `sunset_threshold = 0.05` — weight below which a workflow enters
-///   `SunsetExpired` (paired with the m30 sunset trigger).
-/// - `prune_threshold = 0.01` — lifted from `povm-v2_lifecycle.rs`.
+/// - `sunset_threshold` — the **soft floor**: weight below which a workflow
+///   enters [`SunsetPhase::PrunePending`]. Defaults from
+///   [`crate::m30_bank::DEFAULT_PRUNE_PENDING_THRESHOLD`] (`0.10`).
+/// - `prune_threshold` — the **hard floor**: weight below which a workflow
+///   enters [`SunsetPhase::SunsetExpired`]. Defaults from
+///   [`crate::m30_bank::DEFAULT_PRUNE_THRESHOLD`] (`0.05`).
+///
+/// # F4 — single source of truth (W2 hardening)
+///
+/// m11 and m30 drive the *same* `Active → PrunePending → SunsetExpired`
+/// state machine: m30's [`crate::m30_bank::AcceptedWorkflow::phase_for`]
+/// classifies a row by `weight < prune_threshold → SunsetExpired`,
+/// `weight < prune_pending_threshold → PrunePending`. m11's consolidation
+/// cycle drives the soft/hard transitions on the *same* thresholds.
+/// Previously m11 defaulted to `sunset_threshold = 0.05` /
+/// `prune_threshold = 0.01` while m30 used `0.10` / `0.05` — so m11
+/// telemetry under-reported PrunePending/SunsetExpired transitions relative
+/// to m30's actual eviction sweep. m30 is now the single source of truth:
+/// m11's soft floor (`sunset_threshold`, → PrunePending) imports m30's
+/// [`crate::m30_bank::DEFAULT_PRUNE_PENDING_THRESHOLD`]; m11's hard floor
+/// (`prune_threshold`, → SunsetExpired) imports m30's
+/// [`crate::m30_bank::DEFAULT_PRUNE_THRESHOLD`]. The field *names* differ
+/// (m11 historically calls the soft floor `sunset_threshold`; m30 calls it
+/// `prune_pending_threshold`) but the semantics map 1:1.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecayConfig {
     /// Per-cycle floor decay rate. `base_rate = 1.0 - plain_decay_rate`.
     pub plain_decay_rate: f64,
     /// Half-life for the recency exponential.
     pub recency_half_life_days: f64,
-    /// Soft threshold for the SunsetExpired transition (paired with m30).
+    /// Soft floor: weight below which a workflow enters
+    /// [`SunsetPhase::PrunePending`]. Aligned with m30's
+    /// [`crate::m30_bank::DEFAULT_PRUNE_PENDING_THRESHOLD`].
     pub sunset_threshold: f64,
-    /// Hard prune threshold (weight below which the workflow is marked).
+    /// Hard floor: weight below which a workflow enters
+    /// [`SunsetPhase::SunsetExpired`]. Aligned with m30's
+    /// [`crate::m30_bank::DEFAULT_PRUNE_THRESHOLD`].
     pub prune_threshold: f64,
 }
 
@@ -37,8 +62,10 @@ impl Default for DecayConfig {
         Self {
             plain_decay_rate: 0.02,
             recency_half_life_days: 30.0,
-            sunset_threshold: 0.05,
-            prune_threshold: 0.01,
+            // F4: m30 is the single source of truth for the lifecycle
+            // thresholds — see the type-level doc above.
+            sunset_threshold: crate::m30_bank::DEFAULT_PRUNE_PENDING_THRESHOLD,
+            prune_threshold: crate::m30_bank::DEFAULT_PRUNE_THRESHOLD,
         }
     }
 }
@@ -413,8 +440,35 @@ mod tests {
         let c = DecayConfig::default();
         assert!((c.plain_decay_rate - 0.02).abs() < 1e-12);
         assert!((c.recency_half_life_days - 30.0).abs() < 1e-12);
-        assert!((c.sunset_threshold - 0.05).abs() < 1e-12);
-        assert!((c.prune_threshold - 0.01).abs() < 1e-12);
+        // F4: thresholds default from m30 (single source of truth).
+        assert!((c.sunset_threshold - 0.10).abs() < 1e-12);
+        assert!((c.prune_threshold - 0.05).abs() < 1e-12);
+    }
+
+    // rationale: Contract regression — F4 single-source-of-truth. m11's
+    // DecayConfig::default() lifecycle thresholds MUST equal the m30 bank
+    // constants exactly: soft floor (sunset_threshold → PrunePending) =
+    // DEFAULT_PRUNE_PENDING_THRESHOLD; hard floor (prune_threshold →
+    // SunsetExpired) = DEFAULT_PRUNE_THRESHOLD. If m30 retunes a constant,
+    // m11 follows automatically and this test stays green; if someone
+    // forks m11's defaults back to literals this test fires the canary.
+    #[test]
+    fn default_config_thresholds_track_m30_single_source_of_truth() {
+        let c = DecayConfig::default();
+        assert!(
+            (c.sunset_threshold - crate::m30_bank::DEFAULT_PRUNE_PENDING_THRESHOLD).abs() < 1e-12,
+            "m11 soft floor must equal m30 DEFAULT_PRUNE_PENDING_THRESHOLD",
+        );
+        assert!(
+            (c.prune_threshold - crate::m30_bank::DEFAULT_PRUNE_THRESHOLD).abs() < 1e-12,
+            "m11 hard floor must equal m30 DEFAULT_PRUNE_THRESHOLD",
+        );
+        // The soft floor must sit strictly above the hard floor — a sane
+        // PrunePending band requires sunset_threshold > prune_threshold.
+        assert!(
+            c.sunset_threshold > c.prune_threshold,
+            "soft floor must exceed hard floor for a non-empty PrunePending band",
+        );
     }
 
     // ---- chrono_now_ms (1) ----------------------------------------------
@@ -757,8 +811,9 @@ mod tests {
     #[test]
     fn step_2_5_emits_prune_pending_in_soft_band() {
         let now = 1_700_000_000_000;
-        // sunset=0.05, prune=0.01 → 0.02 is in the soft band.
-        let (mut bank, pathways, freq) = one_wf_bank(0.02);
+        // F4-aligned thresholds: sunset=0.10, prune=0.05 → 0.07 is in the
+        // soft band [prune_threshold, sunset_threshold).
+        let (mut bank, pathways, freq) = one_wf_bank(0.07);
         let cfg = DecayConfig::default();
         let stats =
             run_consolidation_cycle(&mut bank, &pathways, &freq, &cfg, || Some(now))
@@ -797,7 +852,7 @@ mod tests {
     #[test]
     fn step_2_5_does_not_emit_prune_pending_below_prune_threshold() {
         let now = 1_700_000_000_000;
-        let (mut bank, pathways, freq) = one_wf_bank(0.005); // below prune (0.01)
+        let (mut bank, pathways, freq) = one_wf_bank(0.005); // below prune (0.05, F4)
         let cfg = DecayConfig::default();
         let stats =
             run_consolidation_cycle(&mut bank, &pathways, &freq, &cfg, || Some(now))
@@ -819,7 +874,7 @@ mod tests {
                 pathway_id: "pw".into(),
                 last_run_ms: now - 1000,
             }],
-            // 0.005 < prune_threshold 0.01 → Step 3 hits
+            // 0.005 < prune_threshold 0.05 (F4) → Step 3 hits
             weights: HashMap::from([(String::from("wf_both"), 0.005)]),
             // sunset_at < now → Step 4 would ALSO hit but the new guard
             // (pruned_this_cycle) prevents the double-count.

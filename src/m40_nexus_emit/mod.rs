@@ -1,6 +1,7 @@
 //! `m40_nexusevent_emit` — NexusEvent push to synthex-v2 `:8092`.
 //! Cluster H · L8.
 
+use std::io::Read;
 use std::time::Duration;
 
 use thiserror::Error;
@@ -10,6 +11,13 @@ pub const DEFAULT_NEXUS_URL: &str = "http://127.0.0.1:8092/v3/nexus/push";
 
 /// Default push timeout.
 pub const DEFAULT_PUSH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// SEC4 — hard cap on the bytes read from a `/v3/nexus/push` response.
+/// The nexus-push handler returns a tiny acknowledgement JSON; a response
+/// larger than 1 MiB is pathological (compromised endpoint, proxy error
+/// page, or contract drift). Capping the read prevents a multi-GB body
+/// from forcing an unbounded allocation in [`HttpNexusClient::push`].
+pub const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 
 /// A typed NexusEvent payload.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -96,9 +104,12 @@ impl NexusClient for HttpNexusClient {
         // We read the body and inspect for a non-null `error` field. An
         // empty body (e.g. 204 No Content) or a non-JSON body is treated as
         // success — many sane servers omit body on accept.
-        let body = resp
-            .text()
-            .map_err(|e| NexusEmitError::Transport(e.to_string()))?;
+        //
+        // SEC4 (size cap): the body is read via `read_capped_body`, which
+        // honours `Content-Length` and hard-stops at `MAX_RESPONSE_BYTES`.
+        // A multi-GB body can no longer force an unbounded allocation — an
+        // over-cap body surfaces as a typed Transport error.
+        let body = read_capped_body(resp)?;
         if body.is_empty() {
             return Ok(());
         }
@@ -116,6 +127,49 @@ impl NexusClient for HttpNexusClient {
         }
         Ok(())
     }
+}
+
+/// SEC4 — read an HTTP response body as a UTF-8 string with a hard
+/// [`MAX_RESPONSE_BYTES`] size cap.
+///
+/// Returns [`NexusEmitError::Transport`] when:
+///
+/// - `Content-Length` is advertised and already exceeds the cap — the
+///   body is rejected *before* a single byte is buffered;
+/// - the body has no `Content-Length` (chunked / streamed) but the actual
+///   stream exceeds the cap — the read is bounded by `Read::take()` and a
+///   `>`-cap result is rejected;
+/// - the underlying stream errors mid-read, or the body is not valid
+///   UTF-8.
+///
+/// A multi-GB body therefore can never force an unbounded allocation: at
+/// most `MAX_RESPONSE_BYTES + 1` bytes are ever held.
+fn read_capped_body(
+    resp: reqwest::blocking::Response,
+) -> Result<String, NexusEmitError> {
+    // Early reject: a server-advertised length over the cap never gets read.
+    if let Some(len) = resp.content_length() {
+        if len > MAX_RESPONSE_BYTES {
+            return Err(NexusEmitError::Transport(format!(
+                "response Content-Length {len} exceeds {MAX_RESPONSE_BYTES}-byte cap"
+            )));
+        }
+    }
+    // Bounded read: take at most cap+1 bytes. If we actually buffered
+    // cap+1, the stream was larger than the cap (chunked / mislabelled
+    // Content-Length) — reject rather than continue.
+    let mut buf = Vec::new();
+    let read_limit = MAX_RESPONSE_BYTES.saturating_add(1);
+    resp.take(read_limit)
+        .read_to_end(&mut buf)
+        .map_err(|e| NexusEmitError::Transport(e.to_string()))?;
+    if buf.len() as u64 > MAX_RESPONSE_BYTES {
+        return Err(NexusEmitError::Transport(format!(
+            "response stream exceeded {MAX_RESPONSE_BYTES}-byte cap"
+        )));
+    }
+    String::from_utf8(buf)
+        .map_err(|e| NexusEmitError::Transport(format!("non-utf8 response body: {e}")))
 }
 
 /// Build a NexusEvent from primitive parts.
@@ -1428,5 +1482,128 @@ mod tests {
             Err(NexusEmitError::NonSuccess(code)) => assert_eq!(code, 503),
             other => panic!("expected NonSuccess(503) through the trait, got {other:?}"),
         }
+    }
+
+    // ====================================================================
+    // W2 hardening — SEC4 response-body size cap.
+    // ====================================================================
+
+    // rationale: SEC4 — MAX_RESPONSE_BYTES is the documented 1 MiB cap.
+    #[test]
+    fn max_response_bytes_is_one_mib() {
+        // rationale: SEC4 (size-cap constant pin)
+        assert_eq!(super::MAX_RESPONSE_BYTES, 1024 * 1024);
+    }
+
+    // rationale: SEC4 — a 2xx response whose body exceeds the 1 MiB cap
+    // must surface a typed Transport error, NOT force an unbounded
+    // allocation. wiremock sets a real Content-Length so the early-reject
+    // branch fires before any byte is buffered.
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_rejects_over_cap_response_body() {
+        // rationale: SEC4 (unbounded-allocation guard)
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // 2 MiB body — twice the cap.
+        let huge = "x".repeat(2 * 1024 * 1024);
+        Mock::given(method("POST"))
+            .and(path("/v3/nexus/push"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(huge)
+                    .insert_header("content-type", "application/json"),
+            )
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v3/nexus/push", server.uri());
+        let r = tokio::task::spawn_blocking(move || {
+            let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(3));
+            let e = build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            c.push(&e)
+        })
+        .await
+        .expect("join");
+        match r {
+            Err(NexusEmitError::Transport(msg)) => {
+                assert!(
+                    msg.contains("cap"),
+                    "over-cap body must mention the cap; got {msg}"
+                );
+            }
+            other => panic!("expected Transport(over-cap), got {other:?}"),
+        }
+    }
+
+    // rationale: SEC4 — a legitimate small body well under the cap still
+    // flows through unchanged; the cap rejects only genuine over-cap bodies.
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_accepts_under_cap_response_body() {
+        // rationale: SEC4 (cap does not regress the happy path)
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // A sizeable-but-under-cap (512 KiB) valid JSON body.
+        let pad = "a".repeat(512 * 1024);
+        let body = format!(r#"{{"pad":"{pad}","ok":true}}"#);
+        Mock::given(method("POST"))
+            .and(path("/v3/nexus/push"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(body)
+                    .insert_header("content-type", "application/json"),
+            )
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v3/nexus/push", server.uri());
+        let r = tokio::task::spawn_blocking(move || {
+            let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(3));
+            let e = build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            c.push(&e)
+        })
+        .await
+        .expect("join");
+        assert!(r.is_ok(), "an under-cap valid body must succeed, got {r:?}");
+    }
+
+    // rationale: SEC4 — an over-cap body that ALSO carries a rejecting
+    // `error` field is rejected on the size cap first; the size guard runs
+    // before body-shape inspection so a giant body never gets parsed.
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_size_cap_precedes_body_shape_check() {
+        // rationale: SEC4 (size guard runs before JSON parse)
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // A 2 MiB body that is also a rejecting JSON envelope.
+        let pad = "x".repeat(2 * 1024 * 1024);
+        let body = format!(r#"{{"error":"queue_full","pad":"{pad}"}}"#);
+        Mock::given(method("POST"))
+            .and(path("/v3/nexus/push"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(body)
+                    .insert_header("content-type", "application/json"),
+            )
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v3/nexus/push", server.uri());
+        let r = tokio::task::spawn_blocking(move || {
+            let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(3));
+            let e = build_event("workflow-trace", "workflow.dispatched", serde_json::json!({}), 0);
+            c.push(&e)
+        })
+        .await
+        .expect("join");
+        assert!(
+            matches!(r, Err(NexusEmitError::Transport(_))),
+            "size cap must reject before body-shape parse, got {r:?}"
+        );
     }
 }

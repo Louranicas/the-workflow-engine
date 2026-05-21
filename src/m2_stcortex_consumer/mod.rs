@@ -113,7 +113,7 @@ mod tests {
 
     #[test]
     fn reexports_query_builders() {
-        let q = tool_call_query(WORKFLOW_TRACE_PREFIX);
+        let q = tool_call_query(WORKFLOW_TRACE_PREFIX).expect("canonical prefix accepted");
         assert!(q.contains("LIKE"));
         assert!(q.contains(WORKFLOW_TRACE_PREFIX));
         assert_eq!(consumption_event_query(), "SELECT * FROM consumption_event");

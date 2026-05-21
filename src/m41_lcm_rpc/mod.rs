@@ -4,6 +4,7 @@
 //! NOTE: `lcm.loop.create` is the canonical LCM RPC name (per S1001882
 //! drift retraction; the legacy `lcm.deploy` form is deprecated).
 
+use std::io::Read;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -17,6 +18,14 @@ pub const RPC_METHOD: &str = "lcm.loop.create";
 
 /// Default request timeout.
 pub const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// SEC4 — hard cap on the bytes read from an `lcm.loop.create` JSON-RPC
+/// response. The LCM supervisor returns a small `{loop_id, created_at_ms}`
+/// envelope; a response larger than 1 MiB is pathological (compromised
+/// endpoint, proxy error page, or contract drift). Capping the read
+/// prevents a multi-GB body from forcing an unbounded allocation in
+/// [`HttpLcmClient::loop_create`].
+pub const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 
 /// `lcm.loop.create` parameters.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -131,11 +140,55 @@ impl LcmClient for HttpLcmClient {
             .json(&body)
             .send()
             .map_err(|e| LcmRpcError::Transport(e.to_string()))?;
-        let value: serde_json::Value = resp
-            .json()
-            .map_err(|e| LcmRpcError::Parse(e.to_string()))?;
+        // SEC4 (size cap): read the body via `read_capped_body`, which
+        // honours `Content-Length` and hard-stops at `MAX_RESPONSE_BYTES`.
+        // A multi-GB body can no longer force an unbounded allocation.
+        let bytes = read_capped_body(resp)?;
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|e| LcmRpcError::Parse(e.to_string()))?;
         parse_rpc_response(&value, request_id)
     }
+}
+
+/// SEC4 — read an HTTP response body with a hard [`MAX_RESPONSE_BYTES`]
+/// size cap.
+///
+/// Returns [`LcmRpcError::Transport`] when:
+///
+/// - `Content-Length` is advertised and already exceeds the cap — the
+///   body is rejected *before* a single byte is buffered;
+/// - the body has no `Content-Length` (chunked / streamed) but the actual
+///   stream exceeds the cap — the read is bounded by `Read::take()` and a
+///   `>`-cap result is rejected;
+/// - the underlying stream errors mid-read.
+///
+/// A multi-GB body therefore can never force an unbounded allocation: at
+/// most `MAX_RESPONSE_BYTES + 1` bytes are ever held.
+fn read_capped_body(
+    resp: reqwest::blocking::Response,
+) -> Result<Vec<u8>, LcmRpcError> {
+    // Early reject: a server-advertised length over the cap never gets read.
+    if let Some(len) = resp.content_length() {
+        if len > MAX_RESPONSE_BYTES {
+            return Err(LcmRpcError::Transport(format!(
+                "response Content-Length {len} exceeds {MAX_RESPONSE_BYTES}-byte cap"
+            )));
+        }
+    }
+    // Bounded read: take at most cap+1 bytes. If we actually buffered
+    // cap+1, the stream was larger than the cap (chunked / mislabelled
+    // Content-Length) — reject rather than continue.
+    let mut buf = Vec::new();
+    let read_limit = MAX_RESPONSE_BYTES.saturating_add(1);
+    resp.take(read_limit)
+        .read_to_end(&mut buf)
+        .map_err(|e| LcmRpcError::Transport(e.to_string()))?;
+    if buf.len() as u64 > MAX_RESPONSE_BYTES {
+        return Err(LcmRpcError::Transport(format!(
+            "response stream exceeded {MAX_RESPONSE_BYTES}-byte cap"
+        )));
+    }
+    Ok(buf)
 }
 
 /// Parse a JSON-RPC 2.0 response envelope against an expected request id.
@@ -1109,5 +1162,143 @@ mod tests {
         // rationale: Contract regression (method namespace shape)
         let segs: Vec<&str> = RPC_METHOD.split('.').collect();
         assert_eq!(segs, vec!["lcm", "loop", "create"]);
+    }
+
+    // ====================================================================
+    // W2 hardening — SEC4 response-body size cap.
+    // ====================================================================
+
+    // rationale: SEC4 — MAX_RESPONSE_BYTES is the documented 1 MiB cap.
+    #[test]
+    fn max_response_bytes_is_one_mib() {
+        // rationale: SEC4 (size-cap constant pin)
+        assert_eq!(super::MAX_RESPONSE_BYTES, 1024 * 1024);
+    }
+
+    // rationale: SEC4 — a JSON-RPC response whose body exceeds the 1 MiB
+    // cap must surface a typed Transport error, NOT force an unbounded
+    // allocation. wiremock sets a real Content-Length so the early-reject
+    // branch fires before any byte is buffered.
+    #[tokio::test(flavor = "current_thread")]
+    async fn loop_create_rejects_over_cap_response_body() {
+        // rationale: SEC4 (unbounded-allocation guard)
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // 2 MiB body — twice the cap.
+        let huge = "x".repeat(2 * 1024 * 1024);
+        Mock::given(method("POST"))
+            .and(path("/rpc"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(huge)
+                    .insert_header("content-type", "application/json"),
+            )
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/rpc", server.uri());
+        let r = tokio::task::spawn_blocking(move || {
+            let c = HttpLcmClient::new(url, std::time::Duration::from_secs(3));
+            let p = LcmLoopCreateParams {
+                workflow_id: 1,
+                conductor_dispatch_id: "c".into(),
+                loop_spec: serde_json::json!({}),
+            };
+            c.loop_create(&p)
+        })
+        .await
+        .expect("join");
+        match r {
+            Err(LcmRpcError::Transport(msg)) => {
+                assert!(
+                    msg.contains("cap"),
+                    "over-cap body must mention the cap; got {msg}"
+                );
+            }
+            other => panic!("expected Transport(over-cap), got {other:?}"),
+        }
+    }
+
+    // rationale: SEC4 — a legitimate small JSON-RPC response well under the
+    // cap still parses correctly; the cap rejects only genuine over-cap
+    // bodies.
+    #[tokio::test(flavor = "current_thread")]
+    async fn loop_create_accepts_under_cap_response_body() {
+        // rationale: SEC4 (cap does not regress the happy path)
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // A valid JSON-RPC response — small, well under the cap. The
+        // request id is allocated from 1 by a fresh client, so id 1 echoes.
+        let body = r#"{"jsonrpc":"2.0","result":{"loop_id":"loop-ok","created_at_ms":7},"id":1}"#;
+        Mock::given(method("POST"))
+            .and(path("/rpc"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(body)
+                    .insert_header("content-type", "application/json"),
+            )
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/rpc", server.uri());
+        let r = tokio::task::spawn_blocking(move || {
+            let c = HttpLcmClient::new(url, std::time::Duration::from_secs(3));
+            let p = LcmLoopCreateParams {
+                workflow_id: 1,
+                conductor_dispatch_id: "c".into(),
+                loop_spec: serde_json::json!({}),
+            };
+            c.loop_create(&p)
+        })
+        .await
+        .expect("join");
+        let ok = r.expect("under-cap valid response must parse");
+        assert_eq!(ok.loop_id, "loop-ok");
+        assert_eq!(ok.created_at_ms, 7);
+    }
+
+    // rationale: SEC4 — a sizeable-but-under-cap padded JSON-RPC response
+    // still parses; proves the cap boundary tolerates large legitimate
+    // bodies (e.g. a verbose loop_spec echo).
+    #[tokio::test(flavor = "current_thread")]
+    async fn loop_create_accepts_large_under_cap_padded_body() {
+        // rationale: SEC4 (boundary — large but legitimate body)
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // 512 KiB of padding inside a valid JSON-RPC envelope.
+        let pad = "a".repeat(512 * 1024);
+        let body = format!(
+            r#"{{"jsonrpc":"2.0","result":{{"loop_id":"loop-big","created_at_ms":9,"_pad":"{pad}"}},"id":1}}"#
+        );
+        Mock::given(method("POST"))
+            .and(path("/rpc"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(body)
+                    .insert_header("content-type", "application/json"),
+            )
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/rpc", server.uri());
+        let r = tokio::task::spawn_blocking(move || {
+            let c = HttpLcmClient::new(url, std::time::Duration::from_secs(3));
+            let p = LcmLoopCreateParams {
+                workflow_id: 1,
+                conductor_dispatch_id: "c".into(),
+                loop_spec: serde_json::json!({}),
+            };
+            c.loop_create(&p)
+        })
+        .await
+        .expect("join");
+        let ok = r.expect("large-but-under-cap response must parse");
+        assert_eq!(ok.loop_id, "loop-big");
     }
 }

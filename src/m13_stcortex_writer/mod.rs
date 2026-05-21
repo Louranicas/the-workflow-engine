@@ -11,6 +11,22 @@
 //! - `[0.015, 0.10)` → write proceeds with `under_pressure` flag
 //! - `< 0.015` → defer to JSONL outbox (no stcortex write)
 //! - ORAC unreachable → defer
+//!
+//! **Consumer-freshness refuse-write invariant (SEC1):** the stcortex
+//! substrate enforces refuse-write-on-stale at the DB layer — a write
+//! from a consumer whose subscription has gone stale is rejected. m13
+//! mirrors that invariant *before* it ever issues a write: an optional
+//! [`FreshnessGate`] (constructor-injected via
+//! [`StcortexWriter::with_freshness_gate`], consistent with the
+//! reader/writer dependency-injection style) is consulted at the top of
+//! [`StcortexWriter::promote_run`]. When the gate reports the consumer is
+//! not fresh, `promote_run` defers with [`DeferReason::StcortexUnreachable`]
+//! instead of writing — this is the sole production constructor of that
+//! variant. A [`RegistrationHandle`](crate::m2_stcortex_consumer::RegistrationHandle)
+//! satisfies [`FreshnessGate`] directly (its `is_fresh()` is the gate
+//! signal). When no gate is injected (`StcortexWriter::new`), the gate is
+//! treated as always-fresh — preserving the legacy signature for the
+//! 3-band-only call sites.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -33,6 +49,13 @@ pub const LTP_PHASE_3_TARGET: f64 = 0.10;
 
 /// Default substrate-band probe timeout.
 pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// SEC4 — hard cap on the bytes read from an ORAC blackboard HTTP
+/// response. The blackboard density probe is a tiny JSON document; a
+/// response larger than 1 MiB is pathological (compromised endpoint,
+/// proxy error page, or contract drift). Capping the read at this bound
+/// prevents a multi-GB body from forcing an unbounded allocation.
+pub const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 
 /// Stable consumer source tag emitted with every memory.
 pub const SOURCE_TAG: &str = "workflow-trace-m13";
@@ -143,7 +166,11 @@ pub enum DeferReason {
     },
     /// ORAC blackboard probe failed.
     OracUnreachable,
-    /// stcortex itself was unreachable.
+    /// The stcortex consumer subscription was not fresh (SEC1
+    /// refuse-write-on-stale). Constructed by [`StcortexWriter::promote_run`]
+    /// when an injected [`FreshnessGate`] reports `is_fresh() == false`;
+    /// the run is deferred to the JSONL outbox rather than written against
+    /// a stale consumer that the substrate would reject anyway.
     StcortexUnreachable,
 }
 
@@ -166,6 +193,31 @@ pub trait SubstrateWriter: Send + Sync {
         &self,
         memory: &CorrelationMemory,
     ) -> Result<i64, StcortexWriterError>;
+}
+
+/// Consumer-freshness signal for the SEC1 refuse-write-on-stale invariant.
+///
+/// stcortex rejects writes from a consumer whose subscription has gone
+/// stale (the DB-layer refuse-write rule). m13 consults a `FreshnessGate`
+/// *before* issuing any write so the deferral happens client-side rather
+/// than surfacing as an opaque substrate `WriteFailed`. A
+/// [`RegistrationHandle`](crate::m2_stcortex_consumer::RegistrationHandle)
+/// satisfies this trait directly — its `is_fresh()` is the gate signal.
+///
+/// Injected via [`StcortexWriter::with_freshness_gate`]; when absent the
+/// writer treats the consumer as always-fresh (legacy `new` path).
+pub trait FreshnessGate: Send + Sync {
+    /// `true` when the stcortex consumer subscription is live and applied.
+    /// `false` when it has gone stale / disconnected — in which case
+    /// [`StcortexWriter::promote_run`] defers with
+    /// [`DeferReason::StcortexUnreachable`] rather than writing.
+    fn is_fresh(&self) -> bool;
+}
+
+impl FreshnessGate for crate::m2_stcortex_consumer::RegistrationHandle {
+    fn is_fresh(&self) -> bool {
+        crate::m2_stcortex_consumer::RegistrationHandle::is_fresh(self)
+    }
 }
 
 /// Default ORAC reader (lightweight HTTP GET).
@@ -192,20 +244,48 @@ impl LtpDensityReader for OracHttpReader {
     ///
     /// - `Client::builder().build()` — TLS / runtime construction failure.
     /// - `client.get(...).send()` — connection refused / DNS / timeout.
-    /// - `.json::<Value>()` — body is not valid UTF-8 JSON.
+    /// - reading the body — body is not valid UTF-8 JSON, or exceeds the
+    ///   [`MAX_RESPONSE_BYTES`] size cap (SEC4 unbounded-allocation guard).
     ///
     /// Rationale: ORAC blackboard transient unreachability is the EXPECTED
     /// failure mode and MUST NOT be propagated as a typed error; defer is
     /// the correct response per 3-band gate spec.
+    ///
+    /// **SEC4 (size cap):** the body is read via [`read_capped_body`], which
+    /// honours `Content-Length` and hard-stops at [`MAX_RESPONSE_BYTES`].
+    /// A multi-GB body can no longer force an unbounded allocation — an
+    /// over-cap body collapses to the `None` unreachable sentinel.
+    ///
+    /// **SEC5 (range check):** a parsed density is accepted only when it is
+    /// finite and within the documented `[0.0, 1.0]` `substrate_LTP_density`
+    /// domain. A non-finite (`NaN` / `±inf`) or out-of-range value is
+    /// rejected to `None` rather than silently feeding the 3-band LTP gate —
+    /// a corrupt probe must defer, not band on garbage.
     fn read_density(&self) -> Option<f64> {
         let client = reqwest::blocking::Client::builder()
             .timeout(self.timeout)
             .build()
             .ok()?;
-        let body: serde_json::Value = client.get(&self.url).send().ok()?.json().ok()?;
-        body.get("substrate_LTP_density")
+        let resp = client.get(&self.url).send().ok()?;
+        let bytes = read_capped_body(resp)?;
+        let body: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        let raw = body
+            .get("substrate_LTP_density")
             .and_then(serde_json::Value::as_f64)
-            .or_else(|| body.as_f64())
+            .or_else(|| body.as_f64())?;
+        // SEC5: reject non-finite or out-of-domain density. The 3-band gate
+        // only has meaning for a density in [0.0, 1.0]; anything else is a
+        // corrupt probe and must defer (None), not band on a poisoned value.
+        if raw.is_finite() && (0.0..=1.0).contains(&raw) {
+            Some(raw)
+        } else {
+            tracing::warn!(
+                target: "m13.read_density.out_of_range",
+                raw,
+                "ORAC density probe returned non-finite or out-of-[0,1] value; deferring"
+            );
+            None
+        }
     }
 }
 
@@ -217,6 +297,10 @@ where
 {
     reader: R,
     writer: W,
+    /// SEC1 — optional consumer-freshness gate. `None` (the `new` path)
+    /// means "always fresh"; `Some` (the `with_freshness_gate` path)
+    /// enforces the refuse-write-on-stale invariant before any write.
+    freshness: Option<std::sync::Arc<dyn FreshnessGate>>,
     outbox_path: PathBuf,
     outbox_lock: Mutex<()>,
 }
@@ -229,6 +313,7 @@ where
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StcortexWriter")
             .field("outbox_path", &self.outbox_path)
+            .field("freshness_gate", &self.freshness.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -239,10 +324,40 @@ where
     W: SubstrateWriter,
 {
     /// Construct with explicit reader / writer / outbox path.
+    ///
+    /// No consumer-freshness gate is installed — the writer treats the
+    /// stcortex consumer as always-fresh and the 3-band LTP gate is the
+    /// sole admission control. Use [`Self::with_freshness_gate`] to
+    /// enforce the SEC1 refuse-write-on-stale invariant.
     pub fn new(reader: R, writer: W, outbox_path: PathBuf) -> Self {
         Self {
             reader,
             writer,
+            freshness: None,
+            outbox_path,
+            outbox_lock: Mutex::new(()),
+        }
+    }
+
+    /// Construct with an explicit consumer-freshness gate (SEC1).
+    ///
+    /// The `freshness` gate is consulted at the top of
+    /// [`Self::promote_run`]: when it reports the stcortex consumer is not
+    /// fresh, the run defers with [`DeferReason::StcortexUnreachable`]
+    /// instead of writing — mirroring the substrate's DB-layer
+    /// refuse-write-on-stale rule on the client side. Pass a
+    /// [`RegistrationHandle`](crate::m2_stcortex_consumer::RegistrationHandle)
+    /// (it implements [`FreshnessGate`]) or any custom gate.
+    pub fn with_freshness_gate(
+        reader: R,
+        writer: W,
+        freshness: std::sync::Arc<dyn FreshnessGate>,
+        outbox_path: PathBuf,
+    ) -> Self {
+        Self {
+            reader,
+            writer,
+            freshness: Some(freshness),
             outbox_path,
             outbox_lock: Mutex::new(()),
         }
@@ -252,8 +367,17 @@ where
     ///
     /// 1. m9 namespace validation (`namespace_key` MUST start with the
     ///    canonical [`crate::m9_watcher_namespace_guard::WORKFLOW_TRACE_NS_PREFIX`]).
-    /// 2. ORAC LTP density probe.
-    /// 3. Either write or defer per 3-band gate.
+    /// 2. SEC1 consumer-freshness gate (when a [`FreshnessGate`] was
+    ///    injected via [`Self::with_freshness_gate`]): if the stcortex
+    ///    consumer is not fresh, defer with
+    ///    [`DeferReason::StcortexUnreachable`] — never write against a
+    ///    stale consumer. Mirrors the substrate's DB-layer
+    ///    refuse-write-on-stale rule on the client side.
+    /// 3. ORAC LTP density probe.
+    /// 4. Either write or defer per 3-band gate.
+    ///
+    /// The freshness gate is checked *before* the LTP probe so a stale
+    /// consumer fails fast without spending a network round-trip on ORAC.
     ///
     /// # Errors
     ///
@@ -267,6 +391,22 @@ where
         namespace_key: &str,
     ) -> Result<PromoteOutcome, StcortexWriterError> {
         let validated = assert_workflow_trace_namespace(namespace_key)?;
+        // SEC1 — refuse-write-on-stale: if a freshness gate is installed
+        // and reports the consumer is not fresh, defer with
+        // StcortexUnreachable before touching ORAC or the substrate.
+        if let Some(gate) = self.freshness.as_deref() {
+            if !gate.is_fresh() {
+                let memory = CorrelationMemory::from_row(run, &validated, false);
+                self.defer(&memory, &DeferReason::StcortexUnreachable)?;
+                tracing::warn!(
+                    target: "m13.promote.stale_consumer",
+                    "stcortex consumer not fresh — deferring (SEC1 refuse-write-on-stale)"
+                );
+                return Ok(PromoteOutcome::Deferred {
+                    reason: DeferReason::StcortexUnreachable,
+                });
+            }
+        }
         let density = self.reader.read_density();
         match density {
             None => {
@@ -380,6 +520,49 @@ where
     pub fn outbox_path(&self) -> &PathBuf {
         &self.outbox_path
     }
+}
+
+/// SEC4 — read an HTTP response body with a hard [`MAX_RESPONSE_BYTES`]
+/// size cap. Returns `None` (the m13 "probe unreachable" sentinel) when:
+///
+/// - `Content-Length` is advertised and already exceeds the cap — the
+///   body is rejected *before* a single byte is buffered;
+/// - the body has no `Content-Length` (chunked / streamed) but the actual
+///   stream exceeds the cap — the read is bounded by `Read::take()` and a
+///   `>`-cap result is rejected;
+/// - the underlying stream errors mid-read.
+///
+/// A multi-GB body therefore can never force an unbounded allocation: at
+/// most `MAX_RESPONSE_BYTES + 1` bytes are ever held.
+fn read_capped_body(resp: reqwest::blocking::Response) -> Option<Vec<u8>> {
+    use std::io::Read;
+    // Early reject: a server-advertised length over the cap never gets read.
+    if let Some(len) = resp.content_length() {
+        if len > MAX_RESPONSE_BYTES {
+            tracing::warn!(
+                target: "m13.read_capped_body.over_cap",
+                content_length = len,
+                cap = MAX_RESPONSE_BYTES,
+                "ORAC response Content-Length exceeds cap; deferring"
+            );
+            return None;
+        }
+    }
+    // Bounded read: take at most cap+1 bytes. If we actually buffered
+    // cap+1, the stream was larger than the cap (chunked / mislabelled
+    // Content-Length) — reject rather than continue.
+    let mut buf = Vec::new();
+    let read_limit = MAX_RESPONSE_BYTES.saturating_add(1);
+    resp.take(read_limit).read_to_end(&mut buf).ok()?;
+    if buf.len() as u64 > MAX_RESPONSE_BYTES {
+        tracing::warn!(
+            target: "m13.read_capped_body.over_cap",
+            cap = MAX_RESPONSE_BYTES,
+            "ORAC response stream exceeded cap (chunked / mislabelled); deferring"
+        );
+        return None;
+    }
+    Some(buf)
 }
 
 /// Wall-clock time in milliseconds since UNIX epoch, or `None` when the
@@ -1213,6 +1396,383 @@ mod tests {
         assert!(
             w.writer.written.lock().expect("lock").is_empty(),
             "rejected namespace must not write"
+        );
+    }
+
+    // ====================================================================
+    // W2 hardening pass (SEC1 + SEC5) — m13 stcortex writer.
+    // SEC1: consumer-freshness refuse-write-on-stale invariant.
+    // SEC5: ORAC density range / finiteness validation.
+    // ====================================================================
+
+    use super::FreshnessGate;
+
+    /// Test-only freshness gate with a fixed verdict.
+    struct StaticFreshness(bool);
+    impl FreshnessGate for StaticFreshness {
+        fn is_fresh(&self) -> bool {
+            self.0
+        }
+    }
+
+    fn writer_with_gate(
+        density: Option<f64>,
+        fresh: bool,
+    ) -> StcortexWriter<StaticDensity, RecordingWriter> {
+        let outbox = tempfile::Builder::new()
+            .suffix(".jsonl")
+            .tempfile()
+            .expect("temp")
+            .into_temp_path();
+        let path = outbox.to_path_buf();
+        std::mem::forget(outbox);
+        StcortexWriter::with_freshness_gate(
+            StaticDensity(density),
+            RecordingWriter {
+                next_id: StdMutex::new(0),
+                written: StdMutex::new(Vec::new()),
+                fail: false,
+            },
+            Arc::new(StaticFreshness(fresh)),
+            path,
+        )
+    }
+
+    // rationale: SEC1 — a stale consumer (gate reports !is_fresh) must
+    // defer with StcortexUnreachable, the variant that was previously
+    // never constructed in production. No substrate write occurs.
+    #[test]
+    fn stale_consumer_defers_with_stcortex_unreachable() {
+        // rationale: SEC1 (refuse-write-on-stale invariant)
+        let w = writer_with_gate(Some(0.50), false);
+        let out = w
+            .promote_run(&run(), &canonical_ns())
+            .expect("defer, not error");
+        assert_eq!(
+            out,
+            PromoteOutcome::Deferred {
+                reason: DeferReason::StcortexUnreachable
+            },
+            "stale consumer must defer with StcortexUnreachable"
+        );
+        assert!(
+            w.writer.written.lock().expect("lock").is_empty(),
+            "stale consumer must NOT write to the substrate"
+        );
+        let contents = std::fs::read_to_string(w.outbox_path()).expect("read outbox");
+        assert!(
+            contents.contains("StcortexUnreachable"),
+            "defer reason must reach the JSONL outbox: {contents}"
+        );
+    }
+
+    // rationale: SEC1 — a fresh consumer (gate reports is_fresh) writes
+    // normally; the gate does not interfere with the happy path.
+    #[test]
+    fn fresh_consumer_writes_normally() {
+        // rationale: SEC1 (gate does not block a fresh consumer)
+        let w = writer_with_gate(Some(0.50), true);
+        let out = w.promote_run(&run(), &canonical_ns()).expect("promote");
+        assert!(
+            matches!(out, PromoteOutcome::Written { .. }),
+            "fresh consumer with healthy density must write; got {out:?}"
+        );
+        assert_eq!(w.writer.written.lock().expect("lock").len(), 1);
+    }
+
+    // rationale: SEC1 — the freshness gate is consulted BEFORE the LTP
+    // probe. A stale consumer must fail-fast: the density reader is never
+    // touched (a panicking reader proves the probe did not run).
+    #[test]
+    fn freshness_gate_precedes_ltp_probe() {
+        // rationale: SEC1 (order-of-operations — gate before probe)
+        struct PanickingReader;
+        impl LtpDensityReader for PanickingReader {
+            fn read_density(&self) -> Option<f64> {
+                panic!("LTP probe must not run when the consumer is stale");
+            }
+        }
+        let outbox = tempfile::Builder::new()
+            .suffix(".jsonl")
+            .tempfile()
+            .expect("temp")
+            .into_temp_path();
+        let path = outbox.to_path_buf();
+        std::mem::forget(outbox);
+        let w = StcortexWriter::with_freshness_gate(
+            PanickingReader,
+            RecordingWriter {
+                next_id: StdMutex::new(0),
+                written: StdMutex::new(Vec::new()),
+                fail: false,
+            },
+            Arc::new(StaticFreshness(false)),
+            path,
+        );
+        let out = w
+            .promote_run(&run(), &canonical_ns())
+            .expect("stale defer must not error");
+        assert_eq!(
+            out,
+            PromoteOutcome::Deferred {
+                reason: DeferReason::StcortexUnreachable
+            }
+        );
+    }
+
+    // rationale: SEC1 — the freshness gate is consulted AFTER namespace
+    // validation. A foreign namespace must still fail with
+    // NamespaceViolation even when the consumer is stale (AP30 wins).
+    #[test]
+    fn namespace_violation_precedes_freshness_gate() {
+        // rationale: SEC1 (AP30 order-of-operations preserved)
+        let w = writer_with_gate(Some(0.50), false);
+        let err = w
+            .promote_run(&run(), "orac_foreign")
+            .expect_err("foreign namespace");
+        assert!(
+            matches!(err, StcortexWriterError::NamespaceViolation(_)),
+            "namespace check must precede the freshness gate"
+        );
+    }
+
+    // rationale: SEC1 — the legacy `new` constructor installs no gate;
+    // promote_run behaves exactly as before (no StcortexUnreachable path).
+    #[test]
+    fn writer_without_gate_never_defers_stcortex_unreachable() {
+        // rationale: SEC1 (legacy path preserved — gate is opt-in)
+        let w = writer(Some(0.50), false);
+        let out = w.promote_run(&run(), &canonical_ns()).expect("promote");
+        assert!(
+            matches!(out, PromoteOutcome::Written { .. }),
+            "no-gate writer must write; got {out:?}"
+        );
+    }
+
+    // rationale: SEC1 — RegistrationHandle satisfies FreshnessGate; this
+    // pins the cross-module impl so a future RegistrationHandle refactor
+    // that breaks the trait bound is caught at compile time.
+    #[test]
+    fn registration_handle_satisfies_freshness_gate_bound() {
+        // rationale: SEC1 (cross-module trait-impl regression)
+        fn assert_gate<T: FreshnessGate>() {}
+        assert_gate::<crate::m2_stcortex_consumer::RegistrationHandle>();
+    }
+
+    // rationale: SEC5 — documents WHY OracHttpReader must reject NaN at
+    // the reader boundary: every band comparison `d < FLOOR` / `d < TARGET`
+    // is false for NaN, so an un-rejected NaN would silently fall through
+    // to the band-3 normal-write arm. The reader's finiteness check is the
+    // only thing standing between a corrupt probe and a poisoned write.
+    // The real HTTP-path rejection is proven by the wiremock
+    // `orac_reader_rejects_*` tests below.
+    #[test]
+    fn nan_density_would_bypass_band_gate_without_sec5_reject() {
+        // rationale: SEC5 (non-finite density must not band)
+        let nan = f64::NAN;
+        assert!(!nan.is_finite(), "NaN is non-finite by definition");
+        // Both band comparisons are false for NaN — it would NOT defer
+        // and would NOT be flagged under_pressure; it would write normally.
+        // `partial_cmp` is None for NaN, which makes the band-`<` check
+        // false in production — exactly the silent fall-through SEC5 guards.
+        assert_eq!(
+            nan.partial_cmp(&LTP_PHASE_1_FLOOR),
+            None,
+            "NaN is incomparable to the floor — band-`<` is false"
+        );
+        assert_eq!(
+            nan.partial_cmp(&LTP_PHASE_3_TARGET),
+            None,
+            "NaN is incomparable to the target — band-`<` is false"
+        );
+        // The SEC5 reject predicate catches it before banding.
+        assert!(
+            !(0.0..=1.0).contains(&nan),
+            "NaN is outside [0,1] — the SEC5 reject predicate"
+        );
+    }
+
+    // rationale: SEC5 — the validation predicate used by OracHttpReader
+    // accepts exactly the [0.0, 1.0] finite domain and rejects everything
+    // else. This pins the predicate independently of the HTTP path.
+    #[test]
+    fn sec5_density_validation_predicate_domain() {
+        // rationale: SEC5 (range predicate boundary table)
+        let accept =
+            |d: f64| d.is_finite() && (0.0..=1.0).contains(&d);
+        // In-domain — accepted.
+        assert!(accept(0.0), "0.0 is the lower bound");
+        assert!(accept(1.0), "1.0 is the upper bound");
+        assert!(accept(0.018), "a realistic substrate_LTP_density");
+        assert!(accept(LTP_PHASE_1_FLOOR));
+        assert!(accept(LTP_PHASE_3_TARGET));
+        // Out-of-domain — rejected.
+        assert!(!accept(-0.0001), "just below 0 is rejected");
+        assert!(!accept(1.0001), "just above 1 is rejected");
+        assert!(!accept(f64::NAN), "NaN is rejected");
+        assert!(!accept(f64::INFINITY), "+inf is rejected");
+        assert!(!accept(f64::NEG_INFINITY), "-inf is rejected");
+        assert!(!accept(1e308), "huge finite-but-out-of-range is rejected");
+    }
+
+    // rationale: SEC4 — MAX_RESPONSE_BYTES is the documented 1 MiB cap.
+    // Drift detection.
+    #[test]
+    fn max_response_bytes_is_one_mib() {
+        // rationale: SEC4 (size-cap constant pin)
+        assert_eq!(super::MAX_RESPONSE_BYTES, 1024 * 1024);
+    }
+
+    // ====================================================================
+    // W2 hardening — OracHttpReader end-to-end (SEC4 + SEC5) via wiremock.
+    // Exercises the real HTTP path so the range check and size cap are
+    // proven, not just the predicates.
+    // ====================================================================
+
+    use super::OracHttpReader;
+
+    // rationale: SEC5 — a well-formed in-range density flows through the
+    // real HTTP reader and is returned verbatim.
+    #[tokio::test(flavor = "current_thread")]
+    async fn orac_reader_returns_in_range_density() {
+        // rationale: SEC5 (happy path — in-domain density)
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"substrate_LTP_density":0.018}"#)
+                    .insert_header("content-type", "application/json"),
+            )
+            .mount(&server)
+            .await;
+        let url = server.uri();
+        let d = tokio::task::spawn_blocking(move || {
+            OracHttpReader::new(url, std::time::Duration::from_secs(2)).read_density()
+        })
+        .await
+        .expect("join");
+        assert!(
+            d.is_some_and(|v| (v - 0.018).abs() < 1e-12),
+            "in-range density must be returned; got {d:?}"
+        );
+    }
+
+    // rationale: SEC5 — an out-of-range density (> 1.0) from a corrupt
+    // probe must be rejected to None, NOT fed into the 3-band gate.
+    #[tokio::test(flavor = "current_thread")]
+    async fn orac_reader_rejects_out_of_range_density() {
+        // rationale: SEC5 (out-of-[0,1] rejection)
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"substrate_LTP_density":42.0}"#)
+                    .insert_header("content-type", "application/json"),
+            )
+            .mount(&server)
+            .await;
+        let url = server.uri();
+        let d = tokio::task::spawn_blocking(move || {
+            OracHttpReader::new(url, std::time::Duration::from_secs(2)).read_density()
+        })
+        .await
+        .expect("join");
+        assert_eq!(d, None, "out-of-range density must be rejected to None");
+    }
+
+    // rationale: SEC5 — a non-finite density (JSON cannot encode NaN, so
+    // we exercise +inf via an explicitly-huge value already covered;
+    // here we use a negative density which is also out-of-domain).
+    #[tokio::test(flavor = "current_thread")]
+    async fn orac_reader_rejects_negative_density() {
+        // rationale: SEC5 (negative density rejection)
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"substrate_LTP_density":-0.5}"#)
+                    .insert_header("content-type", "application/json"),
+            )
+            .mount(&server)
+            .await;
+        let url = server.uri();
+        let d = tokio::task::spawn_blocking(move || {
+            OracHttpReader::new(url, std::time::Duration::from_secs(2)).read_density()
+        })
+        .await
+        .expect("join");
+        assert_eq!(d, None, "negative density must be rejected to None");
+    }
+
+    // rationale: SEC4 — an over-cap response body (Content-Length beyond
+    // MAX_RESPONSE_BYTES) is rejected to None before allocation. The
+    // reader must not OOM on a multi-MiB body.
+    #[tokio::test(flavor = "current_thread")]
+    async fn orac_reader_rejects_over_cap_body() {
+        // rationale: SEC4 (unbounded-allocation guard)
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Body is 2 MiB — well over the 1 MiB cap. wiremock sets a real
+        // Content-Length so the early-reject branch fires.
+        let huge = "x".repeat(2 * 1024 * 1024);
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(huge)
+                    .insert_header("content-type", "application/json"),
+            )
+            .mount(&server)
+            .await;
+        let url = server.uri();
+        let d = tokio::task::spawn_blocking(move || {
+            OracHttpReader::new(url, std::time::Duration::from_secs(3)).read_density()
+        })
+        .await
+        .expect("join");
+        assert_eq!(d, None, "an over-cap response body must be rejected to None");
+    }
+
+    // rationale: SEC4 — a body just under the cap that is valid JSON
+    // still parses (the cap rejects only genuine over-cap bodies).
+    #[tokio::test(flavor = "current_thread")]
+    async fn orac_reader_accepts_under_cap_body() {
+        // rationale: SEC4 (cap does not reject legitimate small bodies)
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Pad the JSON with a large-but-under-cap whitespace-free field so
+        // the body is sizeable yet still well under 1 MiB and valid JSON.
+        let pad = "a".repeat(512 * 1024);
+        let body = format!(r#"{{"pad":"{pad}","substrate_LTP_density":0.05}}"#);
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(body)
+                    .insert_header("content-type", "application/json"),
+            )
+            .mount(&server)
+            .await;
+        let url = server.uri();
+        let d = tokio::task::spawn_blocking(move || {
+            OracHttpReader::new(url, std::time::Duration::from_secs(3)).read_density()
+        })
+        .await
+        .expect("join");
+        assert!(
+            d.is_some_and(|v| (v - 0.05).abs() < 1e-12),
+            "an under-cap valid body must parse; got {d:?}"
         );
     }
 }

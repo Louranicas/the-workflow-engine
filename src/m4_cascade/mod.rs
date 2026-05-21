@@ -161,7 +161,20 @@ impl CascadeCorrelator {
             }
         }
 
-        let observed_at_ms = now_ms();
+        // SF3 silent-failure hardening (S1002388 W2): `now_ms` returns
+        // `Option<i64>` — `None` on a genuine clock fault / overflow.
+        // We log the fault before falling back to the `0` sentinel so a
+        // 1970-epoch `observed_at_ms` is never emitted silently. The
+        // sentinel is retained (rather than skipping the whole batch)
+        // because the correlation result itself is still valid — only
+        // the emission timestamp is unknown.
+        let observed_at_ms = now_ms().unwrap_or_else(|| {
+            tracing::warn!(
+                target: "m4.cascade.clock",
+                "system clock unavailable — observed_at_ms falling back to epoch-0 sentinel"
+            );
+            0
+        });
         let mut out = Vec::with_capacity(clusters.len());
         for group in clusters {
             let pane_labels = collect_pane_labels(&group, dispatch_records);
@@ -247,13 +260,25 @@ fn compute_dag_depth(group: &[&AtuinStep], max_gap_ns: i64) -> usize {
     depth
 }
 
-fn now_ms() -> i64 {
+/// Wall-clock time in milliseconds since UNIX epoch, or `None` when the
+/// system clock is set *before* 1970 (genuine fault) or `as_millis()`
+/// overflows `i64` in year ~292,471,209 AD.
+///
+/// **SF3 silent-failure hardening (S1002388 W2):** prior versions ended
+/// the chain with `.unwrap_or(0)`, silently yielding `0` (= 1970-01-01)
+/// into `CascadeCluster::observed_at_ms` on a clock fault — a phantom
+/// epoch indistinguishable from a real timestamp. The signature is now
+/// `Option<i64>`, mirroring the hardened
+/// [`crate::m13_stcortex_writer`] `now_ms` and
+/// [`crate::m11_fitness_weighted_decay::chrono_now_ms`] contracts. The
+/// sole caller ([`CascadeCorrelator::correlate`]) `tracing::warn!`-logs
+/// the fault before falling back to the `0` sentinel, so the degraded
+/// state is observable rather than silent.
+#[must_use]
+fn now_ms() -> Option<i64> {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|d| i64::try_from(d.as_millis()).ok())
-        .unwrap_or(0)
+    let dur = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+    i64::try_from(dur.as_millis()).ok()
 }
 
 #[cfg(test)]
@@ -764,5 +789,47 @@ mod tests {
         assert_eq!(clusters.len(), 3, "three split clusters expected");
         let first_ts = clusters[0].observed_at_ms;
         assert!(clusters.iter().all(|cl| cl.observed_at_ms == first_ts));
+    }
+
+    // ====================================================================
+    // SF3 silent-failure hardening (S1002388 W2) — +2 regression tests.
+    // `now_ms` previously ended in `.unwrap_or(0)`, silently emitting a
+    // 1970-epoch `observed_at_ms` on a clock fault. The signature is now
+    // `Option<i64>` and the sole caller logs the fault before the
+    // sentinel. These tests pin the new contract.
+    // ====================================================================
+
+    // rationale: SF3 silent-failure — now_ms returns Option<i64>, NOT a
+    // bare i64 that silently collapses a clock fault to 0. On a healthy
+    // production clock it returns Some(realistic 2024+ wall-clock ms).
+    #[test]
+    fn now_ms_signature_is_option_i64_and_returns_some_on_real_clock() {
+        // rationale: SF3 silent-failure
+        // Pin the signature: a clock fault would surface as None, never 0.
+        let ensure_option: fn() -> Option<i64> = super::now_ms;
+        let ts = ensure_option().expect("production clock must be post-1970");
+        assert!(
+            ts > 1_700_000_000_000,
+            "now_ms must return realistic 2024+ wall-clock ms, got {ts}"
+        );
+    }
+
+    // rationale: SF3 silent-failure — on a healthy clock, the
+    // observed_at_ms field threaded through correlate() carries the real
+    // (non-sentinel) timestamp. The epoch-0 sentinel is reachable ONLY
+    // via the logged clock-fault fallback, never silently.
+    #[test]
+    fn observed_at_ms_is_real_timestamp_not_epoch_sentinel_on_healthy_clock() {
+        // rationale: SF3 silent-failure
+        let c = corr(1, 30_000);
+        let steps = vec![step("a", 1_000_000_000, "s1")];
+        let clusters = c.correlate(&steps, &[]);
+        assert_eq!(clusters.len(), 1);
+        assert!(
+            clusters[0].observed_at_ms > 1_700_000_000_000,
+            "observed_at_ms must be a real wall-clock ms on a healthy \
+             clock, never the epoch-0 sentinel: {}",
+            clusters[0].observed_at_ms
+        );
     }
 }

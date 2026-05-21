@@ -147,21 +147,46 @@ pub struct ConsumerIdentity {
     pub transport: Transport,
 }
 
+/// Absolute paths searched, in order, for the `git` executable used by
+/// [`ConsumerIdentity::from_git_sha`].
+///
+/// # SEC3 — `$PATH`-hijack hardening
+///
+/// `from_git_sha` shells out to `git rev-parse --short HEAD` purely to
+/// derive a cosmetic identity string. A bare `Command::new("git")`
+/// resolves the binary through `$PATH`, so a process started with a
+/// hostile `$PATH` (a `git` shim earlier on the search path) would run
+/// attacker-controlled code. The output is *only* an identity label, so
+/// the blast radius is small — but a subprocess that runs whatever
+/// `$PATH` points at is still a needless trust dependency.
+///
+/// Reimplementing git's repository discovery in-process (parent-dir
+/// walk + `.git`-file / worktree `gitdir:` indirection + symbolic-ref
+/// resolution + `packed-refs` fallback) was considered and rejected:
+/// `the-workflow-engine/` is a *subdirectory* of the workspace repo
+/// (`.git` lives at the workspace root, not in CWD), so a naive
+/// "read `./.git/HEAD`" would silently yield the `unknown` fallback.
+/// A correct hand-rolled walk is ~100 LOC of fragile path logic for a
+/// LOW-severity cosmetic string — a poor trade. Instead we keep the
+/// subprocess but resolve `git` via these fixed absolute paths first,
+/// which removes the `$PATH`-hijack vector entirely on a standard
+/// Linux host. The bare `"git"` name is retained only as the last
+/// resort (non-standard install layout); that residual `$PATH` trust
+/// is documented and accepted because the output cannot escape the
+/// `ConsumerName` validator.
+const GIT_ABSOLUTE_PATHS: &[&str] = &["/usr/bin/git", "/bin/git", "/usr/local/bin/git"];
+
 impl ConsumerIdentity {
     /// Construct from the current process's git short SHA if available;
     /// falls back to `"workflow-trace-unknown"` if `git` is absent or
     /// fails. The resulting name always starts with `workflow-trace-`.
+    ///
+    /// The `git` executable is resolved via the fixed absolute paths in
+    /// [`GIT_ABSOLUTE_PATHS`] before falling back to a `$PATH` lookup —
+    /// see that constant's docs for the SEC3 `$PATH`-hijack rationale.
     #[must_use]
     pub fn from_git_sha(namespace: Namespace) -> Self {
-        let sha = std::process::Command::new("git")
-            .args(["rev-parse", "--short", "HEAD"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_owned())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "unknown".to_owned());
+        let sha = Self::resolve_git_short_sha().unwrap_or_else(|| "unknown".to_owned());
         // ConsumerName allows alphanumeric + `_-`; short SHA is hex.
         // Fall back to the literal "workflow-trace-unknown" on validation
         // failure so the identity is always constructible. We construct
@@ -183,6 +208,47 @@ impl ConsumerIdentity {
     /// construction (allowed inside this module) so it cannot panic.
     fn unknown_name_fallback() -> ConsumerName {
         ConsumerName(String::from("workflow-trace-unknown"))
+    }
+
+    /// Run `git rev-parse --short HEAD` and return the trimmed short SHA,
+    /// or `None` if `git` is unavailable / the command fails / the
+    /// output is empty.
+    ///
+    /// SEC3: `git` is resolved via the absolute paths in
+    /// [`GIT_ABSOLUTE_PATHS`] first; the bare `"git"` name is tried only
+    /// as a last resort. This eliminates the `$PATH`-hijack vector on a
+    /// standard host while keeping `git`'s own (correct) repository
+    /// discovery — `the-workflow-engine/` is a subdirectory of the
+    /// workspace repo, so `git` must walk up to find `.git`.
+    fn resolve_git_short_sha() -> Option<String> {
+        // Try each fixed absolute path, then the bare name as a final
+        // fallback. The first program that both spawns AND exits 0 wins.
+        let candidates = GIT_ABSOLUTE_PATHS
+            .iter()
+            .copied()
+            .chain(std::iter::once("git"));
+        for program in candidates {
+            let output = std::process::Command::new(program)
+                .args(["rev-parse", "--short", "HEAD"])
+                .output();
+            let Ok(out) = output else {
+                // This program path did not spawn (absent / not
+                // executable) — try the next candidate.
+                continue;
+            };
+            if !out.status.success() {
+                // Spawned but git itself failed (e.g., not a repo).
+                // Re-trying another git binary will not change that, so
+                // stop here and report no SHA.
+                return None;
+            }
+            let sha = String::from_utf8(out.stdout).ok()?.trim().to_owned();
+            if sha.is_empty() {
+                return None;
+            }
+            return Some(sha);
+        }
+        None
     }
 }
 
@@ -310,6 +376,52 @@ mod tests {
         let id = ConsumerIdentity::from_git_sha(ns);
         assert!(id.name.as_str().starts_with("workflow-trace-"));
         assert_eq!(id.transport, Transport::Subscription);
+    }
+
+    // rationale: SEC3 — `from_git_sha` resolves `git` via fixed absolute
+    // paths before any `$PATH` lookup. Whatever the resolution outcome,
+    // the produced ConsumerName MUST always be a valid, prefix-correct
+    // identity: either `workflow-trace-<sha>` (git found) or the
+    // `workflow-trace-unknown` fallback (git absent). It must never
+    // panic and never yield a name failing the ConsumerName validator.
+    #[test]
+    fn from_git_sha_always_yields_valid_prefixed_name() {
+        let ns = Namespace::new("workflow_trace_sec3").unwrap();
+        let id = ConsumerIdentity::from_git_sha(ns);
+        let name = id.name.as_str();
+        assert!(
+            name.starts_with("workflow-trace-"),
+            "SEC3: name must carry workflow-trace- prefix, got {name:?}"
+        );
+        // Round-trips through the validator — proves the subprocess
+        // output (or the fallback) is always a legal ConsumerName.
+        assert!(
+            ConsumerName::new(name).is_ok(),
+            "SEC3: derived name {name:?} must satisfy ConsumerName validator"
+        );
+        // The suffix is either a non-empty hex-ish short SHA or the
+        // literal "unknown" — never empty.
+        let suffix = name.strip_prefix("workflow-trace-").unwrap();
+        assert!(!suffix.is_empty(), "SEC3: identity suffix must be non-empty");
+    }
+
+    // rationale: SEC3 — the absolute-path allowlist is the hardening
+    // surface. Document-as-test: the constant must list at least the
+    // canonical `/usr/bin/git` location and every entry must be an
+    // absolute path (a relative entry would reintroduce `$PATH` risk).
+    #[test]
+    fn git_absolute_paths_are_all_absolute_and_include_usr_bin() {
+        use super::GIT_ABSOLUTE_PATHS;
+        assert!(
+            GIT_ABSOLUTE_PATHS.contains(&"/usr/bin/git"),
+            "SEC3: canonical /usr/bin/git must be in the allowlist"
+        );
+        for p in GIT_ABSOLUTE_PATHS {
+            assert!(
+                p.starts_with('/'),
+                "SEC3: every git path must be absolute, got {p:?}"
+            );
+        }
     }
 
     #[test]

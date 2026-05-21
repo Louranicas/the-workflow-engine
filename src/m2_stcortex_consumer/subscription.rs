@@ -37,18 +37,67 @@ pub const DEFAULT_SUBSCRIPTION_TIMEOUT_MS: u64 = 5_000;
 /// [`WORKFLOW_TRACE_PREFIX`](super::identity::WORKFLOW_TRACE_PREFIX) (or
 /// a `workflow_trace_*` namespace already validated via
 /// [`crate::m9_watcher_namespace_guard::assert_workflow_trace_namespace`]).
-/// As a defense-in-depth measure against accidental call-site drift, any
-/// single-quote character in `namespace` is stripped — single-quote is
-/// the only SpacetimeDB SQL string delimiter, so removing it neutralises
-/// quote-injection while preserving every legal `workflow_trace_*` rune.
-#[must_use]
-pub fn tool_call_query(namespace: &str) -> String {
+///
+/// # `LIKE`-injection defense (SEC2)
+///
+/// The emitted SQL interpolates `namespace` into a SpacetimeDB `LIKE`
+/// pattern. A `LIKE` pattern recognises three metacharacters that a
+/// plain string literal does not:
+///
+/// - `%` — matches any run of characters (zero or more),
+/// - `_` — matches exactly one character,
+/// - `\` — the pattern escape prefix.
+///
+/// A drifted call-site that supplied `"workflow_trace_%"` would
+/// therefore *widen* the subscription to every namespace beginning
+/// `workflow_trace_` — defeating the W1 narrowing invariant — and a
+/// `\` could be used to craft escape sequences. Single-quote (`'`) is
+/// additionally the only SpacetimeDB SQL string delimiter, so an
+/// unescaped quote would break out of the literal entirely.
+///
+/// Rather than attempt to *escape* these characters (escaping rules
+/// vary by SQL dialect and are easy to get subtly wrong), this builder
+/// takes an allowlist stance: the namespace MUST consist solely of
+/// `[A-Za-z0-9_]`. Every legal `workflow_trace_*` namespace already
+/// satisfies that charset, so a rejection here signals genuine
+/// call-site drift, not a false positive. The lone permitted
+/// "metacharacter", `_`, is intrinsic to the `workflow_trace_` prefix
+/// itself; it is treated as a literal-enough single-char wildcard
+/// because the m9 structural validator constrains the namespace shape
+/// upstream and the trailing `_%` the builder appends already widens
+/// to "this prefix plus a suffix".
+///
+/// # Errors
+///
+/// Returns [`StcortexConsumerError::InvalidNamespace`] if `namespace`
+/// is empty or contains any character outside `[A-Za-z0-9_]` — in
+/// particular `%`, `\`, `'`, whitespace, or punctuation.
+pub fn tool_call_query(namespace: &str) -> Result<String, StcortexConsumerError> {
     // rationale: Adversarial-input discipline. `namespace` is `&str` so
-    // a hypothetical caller could supply `"x' OR 1=1; --"` and we'd
-    // emit broken SQL. Strip the only delimiter that matters; the m9
-    // validator does the structural work upstream.
-    let sanitised: String = namespace.chars().filter(|c| *c != '\'').collect();
-    format!("SELECT * FROM tool_call WHERE namespace LIKE '{sanitised}_%'")
+    // a hypothetical drifted caller could supply `"workflow_trace_%"`
+    // (LIKE-injection — widens the subscription past the W1 narrowing
+    // invariant) or `"x' OR 1=1; --"` (quote breakout). Reject anything
+    // outside the alphanumeric+underscore allowlist; the m9 validator
+    // does the structural work upstream, this is defense-in-depth at the
+    // SQL boundary.
+    if namespace.is_empty() {
+        return Err(StcortexConsumerError::InvalidNamespace(
+            "tool_call_query: namespace is empty".into(),
+        ));
+    }
+    if let Some(bad) = namespace
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || *c == '_'))
+    {
+        return Err(StcortexConsumerError::InvalidNamespace(format!(
+            "tool_call_query: namespace {namespace:?} contains LIKE-unsafe \
+             character {bad:?} (only [A-Za-z0-9_] permitted — rejects \
+             %, \\, ', whitespace, punctuation)"
+        )));
+    }
+    Ok(format!(
+        "SELECT * FROM tool_call WHERE namespace LIKE '{namespace}_%'"
+    ))
 }
 
 /// Build the narrowed `consumption_event` subscription SQL.
@@ -224,7 +273,9 @@ impl FreshnessProbe {
 /// - [`StcortexConsumerError::ConnectionFailed`] if the WebSocket
 ///   handshake fails.
 /// - [`StcortexConsumerError::RegisterFailed`] if the `register_consumer`
-///   reducer rejects the request.
+///   reducer rejects the request, or if the SEC2 `LIKE`-injection guard
+///   in [`tool_call_query`] rejects the namespace (call-site drift past
+///   the m9 structural validator).
 /// - [`StcortexConsumerError::SubscriptionTimeout`] if `on_applied`
 ///   does not fire within `timeout_ms`.
 #[allow(
@@ -278,15 +329,57 @@ pub fn register_narrowed_consumer(
                     error = %reason,
                     "register_consumer reducer call failed"
                 );
-                if let Ok(mut slot) = register_error_for_callback.lock() {
-                    *slot = Some(reason);
-                }
+                // SF4 poison-recovery: prior impl was `if let Ok(..)`
+                // with no `else`, so a poisoned mutex would silently
+                // DROP the registration error — the outer call would
+                // then return `Ok(RegistrationHandle)` for a consumer
+                // the server refused. Recover the inner guard from the
+                // PoisonError (same idiom as m13_stcortex_writer:366);
+                // the slot is a plain `Option<String>` with no
+                // invariant to repair, so reuse-after-poison is safe.
+                let mut slot = register_error_for_callback
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *slot = Some(reason);
             }
             // 2) Subscribe to the two narrowed queries.
-            let q_tool_call = tool_call_query(&namespace_for_query);
+            // SEC2: tool_call_query rejects a namespace that carries a
+            // LIKE metacharacter. If it does (genuine call-site drift —
+            // the m9 guard should have caught it upstream), record it
+            // through the same register_error channel so the outer call
+            // surfaces a typed RegisterFailed instead of silently
+            // subscribing to a widened or malformed query.
+            let q_tool_call = match tool_call_query(&namespace_for_query) {
+                Ok(q) => q,
+                Err(e) => {
+                    let reason = e.to_string();
+                    tracing::error!(
+                        target: "m2.subscription.query",
+                        error = %reason,
+                        "tool_call_query rejected namespace — \
+                         LIKE-injection guard tripped; subscription aborted"
+                    );
+                    let mut slot = register_error_for_callback
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    *slot = Some(reason);
+                    return;
+                }
+            };
             let q_consumption = consumption_event_query();
             let applied_inner = Arc::clone(&applied_for_callback);
-            let tx_inner = Mutex::new(tx.lock().ok().and_then(|mut g| g.take()));
+            // SF6 poison-recovery: prior impl was `tx.lock().ok()` which
+            // discarded a PoisonError and yielded `None` — the sender
+            // would be lost, `on_applied` could never signal, and the
+            // outer recv_timeout would mask the poison as a benign
+            // SubscriptionTimeout. Recover the inner guard from the
+            // PoisonError instead (the guard wraps an `Option<Sender>`
+            // — `.take()` is the same operation either way).
+            let tx_inner = Mutex::new(
+                tx.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take(),
+            );
             ctx.subscription_builder()
                 .on_applied(move |_ctx| {
                     applied_inner.store(true, Ordering::Release);
@@ -353,14 +446,26 @@ pub fn register_narrowed_consumer(
     match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
         Ok(()) => {
             // rationale: even if `on_applied` fired, the
-            // `register_consumer` reducer may have refused the request.
-            // Surface that as a typed RegisterFailed *before* returning a
-            // misleading "fresh" handle. Anti-silent-failure discipline.
-            if let Ok(slot) = register_error.lock() {
-                if let Some(reason) = slot.as_ref() {
-                    return Err(StcortexConsumerError::RegisterFailed(reason.clone()));
-                }
+            // `register_consumer` reducer may have refused the request
+            // (or the SEC2 LIKE-injection guard may have aborted the
+            // subscription). Surface that as a typed RegisterFailed
+            // *before* returning a misleading "fresh" handle.
+            // Anti-silent-failure discipline.
+            //
+            // SF5 poison-recovery: prior impl was `if let Ok(slot)` with
+            // no `else` — on a poisoned mutex the error check was SKIPPED
+            // entirely, so a failed registration was returned as
+            // `Ok(RegistrationHandle)`. Recover the inner guard from the
+            // PoisonError (same idiom as m13_stcortex_writer:366); the
+            // slot is a plain `Option<String>` with no invariant to
+            // repair, so reading it after poison is sound.
+            let slot = register_error
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(reason) = slot.as_ref() {
+                return Err(StcortexConsumerError::RegisterFailed(reason.clone()));
             }
+            drop(slot);
             Ok(RegistrationHandle {
                 identity,
                 registered_at: Instant::now(),
@@ -377,7 +482,7 @@ pub fn register_narrowed_consumer(
 mod tests {
     use super::{
         consumption_event_query, tool_call_query, FreshnessProbe, RegistrationStatus,
-        DEFAULT_SUBSCRIPTION_TIMEOUT_MS, STCORTEX_DB, STCORTEX_URI,
+        StcortexConsumerError, DEFAULT_SUBSCRIPTION_TIMEOUT_MS, STCORTEX_DB, STCORTEX_URI,
     };
 
     #[test]
@@ -398,7 +503,7 @@ mod tests {
     #[test]
     fn tool_call_query_contains_namespace_like_clause() {
         use super::super::identity::WORKFLOW_TRACE_PREFIX;
-        let q = tool_call_query(WORKFLOW_TRACE_PREFIX);
+        let q = tool_call_query(WORKFLOW_TRACE_PREFIX).expect("canonical prefix accepted");
         assert!(q.contains("SELECT * FROM tool_call"));
         assert!(q.contains("LIKE"));
         assert!(q.contains(WORKFLOW_TRACE_PREFIX));
@@ -416,7 +521,7 @@ mod tests {
         // W1 narrowing invariant: queries reference exactly `tool_call`
         // / `consumption_event`. No pathway / memory / ghost_memory.
         use super::super::identity::WORKFLOW_TRACE_PREFIX;
-        let q = tool_call_query(WORKFLOW_TRACE_PREFIX);
+        let q = tool_call_query(WORKFLOW_TRACE_PREFIX).expect("canonical prefix accepted");
         assert!(!q.contains("pathway"));
         assert!(!q.contains("memory"));
         assert!(!q.contains("ghost_memory"));
@@ -497,55 +602,112 @@ mod tests {
     }
 
     // ====================================================================
-    // Hardening pass — adversarial SQL-injection discipline on the
+    // Hardening pass — SEC2 adversarial LIKE-injection discipline on the
     // tool_call query builder + freshness state-machine boundary cases.
     // ====================================================================
 
-    // rationale: Adversarial input — `tool_call_query` strips single
-    // quotes so a hypothetical drifted call-site supplying a quote-injection
-    // payload cannot break out of the SQL string literal. After stripping,
-    // the emitted SQL must contain exactly the two structural quote
-    // delimiters the builder itself adds — the injected quote is gone.
+    // rationale: Adversarial input (SEC2) — `tool_call_query` REJECTS a
+    // namespace carrying a SQL string-delimiter (`'`). A quote-injection
+    // payload that would break out of the LIKE literal yields a typed
+    // InvalidNamespace error, never a malformed query string.
     #[test]
-    fn tool_call_query_strips_single_quotes_from_namespace() {
-        let q = tool_call_query("workflow_trace_x' OR 1=1; --");
-        assert_eq!(
-            q.matches('\'').count(),
-            2,
-            "exactly two structural quotes expected, injected quote not stripped: {q}"
-        );
-        assert!(q.contains("workflow_trace_x OR 1=1; --_%"));
-    }
-
-    // rationale: Adversarial input — multiple embedded quotes are ALL
-    // stripped, not just the first. Defence-in-depth against a payload
-    // crafted to survive a single-pass naive sanitiser.
-    #[test]
-    fn tool_call_query_strips_every_single_quote_not_just_first() {
-        let q = tool_call_query("workflow_trace_'''a'''");
-        assert_eq!(
-            q.matches('\'').count(),
-            2,
-            "all embedded quotes must be stripped: {q}"
+    fn tool_call_query_rejects_single_quote_injection() {
+        let err = tool_call_query("workflow_trace_x' OR 1=1; --")
+            .expect_err("quote-injection namespace must be rejected");
+        assert!(
+            matches!(err, StcortexConsumerError::InvalidNamespace(_)),
+            "expected InvalidNamespace, got {err:?}"
         );
     }
 
-    // rationale: Boundary — an empty namespace still produces structurally
-    // valid SQL (the LIKE clause degenerates to `'_%'`). The builder never
-    // panics on empty input; m9 does the structural rejection upstream.
+    // rationale: Adversarial input (SEC2) — the `%` LIKE metacharacter is
+    // the multi-char wildcard. A drifted caller supplying `workflow_trace_%`
+    // would WIDEN the subscription to every `workflow_trace_*` namespace,
+    // defeating the W1 narrowing invariant. It MUST be rejected.
     #[test]
-    fn tool_call_query_empty_namespace_yields_well_formed_sql() {
-        let q = tool_call_query("");
-        assert_eq!(q, "SELECT * FROM tool_call WHERE namespace LIKE '_%'");
+    fn tool_call_query_rejects_percent_like_wildcard() {
+        let err = tool_call_query("workflow_trace_%")
+            .expect_err("percent LIKE wildcard must be rejected");
+        let StcortexConsumerError::InvalidNamespace(msg) = err else {
+            panic!("expected InvalidNamespace");
+        };
+        assert!(msg.contains('%'), "error must name the offending char: {msg}");
+    }
+
+    // rationale: Adversarial input (SEC2) — the `\` LIKE escape prefix
+    // could be used to craft escape sequences in the pattern. Reject it.
+    #[test]
+    fn tool_call_query_rejects_backslash_like_escape() {
+        let err = tool_call_query("workflow_trace_a\\b")
+            .expect_err("backslash LIKE escape must be rejected");
+        assert!(
+            matches!(err, StcortexConsumerError::InvalidNamespace(_)),
+            "expected InvalidNamespace, got {err:?}"
+        );
+    }
+
+    // rationale: Adversarial input (SEC2) — whitespace and arbitrary
+    // punctuation are outside the `[A-Za-z0-9_]` allowlist and must be
+    // rejected too; defence-in-depth, not just the three LIKE runes.
+    #[test]
+    fn tool_call_query_rejects_whitespace_and_punctuation() {
+        for bad in [
+            "workflow_trace with space",
+            "workflow_trace.dot",
+            "workflow_trace/slash",
+            "workflow_trace;semi",
+        ] {
+            assert!(
+                matches!(
+                    tool_call_query(bad),
+                    Err(StcortexConsumerError::InvalidNamespace(_))
+                ),
+                "did not reject {bad:?}"
+            );
+        }
+    }
+
+    // rationale: Boundary (SEC2) — an empty namespace is rejected with a
+    // typed error rather than emitting a degenerate `'_%'` LIKE clause
+    // that would match every namespace with a one-char suffix.
+    #[test]
+    fn tool_call_query_rejects_empty_namespace() {
+        let err = tool_call_query("").expect_err("empty namespace must be rejected");
+        assert!(
+            matches!(err, StcortexConsumerError::InvalidNamespace(_)),
+            "expected InvalidNamespace, got {err:?}"
+        );
+    }
+
+    // rationale: Positive case (SEC2) — a legal `workflow_trace_*`
+    // namespace (alphanumeric + underscore only) is accepted and the
+    // emitted SQL carries exactly the two structural quote delimiters
+    // the builder adds.
+    #[test]
+    fn tool_call_query_accepts_legal_alphanumeric_underscore_namespace() {
+        let q = tool_call_query("workflow_trace_alpha123")
+            .expect("legal alphanumeric+underscore namespace accepted");
+        assert_eq!(
+            q.matches('\'').count(),
+            2,
+            "exactly two structural quotes expected: {q}"
+        );
+        assert_eq!(
+            q,
+            "SELECT * FROM tool_call WHERE namespace LIKE 'workflow_trace_alpha123_%'"
+        );
     }
 
     // rationale: Determinism — the query builder is a pure function;
     // identical input yields byte-identical output across repeated calls.
     #[test]
     fn tool_call_query_is_deterministic() {
-        let first = tool_call_query("workflow_trace_alpha");
+        let first = tool_call_query("workflow_trace_alpha").expect("legal namespace");
         for _ in 0..50_u32 {
-            assert_eq!(tool_call_query("workflow_trace_alpha"), first);
+            assert_eq!(
+                tool_call_query("workflow_trace_alpha").expect("legal namespace"),
+                first
+            );
         }
     }
 
@@ -627,11 +789,15 @@ mod tests {
         }
     }
 
-    // rationale: Boundary — a quote-only namespace strips to empty and
-    // yields the degenerate-but-valid `'_%'` LIKE clause; no panic.
+    // rationale: Boundary (SEC2) — a quote-only namespace is all
+    // LIKE-unsafe characters; it is rejected with a typed error rather
+    // than silently degenerating to a match-everything LIKE clause.
     #[test]
-    fn tool_call_query_quote_only_namespace_degenerates_safely() {
-        let q = tool_call_query("''''");
-        assert_eq!(q, "SELECT * FROM tool_call WHERE namespace LIKE '_%'");
+    fn tool_call_query_quote_only_namespace_is_rejected() {
+        let err = tool_call_query("''''").expect_err("quote-only namespace must be rejected");
+        assert!(
+            matches!(err, StcortexConsumerError::InvalidNamespace(_)),
+            "expected InvalidNamespace, got {err:?}"
+        );
     }
 }

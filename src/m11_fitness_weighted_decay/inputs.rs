@@ -22,8 +22,27 @@
 /// `half_life_days = +inf` is the degenerate case → recency always `1.0`
 /// (no time decay). `half_life_days <= 0.0` is treated the same as `+inf`
 /// to avoid `lambda = inf` cascading into NaN.
+///
+/// # F7 — divergence from `m31_selector::recency_factor` is intentional
+///
+/// m31's selection-scoring `recency_factor` returns `0.5` for a workflow
+/// that has **never run** (`last_run_ms == None`) — a neutral prior so an
+/// unproven workflow is neither rewarded nor penalised when competing for
+/// dispatch slots. This function does NOT model "never run": its input is
+/// `days_since_last_run`, an *elapsed* quantity, and a value of `0.0` means
+/// "ran today / just now" — which correctly earns full recency credit
+/// (`1.0`, i.e. no time decay) inside the **decay** formula. The two
+/// `0.5` vs `1.0` values answer different questions on different input
+/// domains (`last_run_ms = None` ≠ `days_since_last_run = 0.0`) and must
+/// not be reconciled. The consolidation cycle's clock-skew gate
+/// ([`super::consolidation::run_consolidation_cycle`] Step 0) filters
+/// future-dated `last_run_ms` before this function ever sees a negative
+/// elapsed; `AcceptedWorkflowDecay::last_run_ms` is a non-`Option` `i64`,
+/// so m11 has no "never run" sentinel to handle here.
 #[must_use]
 pub fn recency_factor(days_since_last_run: f64, half_life_days: f64) -> f64 {
+    // F7: days == 0.0 → "ran today" → full recency credit (1.0). This is
+    // NOT the same as m31's never-run prior (0.5); see the doc above.
     if !days_since_last_run.is_finite() || days_since_last_run <= 0.0 {
         return 1.0;
     }

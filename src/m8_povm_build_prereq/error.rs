@@ -69,8 +69,12 @@ pub enum BuildPrereqError {
 /// downstream code can handle the build-vs-startup distinction by exhaustive
 /// `match` rather than string matching.
 ///
-/// Per m8 spec § 10 post-conditions: when this error fires, the process
-/// exits with code `78` (`EX_CONFIG`).
+/// Per m8 spec § 10 this error is *intended* to drive an `exit(78)`
+/// (`EX_CONFIG`) startup-refusal. That wiring is NOT present: the m8 gate
+/// is dormant post-m42-pivot (workflow-trace has no POVM read sites — see
+/// the [`m8_povm_build_prereq`](crate::m8_povm_build_prereq) module doc).
+/// The type and its `EX_CONFIG` convention are retained as ready
+/// machinery; no production path constructs or acts on it today.
 #[derive(Debug, Error)]
 pub enum RuntimeBandError {
     /// POVM `learning_health` is outside the magnitude-weighted band at

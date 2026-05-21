@@ -76,9 +76,9 @@ pub use m12_cli_reports::{
     render_summary_line, OutputFormat,
 };
 pub use m13_stcortex_writer::{
-    CorrelationMemory, DeferReason, LtpDensityReader, OracHttpReader, PromoteOutcome,
-    StcortexWriter, StcortexWriterError, SubstrateWriter, LTP_PHASE_1_FLOOR,
-    LTP_PHASE_3_TARGET,
+    CorrelationMemory, DeferReason, FreshnessGate, LtpDensityReader, OracHttpReader,
+    PromoteOutcome, StcortexWriter, StcortexWriterError, SubstrateWriter,
+    LTP_PHASE_1_FLOOR, LTP_PHASE_3_TARGET, MAX_RESPONSE_BYTES,
 };
 pub use m14_lift::{
     cost_lift, wilson_ci_half, LiftAggregator, LiftAggregatorConfig, LiftError, LiftSnapshot,

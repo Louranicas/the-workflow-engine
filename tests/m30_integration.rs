@@ -143,9 +143,10 @@ fn m30_consolidation_cycle_emits_prune_pending_when_weight_drops_into_soft_band(
     let id = bank.accept(proposal_with_seed(31), 0).expect("accept");
     // Pre-decay weight into the soft band manually so the cycle's Step 2.5
     // condition (`weight < sunset_threshold && weight >= prune_threshold`)
-    // fires regardless of formula sensitivity (default sunset=0.05,
-    // prune=0.01).
-    bank.apply_decay(id, 0.03); // 0.03 < 0.05, >= 0.01
+    // fires regardless of formula sensitivity. Post-W2-F4 the m11
+    // thresholds single-source from m30: prune_pending (soft) = 0.10,
+    // prune (hard) = 0.05, so the PrunePending band is [0.05, 0.10).
+    bank.apply_decay(id, 0.07); // weight 1.0 -> 0.07, inside [0.05, 0.10)
 
     let (pw, freq) = seed_readers(&bank);
     let cfg = DecayConfig::default();

@@ -211,22 +211,60 @@ pub fn render_summary_line(runs: &[WorkflowRunRow]) -> String {
 /// (Json) / row-skip (NdJson) surfaces that catastrophic case visibly
 /// rather than panicking; the contract is "infallible on well-formed
 /// rows".
+///
+/// **SF1 / SF2 silent-failure hardening (S1002388 W2):** both fallback
+/// paths previously discarded the `serde_json::Error` via `unwrap_or_else`
+/// / `filter_map(...ok())`. A serialisation failure (NaN field) would then
+/// be indistinguishable from a genuinely-empty DB (Json → `"[]"`) or a
+/// shorter result set (NdJson → fewer lines). Both paths now bind and
+/// `tracing::error!`-log the error — including an identifying field on the
+/// dropped NdJson row — so the collapse / drop is observable in the log
+/// stream. Observable behaviour of the rendered string is unchanged.
 #[must_use]
 pub fn render_machine(runs: &[WorkflowRunRow], format: OutputFormat) -> String {
     match format {
         OutputFormat::Table => render_summary_line(runs),
-        // Fallback "[]" indicates a NaN fitness_dimension or similar
-        // structural anomaly — render the empty-sentinel rather than
-        // crash the report so the operator can inspect the DB.
-        OutputFormat::Json => serde_json::to_string_pretty(runs).unwrap_or_else(|_| "[]".into()),
-        OutputFormat::NdJson => runs
-            .iter()
-            // filter_map drops rows that fail to serialise (same NaN
-            // case as Json). Per F9 we never substitute a placeholder
-            // row — dropping is the correct response.
-            .filter_map(|r| serde_json::to_string(r).ok())
-            .collect::<Vec<_>>()
-            .join("\n"),
+        // SF1 defense-in-depth: `to_string_pretty` of a `WorkflowRunRow`
+        // slice is effectively infallible — every field is a plain
+        // derive-`Serialize` type, and a non-finite `f64` serialises to
+        // JSON `null` (it does NOT error). The `Err` arm therefore guards
+        // a *future* genuinely-failing `Serialize` impl: should that ever
+        // occur the error is bound + logged so an operator can tell "[]"
+        // "report failed" apart from "[]" "DB is genuinely empty" — never
+        // a silent `unwrap_or_else` swallow.
+        OutputFormat::Json => match serde_json::to_string_pretty(runs) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(
+                    target: "m12.render.json",
+                    error = %e,
+                    "report JSON serialization failed — a Serialize impl returned an error"
+                );
+                "[]".into()
+            }
+        },
+        // SF2 defense-in-depth: explicit loop instead of a silent
+        // `filter_map(...ok())`. As with the Json arm, `to_string` of a
+        // `WorkflowRunRow` is effectively infallible (a non-finite `f64`
+        // serialises to `null`, not an error). Should a row ever genuinely
+        // fail to serialise it is still dropped per F9 — never substitute
+        // a placeholder row — but the drop is now logged with the row id
+        // so it is visible, not silent.
+        OutputFormat::NdJson => {
+            let mut lines: Vec<String> = Vec::with_capacity(runs.len());
+            for r in runs {
+                match serde_json::to_string(r) {
+                    Ok(line) => lines.push(line),
+                    Err(e) => tracing::error!(
+                        target: "m12.render.ndjson",
+                        error = %e,
+                        run_id = r.id,
+                        "ndjson row dropped — a Serialize impl returned an error"
+                    ),
+                }
+            }
+            lines.join("\n")
+        }
     }
 }
 
@@ -971,5 +1009,81 @@ mod tests {
         assert!(parsed[0].cost_tokens.is_none(), "None cost preserved");
         assert!(parsed[0].outcome.is_none(), "None outcome preserved");
         assert!(parsed[0].ended_at.is_none(), "None ended_at preserved");
+    }
+
+    // ====================================================================
+    // SF1 / SF2 — render_machine never silently collapses or drops rows.
+    //
+    // W2 reconciliation note: the SF1/SF2 recon findings assumed a NaN
+    // `fitness_dimension` makes `serde_json` *fail*. It does NOT — serde
+    // serialises a non-finite f64 to JSON `null`. The render_machine
+    // bind+log `Err` arms are kept as defense-in-depth (vs a silent
+    // `unwrap_or_else` / `filter_map(...ok())`), but the real, testable
+    // contract is: a NaN field renders as `null` and the report stays
+    // COMPLETE — never collapsed to "[]", never a dropped row.
+    // ====================================================================
+
+    // rationale: SF1 — a NaN fitness_dimension serialises to JSON `null`;
+    // render_machine must produce a valid, COMPLETE array, never silently
+    // collapse the whole report to "[]".
+    #[test]
+    fn render_machine_json_nan_fitness_renders_as_null_not_collapse() {
+        let mut runs = vec![run(1, Some(100), Some("ok"), "{}")];
+        runs[0].fitness_dimension = f64::NAN;
+        let s = render_machine(&runs, OutputFormat::Json);
+        assert_ne!(s, "[]", "a NaN field must not collapse the whole report");
+        let v: serde_json::Value =
+            serde_json::from_str(&s).expect("render is a valid JSON array");
+        let arr = v.as_array().expect("top level is an array");
+        assert_eq!(arr.len(), 1, "the row is present, not dropped");
+        assert!(
+            arr[0]["fitness_dimension"].is_null(),
+            "a non-finite fitness serialises to JSON null"
+        );
+    }
+
+    // rationale: SF2 — a NaN-fitness row in an NdJson batch renders (as
+    // `null`); it is NOT dropped, and every input row is present in order.
+    #[test]
+    fn render_machine_ndjson_nan_fitness_row_rendered_not_dropped() {
+        let mut runs = vec![
+            run(1, Some(100), Some("ok"), "{}"),
+            run(2, Some(200), Some("fail"), "{}"),
+            run(3, Some(300), Some("abort"), "{}"),
+        ];
+        runs[1].fitness_dimension = f64::NAN; // middle row carries the NaN
+        let s = render_machine(&runs, OutputFormat::NdJson);
+        let lines: Vec<&str> = s.lines().collect();
+        assert_eq!(lines.len(), 3, "all 3 rows rendered, none dropped: {s}");
+        let row0: serde_json::Value =
+            serde_json::from_str(lines[0]).expect("parse line 0");
+        let row1: serde_json::Value =
+            serde_json::from_str(lines[1]).expect("parse line 1");
+        let row2: serde_json::Value =
+            serde_json::from_str(lines[2]).expect("parse line 2");
+        assert_eq!(row0["id"], 1);
+        assert_eq!(row2["id"], 3);
+        assert_eq!(row1["id"], 2, "the NaN row keeps its identity and order");
+        assert!(
+            row1["fitness_dimension"].is_null(),
+            "the NaN row's fitness renders as null"
+        );
+    }
+
+    // rationale: SF2 — even an all-anomalous batch (every row NaN) still
+    // renders one line per row; render_machine never silently flattens a
+    // batch to an empty stream.
+    #[test]
+    fn render_machine_ndjson_all_nan_rows_still_render_one_line_each() {
+        let mut runs = vec![
+            run(1, Some(100), Some("ok"), "{}"),
+            run(2, Some(200), Some("fail"), "{}"),
+        ];
+        for r in &mut runs {
+            r.fitness_dimension = f64::NAN;
+        }
+        let s = render_machine(&runs, OutputFormat::NdJson);
+        assert_eq!(s.lines().count(), 2, "every row still rendered: {s}");
+        assert!(!s.is_empty(), "an all-NaN batch is not an empty stream");
     }
 }

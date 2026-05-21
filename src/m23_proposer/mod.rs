@@ -92,14 +92,18 @@ pub fn build_proposal(
 /// Skips patterns/variants whose evidence fails the F2 gate. The
 /// returned vec preserves source ordering.
 ///
-/// **Silent-swallow rationale (AP-V7-13 audit):** the inner `let Ok(_) = ...`
+/// **Silent-swallow rationale (AP-V7-13 audit):** the inner `match`
 /// branches deliberately discard two error classes:
 ///
 /// 1. [`crate::m21_variant_builder::VariantBuilderError::EmptyPattern`] —
 ///    only fires when `pattern.steps.is_empty()`, which m20's
 ///    `mine_sequences` cannot produce (every emitted `Pattern` carries
-///    `support >= MIN_SUPPORT_FLOOR` which requires ≥1 step). Discarding
-///    is correct: the input contract from m20 already excludes it.
+///    `support >= MIN_SUPPORT_FLOOR` which requires ≥1 step). The m21
+///    refusal arm is therefore **unreachable in production** under the m20
+///    input contract. It is kept as a defensive guard rather than removed
+///    so that a future m20 contract regression surfaces loudly: a
+///    `debug_assert!` fires in debug/test builds, and release builds
+///    skip-and-trace rather than panic (F9 fix — was a silent `continue`).
 /// 2. [`ProposerError::EvidenceBelowThreshold`] and
 ///    [`ProposerError::LiftUnavailable`] — these ARE the F2 gate firing.
 ///    `compose_proposals` is the batched form whose documented behaviour
@@ -118,13 +122,28 @@ pub fn compose_proposals(
             .saturating_mul(crate::m21_variant_builder::MAX_VARIANTS_PER_PATTERN),
     );
     for p in patterns {
-        // rationale: m20 contract excludes empty-step patterns; documented above.
-        let Ok(variants) = crate::m21_variant_builder::build_variants(p) else {
-            tracing::debug!(
-                pattern_hash = p.canonical_hash,
-                "m23::compose_proposals — m21 build_variants refused; m20 contract violation upstream"
-            );
-            continue;
+        // F9 — the m21 refusal arm is a defensive guard, not live error
+        // handling: m20's mine_sequences never emits an empty-step Pattern
+        // (MIN_SUPPORT_FLOOR forces ≥1 step). A `debug_assert!` makes the
+        // impossibility explicit and turns any future m20 contract
+        // regression into a loud test/debug failure; release builds still
+        // skip-and-trace to stay panic-free.
+        let variants = match crate::m21_variant_builder::build_variants(p) {
+            Ok(variants) => variants,
+            Err(e) => {
+                debug_assert!(
+                    false,
+                    "m23::compose_proposals — m21 build_variants refused ({e}); \
+                     m20 contract guarantees non-empty patterns, so this arm \
+                     is unreachable unless the m20 input contract regressed"
+                );
+                tracing::debug!(
+                    pattern_hash = p.canonical_hash,
+                    error = %e,
+                    "m23::compose_proposals — m21 build_variants refused; m20 contract violation upstream"
+                );
+                continue;
+            }
         };
         for v in variants {
             // rationale: F2 gate skip-and-trace is the documented batched

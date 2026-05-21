@@ -56,6 +56,20 @@ pub enum VariantBuilderError {
 /// `MAX_VARIANTS_PER_PATTERN` proposals, always including the identity
 /// variant first.
 ///
+/// # Emission order and fair-cap discipline (F5 fix)
+///
+/// The identity variant is always emitted first. The remaining cap budget
+/// (`MAX_VARIANTS_PER_PATTERN - 1`) is then **interleaved** between swap and
+/// skip mutations rather than emitting all swaps before all skips. A prior
+/// implementation emitted every swap before any skip, so an 8-step pattern
+/// (1 identity + 7 swaps) filled the cap with zero `Skip` variants. Because
+/// `Skip` is the only length-shortening mutation, that starvation biased the
+/// proposal population toward same-length variants. The interleave
+/// (`swap`, `skip`, `swap`, `skip`, …) guarantees the cap never wipes out an
+/// entire mutation class while either class still has candidates: an 8-step
+/// pattern now yields ~1 identity + 4 swaps + 3 skips. Emission within each
+/// class stays ascending-index for determinism.
+///
 /// # Errors
 ///
 /// [`VariantBuilderError::EmptyPattern`] when `pattern.steps` is empty.
@@ -75,39 +89,44 @@ pub fn build_variants(
     };
     out.push(identity);
 
-    // Swap adjacent pairs.
-    for i in 0..pattern.steps.len().saturating_sub(1) {
-        if out.len() >= MAX_VARIANTS_PER_PATTERN {
-            break;
-        }
-        let mut steps = pattern.steps.clone();
-        steps.swap(i, i + 1);
-        let mutation = MutationKind::Swap { at: i };
-        out.push(WorkflowVariant {
-            variant_id: variant_hash(&steps, mutation),
-            steps,
-            mutation,
-            source_pattern_hash: pattern.canonical_hash,
-        });
-    }
-    // Skip mutations are only meaningful when the pattern has >=2 steps
-    // (a single-step pattern reduced to zero is the empty pattern, which is
-    // semantically invalid for downstream m22/m23 consumption). Hoisted
-    // outside the loop because it is loop-invariant.
-    if pattern.steps.len() >= 2 {
-        for i in 0..pattern.steps.len() {
-            if out.len() >= MAX_VARIANTS_PER_PATTERN {
-                break;
-            }
+    // F5 fair emission — interleave swap/skip so the cap can never starve an
+    // entire mutation class. `n_swaps = len - 1`; `n_skips = len` but only
+    // meaningful when `len >= 2` (a single-step pattern reduced to zero is
+    // the empty pattern, semantically invalid for downstream m22/m23).
+    let n_swaps = pattern.steps.len().saturating_sub(1);
+    let n_skips = if pattern.steps.len() >= 2 {
+        pattern.steps.len()
+    } else {
+        0
+    };
+    let mut swap_i = 0_usize;
+    let mut skip_i = 0_usize;
+    // Round-robin: at each step prefer a swap, then a skip, until both
+    // classes are exhausted or the cap is reached.
+    while out.len() < MAX_VARIANTS_PER_PATTERN && (swap_i < n_swaps || skip_i < n_skips) {
+        if swap_i < n_swaps && out.len() < MAX_VARIANTS_PER_PATTERN {
             let mut steps = pattern.steps.clone();
-            steps.remove(i);
-            let mutation = MutationKind::Skip { at: i };
+            steps.swap(swap_i, swap_i + 1);
+            let mutation = MutationKind::Swap { at: swap_i };
             out.push(WorkflowVariant {
                 variant_id: variant_hash(&steps, mutation),
                 steps,
                 mutation,
                 source_pattern_hash: pattern.canonical_hash,
             });
+            swap_i += 1;
+        }
+        if skip_i < n_skips && out.len() < MAX_VARIANTS_PER_PATTERN {
+            let mut steps = pattern.steps.clone();
+            steps.remove(skip_i);
+            let mutation = MutationKind::Skip { at: skip_i };
+            out.push(WorkflowVariant {
+                variant_id: variant_hash(&steps, mutation),
+                steps,
+                mutation,
+                source_pattern_hash: pattern.canonical_hash,
+            });
+            skip_i += 1;
         }
     }
     Ok(out)
@@ -394,36 +413,53 @@ mod tests {
     }
 
     #[test]
-    // rationale: Emission-order contract — variants are emitted in the order
-    // identity, then ALL swaps (ascending index), then ALL skips (ascending
-    // index). m23 proposer relies on this stable ordering.
-    fn emission_order_identity_then_swaps_then_skips() {
+    // rationale: Emission-order contract (F5 fair emission) — variants are
+    // emitted as identity first, then swap/skip INTERLEAVED in ascending
+    // index per class. For [1,2,3] (n_swaps=2, n_skips=3) the order is
+    // identity, swap0, skip0, swap1, skip1, skip2. m23 proposer relies on
+    // this stable ordering; the interleave guarantees the cap (F5) cannot
+    // starve an entire mutation class.
+    fn emission_order_identity_then_interleaved_swaps_skips() {
         let p = pattern(&[1, 2, 3]);
         let v = build_variants(&p).expect("ok");
         // index 0 = identity
         assert!(matches!(v[0].mutation, MutationKind::Identity));
-        // indices 1,2 = swaps at 0,1
+        // interleaved: swap0, skip0, swap1, skip1, then the trailing skip2
         assert_eq!(v[1].mutation, MutationKind::Swap { at: 0 });
-        assert_eq!(v[2].mutation, MutationKind::Swap { at: 1 });
-        // indices 3,4,5 = skips at 0,1,2
-        assert_eq!(v[3].mutation, MutationKind::Skip { at: 0 });
+        assert_eq!(v[2].mutation, MutationKind::Skip { at: 0 });
+        assert_eq!(v[3].mutation, MutationKind::Swap { at: 1 });
         assert_eq!(v[4].mutation, MutationKind::Skip { at: 1 });
         assert_eq!(v[5].mutation, MutationKind::Skip { at: 2 });
     }
 
     #[test]
-    // rationale: Cap interaction — a 10-step pattern would generate
-    // 1+9+10=20 variants but the cap truncates at 8. Since swaps are
-    // emitted BEFORE skips, the 8-variant result is identity + 7 swaps
-    // and ZERO skips reach the output.
-    fn cap_truncates_swaps_first_skips_starved() {
+    // rationale: Cap interaction (F5 fair emission) — a 10-step pattern would
+    // generate 1+9+10=20 variants but the cap truncates at 8. The prior
+    // implementation emitted all swaps before any skip, so the 8-variant
+    // result was identity + 7 swaps + ZERO skips — starving the only
+    // length-shortening mutation class and biasing the proposal population.
+    // The F5 interleave fills the 7 post-identity slots round-robin
+    // (swap0, skip0, swap1, skip1, swap2, skip2, swap3), so BOTH classes
+    // survive the cap: 4 swaps + 3 skips.
+    fn cap_interleaves_swaps_and_skips_no_class_starved() {
         let p = pattern(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
         let v = build_variants(&p).expect("ok");
         assert_eq!(v.len(), MAX_VARIANTS_PER_PATTERN);
         let skips = v.iter().filter(|x| matches!(x.mutation, MutationKind::Skip { .. })).count();
-        assert_eq!(skips, 0, "skips should be starved by the cap: {v:?}");
         let swaps = v.iter().filter(|x| matches!(x.mutation, MutationKind::Swap { .. })).count();
-        assert_eq!(swaps, 7, "expected 7 swaps to fill the cap after identity");
+        assert!(skips > 0, "F5: skip class must not be starved by the cap: {v:?}");
+        assert!(swaps > 0, "F5: swap class must not be starved by the cap: {v:?}");
+        assert_eq!(skips, 3, "expected 3 skips from the round-robin fill: {v:?}");
+        assert_eq!(swaps, 4, "expected 4 swaps from the round-robin fill: {v:?}");
+        // Verify the exact interleaved order of the 7 post-identity slots.
+        assert!(matches!(v[0].mutation, MutationKind::Identity));
+        assert_eq!(v[1].mutation, MutationKind::Swap { at: 0 });
+        assert_eq!(v[2].mutation, MutationKind::Skip { at: 0 });
+        assert_eq!(v[3].mutation, MutationKind::Swap { at: 1 });
+        assert_eq!(v[4].mutation, MutationKind::Skip { at: 1 });
+        assert_eq!(v[5].mutation, MutationKind::Swap { at: 2 });
+        assert_eq!(v[6].mutation, MutationKind::Skip { at: 2 });
+        assert_eq!(v[7].mutation, MutationKind::Swap { at: 3 });
     }
 
     #[test]
@@ -599,15 +635,17 @@ mod tests {
     }
 
     #[test]
-    // rationale: KIO — a six-step pattern (1+5+6=12 would-be) caps at 8 =
-    // identity + 5 swaps + 2 skips.
-    fn kio_six_step_pattern_caps_identity_five_swaps_two_skips() {
+    // rationale: KIO (F5 fair emission) — a six-step pattern (1+5+6=12
+    // would-be) caps at 8. With the round-robin interleave the 7
+    // post-identity slots fill as swap0, skip0, swap1, skip1, swap2, skip2,
+    // swap3 → identity + 4 swaps + 3 skips. Neither class is starved.
+    fn kio_six_step_pattern_caps_identity_four_swaps_three_skips() {
         let p = pattern(&[1, 2, 3, 4, 5, 6]);
         let v = build_variants(&p).expect("ok");
         assert_eq!(v.len(), 8);
         let swaps = v.iter().filter(|x| matches!(x.mutation, MutationKind::Swap { .. })).count();
         let skips = v.iter().filter(|x| matches!(x.mutation, MutationKind::Skip { .. })).count();
-        assert_eq!((swaps, skips), (5, 2));
+        assert_eq!((swaps, skips), (4, 3));
     }
 
     #[test]
@@ -641,14 +679,20 @@ mod tests {
     }
 
     #[test]
-    // rationale: Boundary — a pattern at exactly the m20 DEFAULT_MAX_LENGTH
-    // (8 steps) is the largest realistic input; verify cap still holds.
+    // rationale: Boundary (F5 fair emission) — a pattern at exactly the m20
+    // DEFAULT_MAX_LENGTH (8 steps) is the largest realistic input; verify the
+    // cap still holds AND the round-robin interleave keeps both mutation
+    // classes alive. 8-step (n_swaps=7, n_skips=8): identity + 4 swaps +
+    // 3 skips fills the cap — no class is starved.
     fn boundary_max_length_pattern_respects_variant_cap() {
         let p = pattern(&[1, 2, 3, 4, 5, 6, 7, 8]);
         let v = build_variants(&p).expect("ok");
         assert_eq!(v.len(), MAX_VARIANTS_PER_PATTERN);
-        // identity + 7 swaps fills it; no skip survives.
-        assert_eq!(v.iter().filter(|x| matches!(x.mutation, MutationKind::Skip { .. })).count(), 0);
+        let skips = v.iter().filter(|x| matches!(x.mutation, MutationKind::Skip { .. })).count();
+        let swaps = v.iter().filter(|x| matches!(x.mutation, MutationKind::Swap { .. })).count();
+        assert!(skips > 0, "F5: skip class must survive the cap");
+        assert!(swaps > 0, "F5: swap class must survive the cap");
+        assert_eq!((swaps, skips), (4, 3));
     }
 
     #[test]
@@ -763,5 +807,105 @@ mod tests {
                 assert!(at < p.steps.len() - 1, "swap index {at} out of pair range");
             }
         }
+    }
+
+    // ====================================================================
+    // F5 hardening — fair cap budgeting across mutation classes.
+    // The cap (MAX_VARIANTS_PER_PATTERN) must never wipe out an entire
+    // mutation class while that class still has candidates. Skip is the
+    // only length-shortening mutation, so starving it biases the proposal
+    // population toward same-length variants.
+    // ====================================================================
+
+    #[test]
+    // rationale: F5 regression — for every pattern length that exceeds the
+    // cap, BOTH the swap class and the skip class must be represented in the
+    // capped output. Sweeps the cap-pressure range (lengths 8..=20). Before
+    // the F5 fix, an 8+-step pattern produced identity + 7 swaps + 0 skips.
+    fn f5_cap_never_starves_a_mutation_class() {
+        for len in 8_u32..=20 {
+            let steps: Vec<u32> = (1..=len).collect();
+            let p = pattern(&steps);
+            let v = build_variants(&p).expect("ok");
+            assert_eq!(
+                v.len(),
+                MAX_VARIANTS_PER_PATTERN,
+                "len {len}: output should fill the cap"
+            );
+            let swaps = v
+                .iter()
+                .filter(|x| matches!(x.mutation, MutationKind::Swap { .. }))
+                .count();
+            let skips = v
+                .iter()
+                .filter(|x| matches!(x.mutation, MutationKind::Skip { .. }))
+                .count();
+            assert!(
+                swaps > 0,
+                "len {len}: F5 — swap class starved by the cap ({v:?})"
+            );
+            assert!(
+                skips > 0,
+                "len {len}: F5 — skip class starved by the cap ({v:?})"
+            );
+        }
+    }
+
+    #[test]
+    // rationale: F5 — the round-robin interleave is balanced: when both
+    // classes have surplus candidates beyond the cap, the post-identity
+    // slots split as evenly as the budget allows (7 slots → 4 swaps +
+    // 3 skips, swap-first). The two class counts never differ by more
+    // than one.
+    fn f5_interleave_split_is_balanced() {
+        for len in 8_u32..=30 {
+            let steps: Vec<u32> = (1..=len).collect();
+            let p = pattern(&steps);
+            let v = build_variants(&p).expect("ok");
+            let swaps = v
+                .iter()
+                .filter(|x| matches!(x.mutation, MutationKind::Swap { .. }))
+                .count();
+            let skips = v
+                .iter()
+                .filter(|x| matches!(x.mutation, MutationKind::Skip { .. }))
+                .count();
+            let diff = swaps.abs_diff(skips);
+            assert!(
+                diff <= 1,
+                "len {len}: interleave imbalanced — {swaps} swaps vs {skips} skips"
+            );
+        }
+    }
+
+    #[test]
+    // rationale: F5 — fair emission must not regress the no-cap-pressure
+    // case: a 3-step pattern (6 total variants, well under the cap) still
+    // emits every swap and every skip exactly once.
+    fn f5_no_cap_pressure_emits_all_classes_fully() {
+        let p = pattern(&[1, 2, 3]);
+        let v = build_variants(&p).expect("ok");
+        let swaps = v
+            .iter()
+            .filter(|x| matches!(x.mutation, MutationKind::Swap { .. }))
+            .count();
+        let skips = v
+            .iter()
+            .filter(|x| matches!(x.mutation, MutationKind::Skip { .. }))
+            .count();
+        assert_eq!(swaps, 2, "all swaps emitted when under the cap");
+        assert_eq!(skips, 3, "all skips emitted when under the cap");
+    }
+
+    #[test]
+    // rationale: F5 — the interleave is deterministic: repeated builds of the
+    // same cap-pressured pattern yield bit-identical mutation sequences.
+    fn f5_interleaved_emission_is_deterministic() {
+        let p = pattern(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        let a = build_variants(&p).expect("a");
+        let b = build_variants(&p).expect("b");
+        let seq_a: Vec<MutationKind> = a.iter().map(|x| x.mutation).collect();
+        let seq_b: Vec<MutationKind> = b.iter().map(|x| x.mutation).collect();
+        assert_eq!(seq_a, seq_b, "F5 interleave drifted across runs");
     }
 }

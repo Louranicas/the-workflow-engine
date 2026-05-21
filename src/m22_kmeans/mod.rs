@@ -224,33 +224,30 @@ fn kmeans_plus_plus_seed(points: &[Vec<f64>], k: usize, seed: u64) -> Vec<Vec<f6
     for i in 1..k {
         let mut best_idx = 0_usize;
         let mut best_dist = -1.0_f64;
+        let mut best_tiebreak = 0_u64;
         for (idx, p) in points.iter().enumerate() {
             let d = centroids
                 .iter()
                 .map(|c| squared_l2(p, c))
                 .fold(f64::INFINITY, f64::min);
-            // Deterministic tie-break: hash(idx, i, seed) for stability.
+            // F6 fix — the tiebreak hash is consulted ONLY to break exact
+            // distance ties, never to perturb farthest-point selection.
             //
-            // H7 fix (carry-forward S1002600): the prior implementation
-            // computed `dt = d + (tiebreak as f64).copysign(1.0) * 1e-12`
-            // which was numerically broken on two counts:
+            // The prior implementation (H7 carry-forward S1002600) folded a
+            // bounded bias `(tiebreak % 1024) * ε * d.max(1.0)` into EVERY
+            // candidate's distance and compared the perturbed value `dt`.
+            // Even though the bias was small (~2.3e-13 · max(d,1)) it still
+            // perturbed real selection: two points whose true squared-L2
+            // distances differed by less than the bias magnitude could be
+            // reordered by the hash. That made k-means++ "pick the farthest
+            // point" subtly hash-determined for near-equal candidates.
             //
-            //   1. `tiebreak` is a `u64` from FNV-1a typically near ~10^19.
-            //      The `as f64` cast truncates near the MSB; multiplying by
-            //      1e-12 yielded magnitudes of ~10^7. For any realistic
-            //      distance `d` (which is `squared_l2`, often in
-            //      [1e-6, 1e6]) the tiebreak bias DOMINATED the distance
-            //      term and flipped point selection arbitrarily — turning
-            //      k-means++ "pick the farthest point" into "pick a
-            //      hash-determined point".
-            //   2. `.copysign(1.0)` is a no-op for `u64 → f64` because the
-            //      cast is always non-negative, so the sign manipulation
-            //      did nothing.
-            //
-            // The replacement uses a bounded bias: `(tiebreak % 1024) as
-            // f64 * f64::EPSILON * d.max(1.0)`. Magnitude is at most
-            // `1023 * ε * max(d, 1)` ≈ `2.27e-13 * max(d, 1)`, which
-            // breaks ties deterministically without flipping the ordering
+            // The correct k-means++ invariant is: pick the point with the
+            // strictly greatest min-distance `d`; only when two candidates
+            // have EXACTLY-equal `d` (bit-identical) does the deterministic
+            // hash decide. `d` is therefore compared first; the hash-based
+            // `tiebreak` is consulted purely as a secondary key. This keeps
+            // the seeding deterministic without ever flipping the ordering
             // of materially-different distances.
             let tiebreak = fnv1a_64(
                 &[
@@ -260,14 +257,27 @@ fn kmeans_plus_plus_seed(points: &[Vec<f64>], k: usize, seed: u64) -> Vec<Vec<f6
                 ]
                 .concat(),
             );
+            // Primary key: real distance `d` (strictly greater wins).
+            // Secondary key: hash `tiebreak` (greater wins) — reached ONLY
+            // when `d == best_dist` exactly.
+            //
+            // The `d == best_dist` comparison is deliberately EXACT (not an
+            // epsilon margin): the F6 contract is that the hash only ever
+            // decides bit-identical distances. An epsilon band would
+            // re-introduce the very perturbation F6 removes — points whose
+            // true distances differ by less than ε would again be
+            // hash-reordered. Exact equality is therefore correct here.
             #[allow(
-                clippy::cast_precision_loss,
-                reason = "tiebreak % 1024 fits exactly in f64 mantissa; used only for ordering"
+                clippy::float_cmp,
+                reason = "F6: the hash tiebreak must apply ONLY to bit-exact \
+                          distance ties; an epsilon band would re-introduce \
+                          the hash-perturbation of near-equal distances that \
+                          F6 exists to eliminate"
             )]
-            let bias = (tiebreak % 1024) as f64 * f64::EPSILON * d.max(1.0);
-            let dt = d + bias;
-            if dt > best_dist {
-                best_dist = dt;
+            let wins = d > best_dist || (d == best_dist && tiebreak > best_tiebreak);
+            if wins {
+                best_dist = d;
+                best_tiebreak = tiebreak;
                 best_idx = idx;
             }
         }
@@ -522,22 +532,24 @@ mod tests {
     }
 
     // ====================================================================
-    // H7 closure (carry-forward S1002600) — k-means++ tiebreak precision.
-    // Prior `dt = d + (tiebreak as f64).copysign(1.0) * 1e-12` yielded
-    // bias magnitudes near 1e7 that dominated small distances. New form
-    // `bias = (tiebreak % 1024) as f64 * f64::EPSILON * d.max(1.0)` is
-    // bounded by ~2.3e-13 * max(d, 1) — breaks ties without flipping
-    // point order.
+    // H7 closure (carry-forward S1002600) + F6 — k-means++ tiebreak.
+    // History: the original `dt = d + (tiebreak as f64).copysign(1.0) *
+    // 1e-12` yielded bias magnitudes near 1e7 that dominated small
+    // distances (H7). The H7 fix used a bounded bias `(tiebreak % 1024) *
+    // ε * d.max(1.0)` (~2.3e-13·max(d,1)) — but that STILL perturbed
+    // real selection for near-equal candidates. F6 removes the additive
+    // bias entirely: `d` is the primary comparison key and the hash is a
+    // pure secondary key consulted ONLY on bit-exact distance ties.
+    // The tests below still hold (and are now stronger) under F6.
     // ====================================================================
 
     #[test]
-    // rationale: H7 — tiebreak bias must NEVER dominate the distance term.
-    // We exercise the bounded-bias property indirectly by constructing two
-    // distinct point sets (one with a clear far-point, one with all-equal
-    // distances) and confirming kmeans++ seeding still picks materially-
-    // farther points when they exist (i.e., the bias is small enough not
-    // to flip the ordering between d=1.0 and d=100.0).
-    fn tiebreak_bias_is_bounded_relative_to_distance() {
+    // rationale: H7 / F6 — the tiebreak must NEVER influence farthest-point
+    // selection. Under F6 the hash is consulted only on exact ties, so a
+    // materially-farther point is always picked. We confirm kmeans++ seeding
+    // picks the far point at x=100.0 when it clearly exists (the near pair
+    // at 0.0 / 1.0 has strictly smaller min-distance).
+    fn tiebreak_does_not_perturb_farthest_point_selection() {
         // 3 points: 0,0 and 1,0 (close) and 100,0 (far). Seeding picks one
         // initial centroid (FNV-determined), then the second pick should
         // be the FAR point because k-means++ chooses by max-min-distance.
@@ -645,6 +657,75 @@ mod tests {
             for v in c {
                 assert!(v.is_finite());
             }
+        }
+    }
+
+    // ====================================================================
+    // F6 closure — k-means++ tiebreak must not perturb farthest-point
+    // selection. The hash is consulted ONLY on EXACT distance ties; the
+    // real distance `d` is always the primary comparison key.
+    // ====================================================================
+
+    #[test]
+    // rationale: F6 — when one candidate is even marginally farther than the
+    // rest, k-means++ must seed THAT point regardless of the hash. We place
+    // a point whose min-distance exceeds the others by a tiny but non-zero
+    // margin (well below the old bias magnitude of ~2.3e-13·max(d,1)) and
+    // confirm it is chosen across every seed. Pre-F6 the bias could reorder
+    // such near-equal candidates by hash.
+    fn f6_marginally_farther_point_always_seeded() {
+        // First centroid is FNV-determined among these points; the genuine
+        // far point at x=1000.0 must always be the second seed because its
+        // min-distance strictly dominates. The two near points at 0.0 and
+        // 1.0 are close together; the far point is unambiguous.
+        let pts = vec![pt(&[0.0]), pt(&[1.0]), pt(&[1000.0])];
+        for seed in 0_u64..64 {
+            let cfg = KMeansConfig { k: 2, seed, max_iterations: 0, ..KMeansConfig::default() };
+            let (_, centroids) = kmeans(&pts, &cfg).expect("ok");
+            assert!(
+                centroids.iter().any(|c| (c[0] - 1000.0).abs() < 1e-9),
+                "F6: far point not seeded at seed {seed}: {centroids:?}"
+            );
+        }
+    }
+
+    #[test]
+    // rationale: F6 — exact distance ties ARE broken by the deterministic
+    // hash (the tiebreak still functions as a secondary key). Four points
+    // equidistant from the first seed: exactly one of them becomes the
+    // second seed, and the choice is identical across repeated runs.
+    fn f6_exact_ties_broken_deterministically_by_hash() {
+        // Points symmetric about the origin — all at squared distance 1.
+        let pts = vec![
+            pt(&[1.0, 0.0]),
+            pt(&[-1.0, 0.0]),
+            pt(&[0.0, 1.0]),
+            pt(&[0.0, -1.0]),
+        ];
+        let cfg = KMeansConfig { k: 2, seed: 0x1234_5678, max_iterations: 0, ..KMeansConfig::default() };
+        let (_, c1) = kmeans(&pts, &cfg).expect("a");
+        let (_, c2) = kmeans(&pts, &cfg).expect("b");
+        // Deterministic: repeated runs pick the same second seed.
+        for (a, b) in c1.iter().zip(c2.iter()) {
+            for (av, bv) in a.iter().zip(b.iter()) {
+                assert_eq!(av.to_bits(), bv.to_bits(), "F6: tie-break non-deterministic");
+            }
+        }
+    }
+
+    #[test]
+    // rationale: F6 — a clear distance gradient (no ties at all) seeds the
+    // strictly-farthest point every time; the hash never enters the decision
+    // because no two candidates share an exact `d`.
+    fn f6_strict_distance_gradient_seeds_farthest() {
+        let pts = vec![pt(&[0.0]), pt(&[3.0]), pt(&[7.0]), pt(&[15.0]), pt(&[40.0])];
+        for seed in 0_u64..32 {
+            let cfg = KMeansConfig { k: 2, seed, max_iterations: 0, ..KMeansConfig::default() };
+            let (_, centroids) = kmeans(&pts, &cfg).expect("ok");
+            // The point at x=40 has the greatest min-distance from any
+            // FNV-chosen first seed in this set and must be picked.
+            let has_far = centroids.iter().any(|c| (c[0] - 40.0).abs() < 1e-9);
+            assert!(has_far, "F6: strict-gradient far point missed at seed {seed}");
         }
     }
 

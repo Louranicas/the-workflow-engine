@@ -211,8 +211,40 @@ pub fn select_top_k(
     Ok(scored)
 }
 
+/// Exponential recency factor for a curated-bank workflow.
+///
+/// Returns `exp(-lambda · elapsed_days)` clamped to `[0, 1]`, where
+/// `lambda = ln(2) / RECENCY_HALF_LIFE_DAYS`. A workflow run "now" scores
+/// `1.0`; one at exactly the half-life scores `0.5`; old runs asymptote
+/// to `0.0`.
+///
+/// # Never-run workflows score the *neutral* 0.5 (F7 — intentional divergence)
+///
+/// When `last_run_ms` is `None` (the workflow has been admitted to the bank
+/// but never dispatched) this function returns **`0.5`** — a deliberately
+/// neutral mid-scale recency. This differs from
+/// [`crate::m11_fitness_weighted_decay::inputs::recency_factor`], whose
+/// `days_since_last_run <= 0.0` branch returns **`1.0`**. The divergence is
+/// **intentional** and follows from the two functions answering different
+/// questions:
+///
+/// - **m11 decay** measures elapsed time *since a known last run*. Its
+///   `<= 0.0` branch means "ran just now / no aging yet" → maximal recency
+///   `1.0`. A never-run workflow does not reach m11's compound-decay path
+///   with `days = 0`; m11 normalises an actual elapsed-time signal.
+/// - **m31 selection** ranks bank candidates for dispatch. A never-run
+///   workflow has *no run history at all* — treating it as "freshly run"
+///   (`1.0`) would let unproven workflows outrank genuinely-recent proven
+///   ones on the β-term. `0.5` is the neutral prior: it neither rewards nor
+///   penalises the absence of history, leaving fitness (α), frequency (γ)
+///   and diversity (δ) to discriminate.
+///
+/// If a future change unifies these semantics it must be done centrally
+/// across both modules — flagged for Command per the F7 hardening note.
 fn recency_factor(last_run_ms: Option<i64>, now_ms: i64) -> f64 {
     let Some(last) = last_run_ms else {
+        // F7: neutral 0.5 for never-run workflows — see fn doc comment for
+        // the intentional divergence from m11's 1.0 (different question).
         return 0.5;
     };
     let elapsed_ms = now_ms.saturating_sub(last).max(0);
@@ -878,6 +910,42 @@ mod tests {
         let b = SelectorError::InvalidWeights(2.0);
         assert_eq!(a, b);
         assert_ne!(a, SelectorError::NonFiniteWeight(2.0));
+    }
+
+    #[test]
+    // rationale: F7 — a never-run workflow scores the NEUTRAL 0.5 recency,
+    // intentionally distinct from m11's 1.0 for `days_since_last_run <= 0`.
+    // This locks the m31 selection-scoring semantics: an unproven (never-run)
+    // workflow must NOT receive the maximal recency a freshly-run one gets,
+    // or unproven candidates would outrank genuinely-recent proven ones on
+    // the β-term. Treating "no history" as 0.5 (neutral) is the contract.
+    fn f7_never_run_workflow_scores_neutral_half_recency() {
+        // Never-run: last_run_ms = None → recency 0.5.
+        assert!((recency_factor(None, 1_700_000_000_000) - 0.5).abs() < 1e-12);
+        // Just-run: elapsed 0 → recency 1.0. The two are deliberately
+        // different — a never-run workflow is NOT treated as freshly run.
+        assert!((recency_factor(Some(1_700_000_000_000), 1_700_000_000_000) - 1.0).abs() < 1e-12);
+        assert!(
+            recency_factor(None, 1_700_000_000_000)
+                < recency_factor(Some(1_700_000_000_000), 1_700_000_000_000),
+            "F7: a never-run workflow must score strictly below a just-run one"
+        );
+    }
+
+    #[test]
+    // rationale: F7 — at equal fitness / frequency / diversity, a workflow
+    // run *now* must outrank a never-run one because its β-recency term is
+    // 1.0 vs the never-run neutral 0.5. Confirms the divergence has the
+    // intended selection effect end-to-end through select_top_k.
+    fn f7_recently_run_outranks_never_run_at_equal_other_components() {
+        let cfg = SelectorConfig::default();
+        let now = 1_700_000_000_000_i64;
+        let recently_run = workflow(1, 0.5, 5, Some(now));
+        let never_run = workflow(2, 0.5, 5, None);
+        let r = select_top_k(&[never_run, recently_run], &cfg, |_| 0.5, now, 2).expect("ok");
+        assert_eq!(r[0].workflow_id, 1, "recently-run workflow must rank first");
+        assert!((r[0].components.recency - 1.0).abs() < 1e-12);
+        assert!((r[1].components.recency - 0.5).abs() < 1e-12);
     }
 
     #[test]

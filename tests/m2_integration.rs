@@ -91,14 +91,14 @@ fn surface_constants_are_stable() {
 
 #[test]
 fn tool_call_query_includes_namespace_filter() {
-    let q = tool_call_query("workflow_trace_test");
+    let q = tool_call_query("workflow_trace_test").expect("legal namespace");
     assert!(q.contains("WHERE namespace LIKE"));
     assert!(q.contains("workflow_trace_test"));
 }
 
 #[test]
 fn tool_call_query_does_not_widen_to_other_tables() {
-    let q = tool_call_query("workflow_trace_test");
+    let q = tool_call_query("workflow_trace_test").expect("legal namespace");
     for forbidden in ["pathway", "memory", "ghost_memory", "consumer", "decay_audit"] {
         assert!(!q.contains(forbidden), "{q} contains {forbidden}");
     }
@@ -149,25 +149,29 @@ fn live_register_narrowed_consumer_smoke() {
 // ---- Hardening pass S1002209 (Cluster A) — +10 tests --------------------
 
 #[test]
-fn hardening_tool_call_query_strips_single_quote_injection() {
+fn hardening_tool_call_query_rejects_sql_injection_namespace() {
     // rationale: Adversarial input — a malicious caller bypassing m9
-    // could supply `"x' OR 1=1; --"`. The hardening fix strips single
-    // quotes (the only SpacetimeDB string delimiter) so the resulting
-    // SQL is syntactically valid even if semantically a no-match.
-    let q = tool_call_query("x' OR 1=1; --");
-    assert!(!q.contains("' OR 1=1"), "single-quote must be stripped from SQL: {q}");
-    // Still well-formed:
-    assert!(q.starts_with("SELECT * FROM tool_call WHERE namespace LIKE '"));
-    assert!(q.ends_with("_%'"));
+    // could supply `"x' OR 1=1; --"`. The W2 SEC2 hardening replaced
+    // quote-stripping with an allowlist: any namespace containing a
+    // character outside `[A-Za-z0-9_]` (here `'`, spaces, `=`, `;`, `-`)
+    // is REJECTED with a typed error — no widened query is ever built
+    // from attacker-shaped input.
+    let result = tool_call_query("x' OR 1=1; --");
+    assert!(
+        result.is_err(),
+        "an injection-shaped namespace must be rejected, not sanitised: {result:?}"
+    );
 }
 
 #[test]
-fn hardening_tool_call_query_preserves_legal_workflow_trace_runes() {
-    // rationale: Anti-property — the sanitiser must not corrupt legal
-    // namespaces (underscore, hyphen, alphanumeric). Only `'` is
-    // stripped.
-    let q = tool_call_query("workflow_trace_cluster-A_v2");
-    assert!(q.contains("workflow_trace_cluster-A_v2"));
+fn hardening_tool_call_query_accepts_legal_workflow_trace_namespace() {
+    // rationale: Anti-property — the W2 SEC2 allowlist must not reject a
+    // legal namespace. Legal = `[A-Za-z0-9_]+`; per stcortex hyphen-slug
+    // discipline hyphens are munged to underscores upstream, so a
+    // canonical namespace never carries a hyphen.
+    let q = tool_call_query("workflow_trace_cluster_A_v2")
+        .expect("an all-[A-Za-z0-9_] namespace is legal");
+    assert!(q.contains("workflow_trace_cluster_A_v2"));
 }
 
 #[test]

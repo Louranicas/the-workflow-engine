@@ -52,10 +52,48 @@ Zen verdict: KEYSTONE **REQUEST-CHANGES** (F1); trust spine **REQUEST-CHANGES, B
 Zen "done well": m11 formula (FMA + 10 proptests), m32 dispatcher refusal sequence, m33 aggregate
 duplicate-before-missing ordering, consistent NaN/non-finite discipline, m9 NUL/BOM rejection.
 
-## Execution
+## Execution & progress
 
-W2 fixes applied by Command **sequentially, batched by file** (no parallel writers — W1 incident
-lesson). FP-verify each against source; full gate after; Zen audit packet on W2 close.
+**Command-applied + verified (committed `c662b2d` / in flight):**
+- ✅ **K1/F1** — m20 KEYSTONE `project_after_prefix` rewritten as a correct backtracking
+  matcher; m20 61 tests pass. (`c662b2d`)
+- ✅ **K2/F8** — 9 lock-poison panics → `PoisonError::into_inner`. (`c662b2d`)
+- ✅ **K3** — `.cargo/audit.toml`; `cargo audit` clean. (`c662b2d`)
+- ✅ **F2** — m8 trust-gate false docstrings corrected (`mod.rs` + `error.rs`); gate honestly
+  documented as dormant-by-construction post-m42-pivot. **ARCHITECTURE FLAG → node 0.A:** m8's
+  POVM gate has nothing to protect (workflow-trace is POVM-decoupled); keep-dormant / wire /
+  retire is an open decision, NOT a hardening fix.
+
+**Dispatched to 5 disjoint-file parallel agents (incident-proofed):**
+- SF4/SF5/SF6/SEC2/SEC3 → m2 · SF1/SF2/SF3 → m12+m4 · SEC1/SEC5/SEC4 → m13+m40+m41 ·
+  F5/F6/F9/F7 → m21+m22+m23+m31 · F3/F4/F7 → m9+m11.
+
+### Final status — all 19 findings resolved
+
+| Finding | Resolution |
+|---------|-----------|
+| K1/F1 | FIXED — m20 backtracking matcher (`c662b2d`) |
+| K2/F8 | FIXED — 9 lock-poison → `into_inner` (`c662b2d`) |
+| K3 | FIXED — `.cargo/audit.toml` (`c662b2d`) |
+| F2 | FIXED — m8 doc-honesty; gate dormant-by-construction; **architecture flag → node 0.A** |
+| SF1/SF2 | FIXED (code = defense-in-depth) — recon premise was a **false positive** (`serde_json` renders NaN as `null`, never errors); 3 tests rewritten against true behaviour |
+| SF3 | FIXED — m4 `now_ms` → `Option<i64>` |
+| SF4/SF5/SF6 | FIXED — m2 subscription poison-recovery |
+| SEC1 | FIXED — m13 `FreshnessGate` machinery + `promote_run` enforcement; `DeferReason::StcortexUnreachable` now live. Binary-wiring is future work (binaries are Day-1 stubs; no production `StcortexWriter` construction site exists yet) |
+| SEC2 | FIXED — m2 `tool_call_query` → allowlist-reject `Result` |
+| SEC3 | FIXED — m2 git absolute-path resolution (PATH-hijack removed) |
+| SEC4 | FIXED — 1 MiB capped HTTP body reads (m13/m40/m41) |
+| SEC5 | FIXED — m13 density finite/range validation |
+| F3 | FIXED — m9 namespace boundary (`== PREFIX \|\| starts_with("PREFIX_")`) |
+| F4 | FIXED — m11 thresholds single-source from m30 |
+| F5 | FIXED — m21 round-robin variant emission |
+| F6 | FIXED — m22 exact-tie-only k-means++ tiebreak |
+| F7 | NOT A BUG — m11/m31 recency divergence judged intentional by 2 independent agents; documented |
+| F9 | FIXED — m23 `debug_assert` guard on the unreachable arm |
+
+W2 reconciliation also fixed 3 sibling integration tests (`tests/m2_integration.rs` ×4,
+`tests/m30_integration.rs`, `tests/m11_integration.rs`) for the F4/SEC2 API+threshold changes.
+Gate: check + clippy + pedantic green; final test run in progress. Zen audit packet on close.
 
 ## Fix plan
 

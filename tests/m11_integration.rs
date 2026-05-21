@@ -505,18 +505,20 @@ mod m30_real_bank {
         // We pre-drive the workflow into that band, then run the cycle.
         let now = 1_700_000_000_000_i64;
         let (mut bank, ids) = build_real_bank(1, now);
-        // Soft floor is sunset_threshold=0.05 (m11 cfg, distinct from m30's
-        // soft DEFAULT_PRUNE_PENDING_THRESHOLD=0.10). Hard floor
-        // prune_threshold=0.01. Drive weight to 0.02 (in m11 soft band).
-        bank.apply_decay(ids[0], 0.02);
-        assert!((bank.get(ids[0]).expect("row").weight - 0.02).abs() < 1e-12);
+        // Post-W2-F4 the m11 thresholds single-source from m30:
+        // sunset_threshold (soft) = DEFAULT_PRUNE_PENDING_THRESHOLD = 0.10,
+        // prune_threshold (hard) = DEFAULT_PRUNE_THRESHOLD = 0.05. The
+        // PrunePending soft band is therefore [0.05, 0.10). Drive weight
+        // to 0.07 (inside it).
+        bank.apply_decay(ids[0], 0.07);
+        assert!((bank.get(ids[0]).expect("row").weight - 0.07).abs() < 1e-12);
         let (pathways, freq) = make_thriving_readers(&ids);
         let cfg = DecayConfig::default();
         let stats = run_consolidation_cycle(&mut bank, &pathways, &freq, &cfg, || Some(now))
             .expect("cycle ok");
         assert_eq!(
             stats.workflows_prune_pending, 1,
-            "weight 0.02 is in [prune=0.01, sunset=0.05) — must mark PrunePending"
+            "weight 0.07 is in [prune=0.05, sunset=0.10) — must mark PrunePending"
         );
     }
 

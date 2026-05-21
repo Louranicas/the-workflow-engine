@@ -36,8 +36,12 @@ pub const WORKFLOW_TRACE_NS_PREFIX: &str = "workflow_trace";
 /// 3. any control char or BOM → [`NamespaceViolation::ControlChar`]
 /// 4. exactly `"scratch"` → [`NamespaceViolation::ScratchForbidden`]
 /// 5. munge hyphens → underscores
-/// 6. munged-form `starts_with` [`WORKFLOW_TRACE_NS_PREFIX`] → ok, else
-///    [`NamespaceViolation::WrongPrefix`]
+/// 6. munged form is *exactly* [`WORKFLOW_TRACE_NS_PREFIX`] OR begins with
+///    `"{WORKFLOW_TRACE_NS_PREFIX}_"` (prefix + `_` separator) → ok, else
+///    [`NamespaceViolation::WrongPrefix`]. A bare `starts_with` would leak
+///    the boundary by accepting `workflow_traceXYZ`; the `_`-separator
+///    requirement enforces the AP30 contract `workflow_trace` |
+///    `workflow_trace_<suffix>`.
 ///
 /// The hyphen munge (AP-Hab-11 / S1001757 mitigation) happens exactly once
 /// at this boundary; downstream writers operate on the munged form.
@@ -50,8 +54,9 @@ pub const WORKFLOW_TRACE_NS_PREFIX: &str = "workflow_trace";
 /// - [`NamespaceViolation::ControlChar`] if `namespace` contains a control
 ///   character (`is_control() && !is_whitespace()`) or a BOM (U+FEFF).
 /// - [`NamespaceViolation::ScratchForbidden`] if `namespace == "scratch"`.
-/// - [`NamespaceViolation::WrongPrefix`] if the munged form does not start
-///   with [`WORKFLOW_TRACE_NS_PREFIX`].
+/// - [`NamespaceViolation::WrongPrefix`] if the munged form is neither
+///   exactly [`WORKFLOW_TRACE_NS_PREFIX`] nor begins with the prefix
+///   followed by an `_` separator (i.e. `workflow_traceXYZ` is rejected).
 ///
 /// # Examples
 ///
@@ -124,7 +129,18 @@ pub fn assert_workflow_trace_namespace(
         return Err(NamespaceViolation::ScratchForbidden);
     }
     let munged = munge_hyphen_slug(namespace);
-    if !munged.starts_with(WORKFLOW_TRACE_NS_PREFIX) {
+    // AP30 boundary enforcement: a legal namespace is *exactly* the prefix
+    // OR the prefix followed by an underscore separator. A bare
+    // `starts_with(prefix)` accepts `workflow_traceXYZ` (the 14-char prefix
+    // immediately followed by non-separator content) — a boundary leak into
+    // adjacent/foreign-shaped namespaces (e.g. `workflow_tracexploit`,
+    // `workflow_trace2`). The contract is `workflow_trace` |
+    // `workflow_trace_<suffix>`; we therefore require the next character
+    // after the prefix (if any) to be the `_` separator.
+    // (Fix: W2/F3 HIGH security-boundary finding.)
+    let prefix_boundary_ok = munged == WORKFLOW_TRACE_NS_PREFIX
+        || munged.starts_with(&format!("{WORKFLOW_TRACE_NS_PREFIX}_"));
+    if !prefix_boundary_ok {
         tracing::error!(
             target: "m9.validator",
             namespace = %munged,
@@ -397,12 +413,16 @@ mod tests {
     // ---- F-Property (5 tests) -------------------------------------------
 
     #[test]
-    fn property_starts_with_iff_ok_modulo_munge() {
+    fn property_prefix_boundary_iff_ok_modulo_munge() {
         // for_all ns: validate(ns).is_ok() iff
-        //   munge(ns).starts_with(prefix)
+        //   munge(ns) == prefix OR munge(ns).starts_with("{prefix}_")
         //   AND ns is non-empty
         //   AND ns is whitespace-free
         //   AND ns != "scratch"
+        //
+        // Note the prefix check is the *boundary-aware* form per the W2/F3
+        // fix: a bare `starts_with(prefix)` would wrongly accept
+        // `workflow_traceXYZ`.
         let cases = [
             "workflow_trace_a",
             "workflow_trace",
@@ -416,14 +436,19 @@ mod tests {
             "workflow-trace",
             "workflow_trace_",
             "Workflow_trace_x",
+            "workflow_traceXYZ",
+            "workflow_trace2",
         ];
+        let sep_prefixed = format!("{WORKFLOW_TRACE_NS_PREFIX}_");
         for input in cases {
             let result = assert_workflow_trace_namespace(input);
             let munged = munge_hyphen_slug(input);
+            let prefix_boundary_ok =
+                munged == WORKFLOW_TRACE_NS_PREFIX || munged.starts_with(&sep_prefixed);
             let expected_ok = !input.is_empty()
                 && !input.chars().any(char::is_whitespace)
                 && input != "scratch"
-                && munged.starts_with(WORKFLOW_TRACE_NS_PREFIX);
+                && prefix_boundary_ok;
             assert_eq!(
                 result.is_ok(),
                 expected_ok,
@@ -647,6 +672,70 @@ mod tests {
     fn accepts_prefix_with_explicit_trailing_underscore() {
         let v = assert_workflow_trace_namespace("workflow_trace_").expect("trailing _");
         assert_eq!(v.as_str(), "workflow_trace_");
+    }
+
+    // ====================================================================
+    // W2/F3 hardening — AP30 prefix-boundary leak. A bare
+    // `starts_with(prefix)` accepts `workflow_traceXYZ` (prefix immediately
+    // followed by non-separator content). The contract is exactly
+    // `workflow_trace` OR `workflow_trace_<suffix>`.
+    // ====================================================================
+
+    // rationale: Security boundary — the F3 leak. `workflow_traceXYZ` is the
+    // 14-char prefix followed by non-separator content; it MUST be rejected
+    // as WrongPrefix, not silently admitted into an adjacent namespace.
+    #[test]
+    fn rejects_prefix_with_non_separator_suffix_f3_leak() {
+        let err = assert_workflow_trace_namespace("workflow_traceXYZ").unwrap_err();
+        let NamespaceViolation::WrongPrefix {
+            namespace,
+            expected_prefix,
+        } = err
+        else {
+            panic!("expected WrongPrefix, got {err:?}");
+        };
+        assert_eq!(namespace, "workflow_traceXYZ");
+        assert_eq!(expected_prefix, "workflow_trace");
+    }
+
+    // rationale: Happy path — the bare prefix `workflow_trace` (exact match)
+    // is a legal namespace and must be accepted.
+    #[test]
+    fn accepts_bare_prefix_exact_match_f3() {
+        let v = assert_workflow_trace_namespace("workflow_trace").expect("bare prefix");
+        assert_eq!(v.as_str(), "workflow_trace");
+    }
+
+    // rationale: Happy path — `workflow_trace_foo` (prefix + `_` separator +
+    // suffix) is the canonical well-formed namespace and must be accepted.
+    #[test]
+    fn accepts_prefix_with_separator_and_suffix_f3() {
+        let v = assert_workflow_trace_namespace("workflow_trace_foo").expect("prefix_suffix");
+        assert_eq!(v.as_str(), "workflow_trace_foo");
+    }
+
+    // rationale: Adversarial — a digit immediately after the prefix
+    // (`workflow_trace2`) is the same boundary leak class as the XYZ case
+    // and must be rejected.
+    #[test]
+    fn rejects_prefix_with_digit_suffix_f3_leak() {
+        assert!(matches!(
+            assert_workflow_trace_namespace("workflow_trace2"),
+            Err(NamespaceViolation::WrongPrefix { .. })
+        ));
+    }
+
+    // rationale: Adversarial — a hyphenated near-miss munges to a
+    // non-separator suffix (`workflow-tracex` → `workflow_tracex`) and must
+    // still be rejected after the munge.
+    #[test]
+    fn rejects_hyphenated_prefix_boundary_leak_after_munge_f3() {
+        let err = assert_workflow_trace_namespace("workflow-tracex").unwrap_err();
+        let NamespaceViolation::WrongPrefix { namespace, .. } = err else {
+            panic!("expected WrongPrefix, got {err:?}");
+        };
+        // Error carries the munged form per the existing contract.
+        assert_eq!(namespace, "workflow_tracex");
     }
 
     // rationale: Cross-module surface invariant — a control-char rejection

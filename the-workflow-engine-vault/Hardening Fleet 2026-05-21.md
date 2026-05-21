@@ -39,9 +39,16 @@ directed by Luke @ node 0.A, in collaboration with Zen (audit lane). Six waves.
   `WorkflowProposal`, `NexusEvent`, opaque IDs, `WorkflowRunRow`) — see
   `../ai_docs/HARDENING_W3_TYPE_DESIGN_PORTFOLIO.md`.
 
-## Anchors
+## Anchors — all surfaces (bidirectional)
 
-- ai_docs: `../ai_docs/HARDENING_FLEET_2026-05-21.md` · `../ai_docs/HARDENING_W2_FINDINGS.md` ·
+- **Cold-start hub:** `../CLAUDE.local.md` § "HARDENING FLEET" → the COLD-START / RESUME-HERE table.
+- **ai_docs (canonical):** `../ai_docs/HARDENING_FLEET_2026-05-21.md` · `../ai_docs/HARDENING_W2_FINDINGS.md` ·
   `../ai_docs/HARDENING_W3_TYPE_DESIGN_PORTFOLIO.md`
-- Zen audit packets: `~/projects/shared-context/agent-cross-talk/2026-05-21T*_command_zen_review_request_hardening_w*.md`
-- stcortex: namespace `workflow_trace_hardening_2026_05_21` (W5 persist)
+- **stcortex:** namespace `workflow_trace_hardening_2026_05_21`, memory id 17939 (meta);
+  bidi Hebbian pathway ↔ `workflow_trace_scaffold_s1002127`.
+- **POVM** (deprecated mirror — stcortex is canonical): namespace `workflow_trace_hardening_2026_05_21`,
+  id `2c8427fa-d87d-432e-9821-c6c7512c4d71`.
+- **tracking DB:** `~/.local/share/habitat/injection.db` → `causal_chain` id 113,
+  label `workflow_trace_hardening_fleet_2026_05_21`.
+- **Zen audit packets:** `~/projects/shared-context/agent-cross-talk/2026-05-21T*_command_zen_review_request_hardening_w[1-4]*.md`
+- **git:** 6 commits `dc25335..e8f6dd3` on `main` — pushed origin (GitHub) + gitlab.

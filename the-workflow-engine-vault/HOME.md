@@ -1,7 +1,7 @@
 ---
 title: The Workflow Engine — Vault HOME
 date: 2026-05-17 (S1002127 · Wave 4.B closeout)
-status: planning-only · single-phase deployment (Luke override) · HOLD-v2 active (G1-G9 gated) · Wave 4.B NA-GAP remediation LIVE
+status: ACTIVE — G9 fired 2026-05-17; 26-module Rust codebase implemented (~31k LOC); Hardening Fleet 2026-05-21 complete (W1-W5, 1903 tests, clippy+pedantic clean)
 authority: Luke @ node 0.A
 ---
 
@@ -9,7 +9,20 @@ authority: Luke @ node 0.A
 
 > Back to: `~/claude-code-workspace/the-workflow-engine/` · [[CLAUDE.md]] · [[CLAUDE.local.md]]
 
-This vault holds the planning-pilot artefacts for the workflow-engine codebase. **No code, no scaffold, no build has occurred** (HOLD-v2 envelope active: 0 `.rs` / 0 `Cargo.toml` in active scope). All artefacts are planning surface within the AP24 + Zen-gate-block envelope.
+This vault holds the workflow-engine codebase's artefacts. **The codebase is implemented** — G9 fired 2026-05-17, HOLD-v2 lifted; 26 modules, ~31k LOC, 1903 tests, hardened end-to-end by the Hardening Fleet 2026-05-21. Older "planning-only / HOLD-v2 / no code" language in notes below is **superseded archaeology** — current authority is [[Hardening Fleet 2026-05-21]], `../CLAUDE.local.md`, `../GATE_STATE.md`, and git history.
+
+---
+
+## 🔧 Hardening Fleet — 2026-05-21 (S1003529) · COMPLETE
+
+End-to-end quality + security hardening of the implemented 26-module codebase, directed by
+Luke @ node 0.A in collaboration with Zen. 6 waves committed (`dc25335..e8f6dd3`, pushed
+both remotes); **tests 1310 → 1903; clippy + pedantic clean every wave.**
+
+**Full note: [[Hardening Fleet 2026-05-21]]** · canonical `../ai_docs/HARDENING_FLEET_2026-05-21.md`
+· cold-start hub `../CLAUDE.local.md` § "HARDENING FLEET". Persisted across 6 bidirectionally-
+linked surfaces: ai_docs · this vault · stcortex (`workflow_trace_hardening_2026_05_21`, mem
+17939) · POVM · injection.db (`causal_chain` 113) · `CLAUDE.local.md`.
 
 ---
 

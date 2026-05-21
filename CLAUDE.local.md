@@ -12,26 +12,44 @@
 
 ---
 
-## 🔧 HARDENING FLEET — 2026-05-21 (S1003529) · CURRENT
+## 🔧 HARDENING FLEET — 2026-05-21 (S1003529) · COMPLETE
 
-End-to-end quality + security hardening of the 26-module codebase, in collaboration with
-Zen (audit lane). 6 waves; W1–W3 committed, W4 (mutation testing) in progress, W5 (docs).
+End-to-end quality + security hardening of the 26-module codebase, directed by Luke @ node
+0.A in collaboration with Zen (audit lane). 6 waves — all committed on `main`, pushed both
+remotes. **Tests 1310 → 1903; clippy + pedantic clean every wave.**
 
-- **W1** quality floor — every module to 50+ meaningful tests. Commit `dc25335`. Tests 1310 → 1782.
-- **W2** security hardening — 19 findings (KEYSTONE `project_after_prefix` correctness bug,
-  9 lock-poison panics, injection / error-swallow, m9 namespace boundary, m8 false-gate
-  docstrings). Commits `c662b2d` + `5cb4822`. Tests → 1834.
-- **W3** type-design + comment accuracy — `#[non_exhaustive]` on 24 error enums, `WorkflowId`
-  + `MinSupport` encapsulation, 5 comment fixes. Commit `2e3113d`. Tests → 1835.
-- **W4** Zen audit + `cargo-mutants` on KEYSTONE (m20-23) + trust spine (m8-11) — in progress.
-- **W5** docs reconciliation (this) + 4-surface persistence + push.
+- **W1** `dc25335` — quality floor: every module to 50+ meaningful tests (1310 → 1782).
+- **W2** `c662b2d` + `5cb4822` — security: 19 findings (KEYSTONE `project_after_prefix`
+  correctness bug, 9 lock-poison panics, LIKE-injection, m9 namespace boundary, m8
+  false-gate docstrings, HTTP body caps) (→ 1834).
+- **W3** `2e3113d` — type-design: `#[non_exhaustive]` ×24, `WorkflowId` + `MinSupport`
+  encapsulation, comment accuracy (→ 1835).
+- **W4** `5de71ac` — mutation testing: `cargo-mutants` 412 mutants, 80.6% baseline; 68
+  mutant-killing tests, all surviving non-timeout mutants resolved (67 killed + 1
+  proven-equivalent) (→ 1903).
+- **W5** `e8f6dd3` — docs reconciliation + 4-surface persistence + push.
 
-Gate green throughout: `check` + `clippy -D warnings` + `clippy -D clippy::pedantic` +
-`test --all-targets --release`. Canonical: [`ai_docs/HARDENING_FLEET_2026-05-21.md`](ai_docs/HARDENING_FLEET_2026-05-21.md) ·
-[`ai_docs/HARDENING_W2_FINDINGS.md`](ai_docs/HARDENING_W2_FINDINGS.md) ·
-[`ai_docs/HARDENING_W3_TYPE_DESIGN_PORTFOLIO.md`](ai_docs/HARDENING_W3_TYPE_DESIGN_PORTFOLIO.md).
-Zen audit packets filed per wave in `agent-cross-talk/`. **Open for node 0.A:** the F2 m8-gate
-architecture decision; the W3 #5–#10 core-type-encapsulation portfolio.
+Gate every wave: `cargo check` + `clippy -D warnings` + `clippy -D clippy::pedantic` +
+`cargo test --all-targets --all-features --release`. **Open for node 0.A:** F2 — m8 POVM-gate
+architecture decision; W3 #5–#10 — core-domain-type encapsulation portfolio.
+
+### 🔵 COLD-START — RESUME HERE
+
+The Hardening Fleet is persisted across every memory substrate, each bidirectionally anchored
+to this block (every surface embeds this file's path as its reverse-anchor):
+
+| Surface | Anchor |
+|---------|--------|
+| git | 6 commits `dc25335..e8f6dd3` on `main` — pushed origin (GitHub) + gitlab |
+| ai_docs (canonical) | [`ai_docs/HARDENING_FLEET_2026-05-21.md`](ai_docs/HARDENING_FLEET_2026-05-21.md) · [`ai_docs/HARDENING_W2_FINDINGS.md`](ai_docs/HARDENING_W2_FINDINGS.md) · [`ai_docs/HARDENING_W3_TYPE_DESIGN_PORTFOLIO.md`](ai_docs/HARDENING_W3_TYPE_DESIGN_PORTFOLIO.md) |
+| Obsidian vault | [`the-workflow-engine-vault/Hardening Fleet 2026-05-21.md`](the-workflow-engine-vault/Hardening%20Fleet%202026-05-21.md) |
+| stcortex | namespace `workflow_trace_hardening_2026_05_21`, memory id **17939** (meta) — `~/.local/bin/stcortex inspect workflow_trace_hardening_2026_05_21` |
+| POVM (deprecated mirror; stcortex canonical) | namespace `workflow_trace_hardening_2026_05_21`, id `2c8427fa-d87d-432e-9821-c6c7512c4d71` |
+| tracking DB | `~/.local/share/habitat/injection.db` → `causal_chain` id **113**, label `workflow_trace_hardening_fleet_2026_05_21` |
+| Zen audit packets | `~/projects/shared-context/agent-cross-talk/2026-05-21T*_command_zen_review_request_hardening_w[1-4]*.md` |
+
+A fresh context window opens **`the-workflow-engine/CLAUDE.local.md`**, reads this block, and
+reaches all hardening state from the table above.
 
 ---
 

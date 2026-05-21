@@ -338,6 +338,9 @@ fn cc5_substrate_loop_full_cycle_g_to_h() {
     let conductor_dispatch_id = match dispatch_out {
         DispatchOutcome::Accepted { conductor_dispatch_id } => conductor_dispatch_id,
         DispatchOutcome::Refused { reason } => panic!("expected Accepted, got Refused: {reason:?}"),
+        // `DispatchOutcome` is `#[non_exhaustive]` — wildcard required for
+        // the cross-crate match.
+        other => panic!("expected Accepted, got {other:?}"),
     };
     assert_eq!(conductor_dispatch_id, format!("conductor-{workflow_id}"));
     assert_eq!(log.lock().expect("log")[0].0, workflow_id);

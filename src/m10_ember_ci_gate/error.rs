@@ -14,6 +14,7 @@ use thiserror::Error;
 
 /// Failure modes for the m10 Ember CI gate.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum EmberGateError {
     /// One or more registered user-facing strings failed the rubric scoring.
     /// Carries the rejection / held-as-fail counts so operators can scan the

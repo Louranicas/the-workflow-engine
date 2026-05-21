@@ -18,6 +18,7 @@ use thiserror::Error;
 
 /// Failure modes for m11 fitness-weighted decay.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum DecayError {
     /// A computed or supplied [`super::formula::DecayFactor`] value was
     /// non-finite or outside `[0.0, 1.0]`. This is a programming error

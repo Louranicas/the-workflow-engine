@@ -22,6 +22,7 @@ use super::cfg::BandClassification;
 /// Used by both `build.rs` (via path-include if env-only path is rejected
 /// in a future amendment) and the runtime mirror [`super::health::probe_band`].
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum BuildPrereqError {
     /// `POVM_CR2_DEPLOYED` is unset or not equal to `"1"`. Set the marker
     /// after confirming the magnitude-weighted `learning_health` formula
@@ -76,6 +77,7 @@ pub enum BuildPrereqError {
 /// The type and its `EX_CONFIG` convention are retained as ready
 /// machinery; no production path constructs or acts on it today.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum RuntimeBandError {
     /// POVM `learning_health` is outside the magnitude-weighted band at
     /// startup. Refusing to run against an uncalibrated substrate.

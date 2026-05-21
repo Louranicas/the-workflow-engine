@@ -283,11 +283,13 @@ fn m22_all_identical_points_handled_without_panic() {
 // ---- contract regression -------------------------------------------------
 
 // rationale: Contract regression — the `KMeansError` taxonomy is pinned.
-// The match is exhaustive: a new variant added without a test arm fails
-// to compile, forcing the taxonomy to stay covered.
+// `KMeansError` is `#[non_exhaustive]`, so a cross-crate match can no
+// longer serve as a compile-time variant-count guard. The `cases` array
+// instead names each known variant explicitly — a rename or removal of
+// any of the three pinned variants fails to compile — and every variant's
+// `Display` payload is asserted non-empty.
 #[test]
-fn m22_kmeans_error_variants_exhaustive() {
-    // rationale: Contract regression (error taxonomy exhaustiveness)
+fn m22_kmeans_error_variants_display_contract() {
     let cases = [
         KMeansError::Empty,
         KMeansError::KExceedsN { k: 5, n: 3 },
@@ -299,11 +301,6 @@ fn m22_kmeans_error_variants_exhaustive() {
     for err in cases {
         // Display payload must be non-empty for every variant.
         assert!(!format!("{err}").is_empty(), "empty Display for {err:?}");
-        match err {
-            KMeansError::Empty
-            | KMeansError::KExceedsN { .. }
-            | KMeansError::DimMismatch { .. } => {}
-        }
     }
     // Pin the empty-input and k>n refusals through the real surface.
     assert!(matches!(

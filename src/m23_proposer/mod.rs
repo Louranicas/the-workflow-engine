@@ -35,6 +35,7 @@ pub struct WorkflowProposal {
 
 /// Proposal-builder errors.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ProposerError {
     /// m14 lift snapshot indicates insufficient evidence.
     #[error("F2 gate: evidence n={n} < {threshold}")]

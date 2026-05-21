@@ -103,6 +103,7 @@ impl AcceptedWorkflow {
 
 /// Bank errors.
 #[derive(Debug, Error, PartialEq)]
+#[non_exhaustive]
 pub enum BankError {
     /// Tried to look up a workflow that isn't in the bank.
     #[error("workflow {0} not found")]
@@ -911,7 +912,7 @@ mod tests {
         run_consolidation_cycle, DecayConfig, DecayError, DecayFactor, FrequencyReader,
         LifecycleBank, PathwayWeightReader,
     };
-    // SunsetPhase already imported at line 508 above.
+    // SunsetPhase already imported above.
     use std::collections::HashMap;
 
     // Minimal readers backing the consolidation cycle against a CuratedBank.

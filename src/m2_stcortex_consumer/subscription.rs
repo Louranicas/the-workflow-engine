@@ -334,7 +334,7 @@ pub fn register_narrowed_consumer(
                 // DROP the registration error — the outer call would
                 // then return `Ok(RegistrationHandle)` for a consumer
                 // the server refused. Recover the inner guard from the
-                // PoisonError (same idiom as m13_stcortex_writer:366);
+                // PoisonError (same idiom as m13_stcortex_writer:506);
                 // the slot is a plain `Option<String>` with no
                 // invariant to repair, so reuse-after-poison is safe.
                 let mut slot = register_error_for_callback
@@ -456,7 +456,7 @@ pub fn register_narrowed_consumer(
             // no `else` — on a poisoned mutex the error check was SKIPPED
             // entirely, so a failed registration was returned as
             // `Ok(RegistrationHandle)`. Recover the inner guard from the
-            // PoisonError (same idiom as m13_stcortex_writer:366); the
+            // PoisonError (same idiom as m13_stcortex_writer:506); the
             // slot is a plain `Option<String>` with no invariant to
             // repair, so reading it after poison is sound.
             let slot = register_error

@@ -76,6 +76,7 @@ impl Default for SelectorConfig {
 
 /// Selector errors.
 #[derive(Debug, Error, PartialEq)]
+#[non_exhaustive]
 pub enum SelectorError {
     /// Weights did not sum to 1.0.
     #[error("invalid weights: alpha+beta+gamma+delta != 1.0 (got {0})")]

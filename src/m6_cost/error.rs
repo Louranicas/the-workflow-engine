@@ -4,6 +4,7 @@ use thiserror::Error;
 
 /// Failure modes for the context-cost recorder.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ContextCostError {
     /// Both the live stcortex `:3000` endpoint AND the offline JSON
     /// snapshot are unreachable. m6 SKIPS baseline writes (per

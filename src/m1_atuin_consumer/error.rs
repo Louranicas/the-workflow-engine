@@ -10,6 +10,7 @@ use thiserror::Error;
 
 /// Failure modes for m1 atuin consumer.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum AtuinConsumerError {
     /// Could not open the atuin SQLite DB at `path`.
     #[error("database open failed at {path}: {reason}")]

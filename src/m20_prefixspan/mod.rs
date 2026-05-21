@@ -25,8 +25,34 @@ use crate::m4_cascade::cluster_id::fnv1a_64;
 pub struct StepToken(pub u32);
 
 /// Newtype for the minimum-support floor.
+///
+/// The inner value is **private**: a `MinSupport` cannot exist unless it
+/// carries a value `>= MIN_SUPPORT_FLOOR`. Construct via the fallible
+/// [`MinSupport::new`]; this hoists the F2 hard-floor check from a runtime
+/// guard inside [`mine_sequences`] up into the type system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MinSupport(pub usize);
+pub struct MinSupport(usize);
+
+impl MinSupport {
+    /// Construct a `MinSupport`, enforcing the **F2 hard floor**.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MinerError::MinSupportBelowFloor`] if `value` is below
+    /// [`MIN_SUPPORT_FLOOR`].
+    pub fn new(value: usize) -> Result<Self, MinerError> {
+        if value < MIN_SUPPORT_FLOOR {
+            return Err(MinerError::MinSupportBelowFloor(value));
+        }
+        Ok(Self(value))
+    }
+
+    /// Borrow the inner support count (always `>= MIN_SUPPORT_FLOOR`).
+    #[must_use]
+    pub fn get(self) -> usize {
+        self.0
+    }
+}
 
 /// Newtype for max-gap config (right-gap bound during matching).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +103,7 @@ impl Pattern {
 
 /// Miner failure modes.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum MinerError {
     /// Input sequence slice was empty.
     #[error("empty database: no sequences to mine")]
@@ -100,9 +127,12 @@ pub enum MinerError {
 /// support floor and right-gap bound. Output is sorted by
 /// `(support DESC, len DESC, canonical_hash ASC)`.
 ///
+/// The F2 hard floor on `min_support` is enforced at the type level by
+/// [`MinSupport::new`] — a `MinSupport` value reaching this function is
+/// already guaranteed `>= MIN_SUPPORT_FLOOR`.
+///
 /// # Errors
 ///
-/// - [`MinerError::MinSupportBelowFloor`] if `min_support < MIN_SUPPORT_FLOOR`.
 /// - [`MinerError::EmptyDatabase`] if `sequences` is empty.
 pub fn mine_sequences(
     sequences: &[Vec<StepToken>],
@@ -110,9 +140,6 @@ pub fn mine_sequences(
     max_gap: MaxGap,
     max_length: usize,
 ) -> Result<Vec<Pattern>, MinerError> {
-    if min_support.0 < MIN_SUPPORT_FLOOR {
-        return Err(MinerError::MinSupportBelowFloor(min_support.0));
-    }
     if sequences.is_empty() {
         return Err(MinerError::EmptyDatabase);
     }
@@ -140,7 +167,7 @@ pub fn mine_sequences(
     }
     let mut frequent_items: Vec<StepToken> = frequencies
         .iter()
-        .filter(|(_, &c)| c >= min_support.0)
+        .filter(|(_, &c)| c >= min_support.get())
         .map(|(t, _)| *t)
         .collect();
     frequent_items.sort();
@@ -206,7 +233,7 @@ fn recurse_prefix(
     }
     let mut frequent_exts: Vec<(StepToken, usize)> = ext_freq
         .into_iter()
-        .filter(|(_, c)| *c >= min_support.0)
+        .filter(|(_, c)| *c >= min_support.get())
         .collect();
     frequent_exts.sort_by_key(|(t, _)| *t);
 
@@ -391,15 +418,28 @@ mod tests {
 
     // ---- Refusal modes (3) ----------------------------------------------
 
+    // rationale: F2 hard floor is now enforced at the type level —
+    // MinSupport::new(1) is rejected before a MinSupport value can exist,
+    // so mine_sequences can no longer be reached with an under-floor value.
     #[test]
-    fn rejects_min_support_below_floor() {
-        let r = mine_sequences(&[seq(&[1])], MinSupport(1), MaxGap(5), 8);
+    fn min_support_new_rejects_below_floor() {
+        let r = MinSupport::new(1);
         assert!(matches!(r, Err(MinerError::MinSupportBelowFloor(1))));
+        // 0 is also rejected (degenerate floor case).
+        assert!(matches!(
+            MinSupport::new(0),
+            Err(MinerError::MinSupportBelowFloor(0))
+        ));
     }
 
     #[test]
     fn rejects_empty_database() {
-        let r = mine_sequences(&[], MinSupport(2), MaxGap(5), 8);
+        let r = mine_sequences(
+            &[],
+            MinSupport::new(2).expect("at floor"),
+            MaxGap(5),
+            8,
+        );
         assert!(matches!(r, Err(MinerError::EmptyDatabase)));
     }
 
@@ -407,7 +447,7 @@ mod tests {
     fn empty_sequences_are_accepted_but_yield_no_patterns() {
         let r = mine_sequences(
             &[Vec::<StepToken>::new(), Vec::<StepToken>::new()],
-            MinSupport(2),
+            MinSupport::new(2).expect("min_support >= floor"),
             MaxGap(5),
             8,
         )
@@ -444,14 +484,14 @@ mod tests {
     #[test]
     fn mine_finds_single_frequent_item() {
         let seqs = vec![seq(&[1, 2]), seq(&[1, 3]), seq(&[1, 4])];
-        let p = mine_sequences(&seqs, MinSupport(3), MaxGap(5), 8).expect("ok");
+        let p = mine_sequences(&seqs, MinSupport::new(3).expect("min_support >= floor"), MaxGap(5), 8).expect("ok");
         assert!(p.iter().any(|pat| pat.steps == seq(&[1]) && pat.support == 3));
     }
 
     #[test]
     fn mine_filters_below_min_support() {
         let seqs = vec![seq(&[1, 2]), seq(&[3, 4])];
-        let p = mine_sequences(&seqs, MinSupport(2), MaxGap(5), 8).expect("ok");
+        let p = mine_sequences(&seqs, MinSupport::new(2).expect("min_support >= floor"), MaxGap(5), 8).expect("ok");
         // No single item appears in BOTH sequences.
         for pat in &p {
             assert!(
@@ -468,7 +508,7 @@ mod tests {
             seq(&[1, 5, 2]),
             seq(&[1, 2, 7]),
         ];
-        let p = mine_sequences(&seqs, MinSupport(2), MaxGap(5), 8).expect("ok");
+        let p = mine_sequences(&seqs, MinSupport::new(2).expect("min_support >= floor"), MaxGap(5), 8).expect("ok");
         assert!(
             p.iter().any(|pat| pat.steps == seq(&[1, 2])),
             "did not find [1,2] in {p:?}"
@@ -482,7 +522,7 @@ mod tests {
             seq(&[1, 9, 9, 2]), // [1,2] under gap=2
             seq(&[1, 2]),       // [1,2] under gap=0
         ];
-        let p = mine_sequences(&seqs, MinSupport(2), MaxGap(5), 8).expect("ok");
+        let p = mine_sequences(&seqs, MinSupport::new(2).expect("min_support >= floor"), MaxGap(5), 8).expect("ok");
         let found_12 = p.iter().any(|pat| pat.steps == seq(&[1, 2]));
         assert!(found_12, "gap-allowed [1,2] missed in {p:?}");
     }
@@ -490,7 +530,7 @@ mod tests {
     #[test]
     fn mine_respects_max_length_cap() {
         let seqs: Vec<Vec<StepToken>> = (0..3).map(|_| seq(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10])).collect();
-        let p = mine_sequences(&seqs, MinSupport(3), MaxGap(10), 3).expect("ok");
+        let p = mine_sequences(&seqs, MinSupport::new(3).expect("min_support >= floor"), MaxGap(10), 3).expect("ok");
         for pat in &p {
             assert!(pat.steps.len() <= 3, "pattern exceeds max_length: {pat:?}");
         }
@@ -499,9 +539,9 @@ mod tests {
     #[test]
     fn mine_is_deterministic_across_runs() {
         let seqs = vec![seq(&[3, 1, 2]), seq(&[1, 2, 3]), seq(&[2, 3, 1])];
-        let p1 = mine_sequences(&seqs, MinSupport(2), MaxGap(5), 8).expect("ok");
+        let p1 = mine_sequences(&seqs, MinSupport::new(2).expect("min_support >= floor"), MaxGap(5), 8).expect("ok");
         for _ in 0..10_u32 {
-            let p2 = mine_sequences(&seqs, MinSupport(2), MaxGap(5), 8).expect("ok");
+            let p2 = mine_sequences(&seqs, MinSupport::new(2).expect("min_support >= floor"), MaxGap(5), 8).expect("ok");
             assert_eq!(
                 p1.iter().map(|p| (p.steps.clone(), p.support)).collect::<Vec<_>>(),
                 p2.iter().map(|p| (p.steps.clone(), p.support)).collect::<Vec<_>>()
@@ -520,7 +560,7 @@ mod tests {
             seq(&[1, 5]),
             seq(&[1, 5]),
         ];
-        let p = mine_sequences(&seqs, MinSupport(2), MaxGap(5), 8).expect("ok");
+        let p = mine_sequences(&seqs, MinSupport::new(2).expect("min_support >= floor"), MaxGap(5), 8).expect("ok");
         // First entries should have highest support; ties broken by length.
         for w in p.windows(2) {
             let a = &w[0];
@@ -541,7 +581,7 @@ mod tests {
             seq(&[1, 2, 3, 4]),
             seq(&[1, 2]),
         ];
-        let p = mine_sequences(&seqs, MinSupport(2), MaxGap(5), 8).expect("ok");
+        let p = mine_sequences(&seqs, MinSupport::new(2).expect("min_support >= floor"), MaxGap(5), 8).expect("ok");
         for w in p.windows(2) {
             assert!(w[0].support >= w[1].support);
         }
@@ -567,14 +607,10 @@ mod tests {
     // ---- Cluster F hardening pass — adversarial / boundary / resource ----
 
     #[test]
-    // rationale: Boundary — MIN_SUPPORT_FLOOR-1 must refuse (F2 hard floor).
+    // rationale: Boundary — MIN_SUPPORT_FLOOR-1 must refuse at construction
+    // (F2 hard floor is enforced by MinSupport::new, not by mine_sequences).
     fn boundary_min_support_floor_minus_one_refuses() {
-        let r = mine_sequences(
-            &[seq(&[1, 2]), seq(&[1, 3])],
-            MinSupport(MIN_SUPPORT_FLOOR - 1),
-            MaxGap(5),
-            8,
-        );
+        let r = MinSupport::new(MIN_SUPPORT_FLOOR - 1);
         assert!(matches!(r, Err(MinerError::MinSupportBelowFloor(_))));
     }
 
@@ -583,7 +619,7 @@ mod tests {
     fn boundary_min_support_at_floor_accepted() {
         let r = mine_sequences(
             &[seq(&[1]), seq(&[1])],
-            MinSupport(MIN_SUPPORT_FLOOR),
+            MinSupport::new(MIN_SUPPORT_FLOOR).expect("at floor accepted"),
             MaxGap(5),
             8,
         );
@@ -595,7 +631,7 @@ mod tests {
     fn boundary_max_length_zero_coerces_to_one_pattern() {
         let p = mine_sequences(
             &[seq(&[1, 2, 3]), seq(&[1, 2, 4])],
-            MinSupport(2),
+            MinSupport::new(2).expect("min_support >= floor"),
             MaxGap(5),
             0,
         )
@@ -610,7 +646,7 @@ mod tests {
     fn adversarial_single_step_sequence_handled() {
         let p = mine_sequences(
             &[seq(&[42]), seq(&[42]), seq(&[42])],
-            MinSupport(2),
+            MinSupport::new(2).expect("min_support >= floor"),
             MaxGap(5),
             8,
         )
@@ -624,7 +660,7 @@ mod tests {
     fn adversarial_long_repeated_sequence_does_not_panic() {
         let long: Vec<StepToken> = (0..10_000_u32).map(|i| tok(i % 4)).collect();
         let seqs = vec![long.clone(), long.clone(), long];
-        let p = mine_sequences(&seqs, MinSupport(2), MaxGap(2), 3).expect("ok");
+        let p = mine_sequences(&seqs, MinSupport::new(2).expect("min_support >= floor"), MaxGap(2), 3).expect("ok");
         // Just assert it returned; the algorithm's bounded-depth guarantees
         // termination at max_length=3.
         assert!(!p.is_empty());
@@ -642,7 +678,7 @@ mod tests {
             Vec::<StepToken>::new(),
             seq(&[1, 2]),
         ];
-        let p = mine_sequences(&seqs, MinSupport(2), MaxGap(5), 8).expect("ok");
+        let p = mine_sequences(&seqs, MinSupport::new(2).expect("min_support >= floor"), MaxGap(5), 8).expect("ok");
         assert!(p.iter().any(|pat| pat.steps == seq(&[1, 2])));
     }
 
@@ -651,7 +687,7 @@ mod tests {
     fn boundary_max_u32_step_token_handled() {
         let big = StepToken(u32::MAX);
         let seqs = vec![vec![big], vec![big]];
-        let p = mine_sequences(&seqs, MinSupport(2), MaxGap(5), 8).expect("ok");
+        let p = mine_sequences(&seqs, MinSupport::new(2).expect("min_support >= floor"), MaxGap(5), 8).expect("ok");
         assert!(p.iter().any(|pat| pat.steps == vec![big] && pat.support == 2));
     }
 
@@ -661,8 +697,8 @@ mod tests {
     fn determinism_output_stable_under_input_permutation() {
         let a = vec![seq(&[1, 2]), seq(&[1, 3]), seq(&[1, 2, 3])];
         let b = vec![seq(&[1, 2, 3]), seq(&[1, 2]), seq(&[1, 3])];
-        let pa = mine_sequences(&a, MinSupport(2), MaxGap(5), 8).expect("a");
-        let pb = mine_sequences(&b, MinSupport(2), MaxGap(5), 8).expect("b");
+        let pa = mine_sequences(&a, MinSupport::new(2).expect("min_support >= floor"), MaxGap(5), 8).expect("a");
+        let pb = mine_sequences(&b, MinSupport::new(2).expect("min_support >= floor"), MaxGap(5), 8).expect("b");
         // The full output multiset must be identical (HashMap iteration is
         // non-deterministic across permutations, but the final sort is total).
         let fa: Vec<_> = pa.iter().map(|p| (p.steps.clone(), p.support)).collect();
@@ -719,8 +755,8 @@ mod tests {
     // (variant_builder); hash stability across re-mines must hold.
     fn cross_module_pattern_canonical_hash_survives_remine() {
         let seqs = vec![seq(&[1, 2, 3]), seq(&[1, 2, 3]), seq(&[1, 2, 4])];
-        let a = mine_sequences(&seqs, MinSupport(2), MaxGap(5), 8).expect("a");
-        let b = mine_sequences(&seqs, MinSupport(2), MaxGap(5), 8).expect("b");
+        let a = mine_sequences(&seqs, MinSupport::new(2).expect("min_support >= floor"), MaxGap(5), 8).expect("a");
+        let b = mine_sequences(&seqs, MinSupport::new(2).expect("min_support >= floor"), MaxGap(5), 8).expect("b");
         for (pa, pb) in a.iter().zip(b.iter()) {
             assert_eq!(pa.canonical_hash, pb.canonical_hash);
         }
@@ -735,7 +771,7 @@ mod tests {
     // [1,2] L2 is built by extension within the projected suffix.
     fn boundary_max_gap_zero_completes_without_panic() {
         let seqs = vec![seq(&[1, 9, 2]), seq(&[1, 9, 2])];
-        let p = mine_sequences(&seqs, MinSupport(2), MaxGap(0), 8).expect("ok");
+        let p = mine_sequences(&seqs, MinSupport::new(2).expect("min_support >= floor"), MaxGap(0), 8).expect("ok");
         // L1 [1] and [2] both have support 2 — emission MUST be present.
         assert!(p.iter().any(|pat| pat.steps == seq(&[1])));
         assert!(p.iter().any(|pat| pat.steps == seq(&[2])));
@@ -751,10 +787,10 @@ mod tests {
         let s1 = Arc::clone(&seqs);
         let s2 = Arc::clone(&seqs);
         let h1 = thread::spawn(move || {
-            mine_sequences(&s1, MinSupport(2), MaxGap(5), 8).expect("a")
+            mine_sequences(&s1, MinSupport::new(2).expect("min_support >= floor"), MaxGap(5), 8).expect("a")
         });
         let h2 = thread::spawn(move || {
-            mine_sequences(&s2, MinSupport(2), MaxGap(5), 8).expect("b")
+            mine_sequences(&s2, MinSupport::new(2).expect("min_support >= floor"), MaxGap(5), 8).expect("b")
         });
         let a = h1.join().expect("t1");
         let b = h2.join().expect("t2");
@@ -765,7 +801,8 @@ mod tests {
 
     // ====================================================================
     // KEYSTONE hardening pass — known-input/known-output, monotonic-support
-    // invariant, projection correctness, restart semantics, depth caps.
+    // invariant, projection correctness, backtracking projection /
+    // gap-bounded embedding, depth caps.
     // ====================================================================
 
     /// Helper: does the result contain a pattern with exactly `steps`?
@@ -786,7 +823,7 @@ mod tests {
     // L2/L3 must be present (compositional sub-graph detection).
     fn kio_three_identical_sequences_full_pattern_lattice() {
         let seqs = vec![seq(&[1, 2, 3]), seq(&[1, 2, 3]), seq(&[1, 2, 3])];
-        let p = mine_sequences(&seqs, MinSupport(3), MaxGap(5), 8).expect("ok");
+        let p = mine_sequences(&seqs, MinSupport::new(3).expect("min_support >= floor"), MaxGap(5), 8).expect("ok");
         assert_eq!(support_of(&p, &[1]), 3);
         assert_eq!(support_of(&p, &[2]), 3);
         assert_eq!(support_of(&p, &[3]), 3);
@@ -806,7 +843,7 @@ mod tests {
             seq(&[1, 2]),
             seq(&[1]),
         ];
-        let p = mine_sequences(&seqs, MinSupport(2), MaxGap(5), 8).expect("ok");
+        let p = mine_sequences(&seqs, MinSupport::new(2).expect("min_support >= floor"), MaxGap(5), 8).expect("ok");
         // For every length-n pattern, its length-(n-1) prefix must exist
         // with support >= the longer pattern's support.
         for pat in &p {
@@ -830,7 +867,7 @@ mod tests {
     fn kio_l1_floor_prunes_rare_token() {
         let seqs = vec![seq(&[1, 2]), seq(&[1, 3]), seq(&[1, 9])];
         // token 9 appears once; tokens 2,3 once each; token 1 thrice.
-        let p = mine_sequences(&seqs, MinSupport(2), MaxGap(5), 8).expect("ok");
+        let p = mine_sequences(&seqs, MinSupport::new(2).expect("min_support >= floor"), MaxGap(5), 8).expect("ok");
         assert!(has(&p, &[1]), "frequent token 1 missing");
         assert!(!has(&p, &[9]), "rare token 9 leaked past min_support=2");
         assert!(!has(&p, &[2]), "rare token 2 leaked past min_support=2");
@@ -842,7 +879,7 @@ mod tests {
     // sequence still contributes support 1 from that sequence.
     fn kio_l1_support_counts_sequences_not_occurrences() {
         let seqs = vec![seq(&[7, 7, 7, 7, 7]), seq(&[7])];
-        let p = mine_sequences(&seqs, MinSupport(2), MaxGap(5), 8).expect("ok");
+        let p = mine_sequences(&seqs, MinSupport::new(2).expect("min_support >= floor"), MaxGap(5), 8).expect("ok");
         // 7 appears in both sequences → support 2, NOT 6.
         assert_eq!(support_of(&p, &[7]), 2);
     }
@@ -887,7 +924,7 @@ mod tests {
         let s = seq(&[1, 9, 9, 9, 2]);
         let p = project_after_prefix(&s, &[tok(1), tok(2)], MaxGap(3)).expect("match");
         assert_eq!(p.right_gap, 3);
-        // max_gap=2 → 3 > 2 → rejected (no other 1 to restart from).
+        // max_gap=2 → 3 > 2 → rejected (no other start position admits an embedding).
         assert!(project_after_prefix(&s, &[tok(1), tok(2)], MaxGap(2)).is_none());
     }
 
@@ -998,7 +1035,7 @@ mod tests {
             seq(&[1, 8, 8, 3]),    // gap 2
             seq(&[1, 3]),          // gap 0
         ];
-        let p = mine_sequences(&seqs, MinSupport(3), MaxGap(5), 8).expect("ok");
+        let p = mine_sequences(&seqs, MinSupport::new(3).expect("min_support >= floor"), MaxGap(5), 8).expect("ok");
         assert_eq!(support_of(&p, &[1, 3]), 3);
     }
 
@@ -1007,7 +1044,7 @@ mod tests {
     // even when longer patterns exist in the data.
     fn boundary_max_length_one_yields_only_l1() {
         let seqs = vec![seq(&[1, 2, 3]), seq(&[1, 2, 3])];
-        let p = mine_sequences(&seqs, MinSupport(2), MaxGap(5), 1).expect("ok");
+        let p = mine_sequences(&seqs, MinSupport::new(2).expect("min_support >= floor"), MaxGap(5), 1).expect("ok");
         for pat in &p {
             assert_eq!(pat.steps.len(), 1, "max_length=1 yielded {pat:?}");
         }
@@ -1019,7 +1056,7 @@ mod tests {
     // length-4 repeated pattern.
     fn boundary_max_length_two_caps_at_l2() {
         let seqs = vec![seq(&[1, 2, 3, 4]), seq(&[1, 2, 3, 4]), seq(&[1, 2, 3, 4])];
-        let p = mine_sequences(&seqs, MinSupport(3), MaxGap(5), 2).expect("ok");
+        let p = mine_sequences(&seqs, MinSupport::new(3).expect("min_support >= floor"), MaxGap(5), 2).expect("ok");
         for pat in &p {
             assert!(pat.steps.len() <= 2, "L2 cap violated: {pat:?}");
         }
@@ -1031,7 +1068,7 @@ mod tests {
     // means a pattern must appear in EVERY sequence to survive.
     fn boundary_min_support_equals_count_requires_universal_pattern() {
         let seqs = vec![seq(&[1, 2]), seq(&[1, 3]), seq(&[1, 4])];
-        let p = mine_sequences(&seqs, MinSupport(3), MaxGap(5), 8).expect("ok");
+        let p = mine_sequences(&seqs, MinSupport::new(3).expect("min_support >= floor"), MaxGap(5), 8).expect("ok");
         // Only token 1 is in all 3 sequences.
         assert!(has(&p, &[1]));
         assert!(!has(&p, &[2]) && !has(&p, &[3]) && !has(&p, &[4]));
@@ -1047,7 +1084,7 @@ mod tests {
             seq(&[1, 92, 2, 93, 3]),
             seq(&[1, 2, 94, 3]),
         ];
-        let p = mine_sequences(&seqs, MinSupport(3), MaxGap(5), 8).expect("ok");
+        let p = mine_sequences(&seqs, MinSupport::new(3).expect("min_support >= floor"), MaxGap(5), 8).expect("ok");
         assert_eq!(
             support_of(&p, &[1, 2, 3]),
             3,
@@ -1066,7 +1103,7 @@ mod tests {
             seq(&[2, 6]),
             seq(&[2, 6]),
         ];
-        let p = mine_sequences(&seqs, MinSupport(2), MaxGap(5), 8).expect("ok");
+        let p = mine_sequences(&seqs, MinSupport::new(2).expect("min_support >= floor"), MaxGap(5), 8).expect("ok");
         for w in p.windows(2) {
             if w[0].support == w[1].support && w[0].steps.len() == w[1].steps.len() {
                 assert!(
@@ -1088,7 +1125,7 @@ mod tests {
             seq(&[1, 2, 3, 6, 7]),
             seq(&[1, 2, 8, 9, 10]),
         ];
-        let p = mine_sequences(&seqs, MinSupport(2), MaxGap(5), 8).expect("ok");
+        let p = mine_sequences(&seqs, MinSupport::new(2).expect("min_support >= floor"), MaxGap(5), 8).expect("ok");
         for pat in &p {
             assert!(
                 pat.support >= 2,
@@ -1103,7 +1140,7 @@ mod tests {
     // recursively-extended patterns observe a non-trivial right gap.
     fn kio_l1_pattern_gap_bounds_are_zero() {
         let seqs = vec![seq(&[1]), seq(&[1])];
-        let p = mine_sequences(&seqs, MinSupport(2), MaxGap(5), 8).expect("ok");
+        let p = mine_sequences(&seqs, MinSupport::new(2).expect("min_support >= floor"), MaxGap(5), 8).expect("ok");
         let l1 = p.iter().find(|pat| pat.steps == seq(&[1])).expect("L1");
         assert_eq!(l1.gap_bounds, (0, 0));
     }
@@ -1114,8 +1151,8 @@ mod tests {
     fn determinism_duplicate_sequences_scale_support() {
         let one = vec![seq(&[1, 2]), seq(&[1, 2])];
         let two = vec![seq(&[1, 2]), seq(&[1, 2]), seq(&[1, 2]), seq(&[1, 2])];
-        let p1 = mine_sequences(&one, MinSupport(2), MaxGap(5), 8).expect("a");
-        let p2 = mine_sequences(&two, MinSupport(2), MaxGap(5), 8).expect("b");
+        let p1 = mine_sequences(&one, MinSupport::new(2).expect("min_support >= floor"), MaxGap(5), 8).expect("a");
+        let p2 = mine_sequences(&two, MinSupport::new(2).expect("min_support >= floor"), MaxGap(5), 8).expect("b");
         assert_eq!(support_of(&p1, &[1, 2]), 2);
         assert_eq!(support_of(&p2, &[1, 2]), 4);
     }

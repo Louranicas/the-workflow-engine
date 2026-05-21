@@ -119,6 +119,7 @@ pub enum AggregateVerdict {
 
 /// Verifier errors.
 #[derive(Debug, Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum VerifierError {
     /// A required verifier was missing from the input.
     #[error("missing verifier {:?}", .0)]

@@ -62,6 +62,7 @@ pub const SOURCE_TAG: &str = "workflow-trace-m13";
 
 /// Failure modes for m13.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum StcortexWriterError {
     /// m9 rejected the namespace prefix.
     #[error("namespace prefix rejected: {0}")]

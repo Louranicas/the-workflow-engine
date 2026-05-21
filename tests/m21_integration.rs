@@ -45,7 +45,13 @@ fn mined_pattern() -> Pattern {
         vec![StepToken(9), StepToken(1), StepToken(2), StepToken(3)],
         vec![StepToken(1), StepToken(2), StepToken(3), StepToken(7)],
     ];
-    let patterns = mine_sequences(&seqs, MinSupport(2), MaxGap(5), 8).expect("mine ok");
+    let patterns = mine_sequences(
+        &seqs,
+        MinSupport::new(2).expect("min_support >= floor"),
+        MaxGap(5),
+        8,
+    )
+    .expect("mine ok");
     patterns
         .into_iter()
         .find(|p| p.steps.len() >= 2)
@@ -188,12 +194,15 @@ fn m21_distinct_patterns_yield_distinct_variant_provenance() {
 // if a new variant is added without a corresponding test, forcing the
 // taxonomy to stay exhaustively covered.
 #[test]
-fn m21_variant_builder_error_variants_are_exhaustive() {
-    // rationale: Contract regression (error taxonomy exhaustiveness)
+fn m21_variant_builder_error_display_contract() {
+    // rationale: Contract regression (error Display stability).
+    //
+    // `VariantBuilderError` is `#[non_exhaustive]` — a cross-crate match
+    // therefore requires a wildcard arm, so this no longer doubles as a
+    // compile-time variant-count guard. The Display-contract assertion on
+    // the known `EmptyPattern` variant is the surviving regression check.
     let err = VariantBuilderError::EmptyPattern;
     match err {
-        // If a new VariantBuilderError variant is added, this match
-        // ceases to compile — the exhaustiveness guard fires.
         VariantBuilderError::EmptyPattern => {
             assert_eq!(
                 format!("{}", VariantBuilderError::EmptyPattern),
@@ -201,6 +210,7 @@ fn m21_variant_builder_error_variants_are_exhaustive() {
                 "EmptyPattern Display contract changed"
             );
         }
+        other => panic!("unexpected VariantBuilderError variant: {other:?}"),
     }
 }
 

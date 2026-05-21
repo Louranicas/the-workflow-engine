@@ -49,9 +49,10 @@ fn m23_build_proposal_refuses_below_proposal_f2_threshold() {
             assert_eq!(n, PROPOSAL_F2_THRESHOLD - 1);
             assert_eq!(threshold, PROPOSAL_F2_THRESHOLD);
         }
-        ProposerError::LiftUnavailable => {
-            panic!("expected EvidenceBelowThreshold, got LiftUnavailable")
-        }
+        // `ProposerError` is `#[non_exhaustive]`; a wildcard is required
+        // for the cross-crate match. Any non-`EvidenceBelowThreshold`
+        // variant here is a contract violation for this scenario.
+        other => panic!("expected EvidenceBelowThreshold, got {other:?}"),
     }
 }
 

@@ -27,6 +27,7 @@ pub enum HebbianSignal {
 
 /// Emit errors.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum SubstrateEmitError {
     /// Underlying m13 writer failed.
     #[error("stcortex writer: {0}")]

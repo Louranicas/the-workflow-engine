@@ -4,6 +4,7 @@ use thiserror::Error;
 
 /// Failure modes for the cascade correlator.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum CascadeError {
     /// atuin schema-version probe found unexpected shape.
     #[error("atuin schema drift: expected ns timestamps, got {0}")]

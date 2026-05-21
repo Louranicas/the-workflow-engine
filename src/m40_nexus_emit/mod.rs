@@ -34,6 +34,7 @@ pub struct NexusEvent {
 
 /// Emit errors.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum NexusEmitError {
     /// Transport / HTTP layer failure.
     #[error("transport: {0}")]

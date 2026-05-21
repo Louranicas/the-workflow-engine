@@ -87,9 +87,9 @@ fn cc3_lift_snapshot_below_min_blocks_proposal_emission() {
             assert_eq!(n, MIN_SAMPLE_SIZE - 1);
             assert_eq!(threshold, PROPOSAL_F2_THRESHOLD);
         }
-        ProposerError::LiftUnavailable => {
-            panic!("expected EvidenceBelowThreshold, got LiftUnavailable")
-        }
+        // `ProposerError` is `#[non_exhaustive]` — wildcard required for
+        // the cross-crate match.
+        other => panic!("expected EvidenceBelowThreshold, got {other:?}"),
     }
 }
 
@@ -157,9 +157,9 @@ fn cc3_evidence_threshold_change_propagates_to_proposer() {
             // a threshold equal to m14's MIN_SAMPLE_SIZE (not a copy).
             assert_eq!(threshold, MIN_SAMPLE_SIZE);
         }
-        ProposerError::LiftUnavailable => {
-            panic!("expected EvidenceBelowThreshold, got LiftUnavailable")
-        }
+        // `ProposerError` is `#[non_exhaustive]` — wildcard required for
+        // the cross-crate match.
+        other => panic!("expected EvidenceBelowThreshold, got {other:?}"),
     }
 
     // At-floor: unblocks.

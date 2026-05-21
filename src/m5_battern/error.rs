@@ -4,6 +4,7 @@ use thiserror::Error;
 
 /// Failure modes for the Battern step recorder.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum BatternError {
     /// SQLite/rusqlite error reading atuin.
     #[error("atuin io: {0}")]

@@ -194,6 +194,12 @@ fn m40_push_returns_transport_error_on_unreachable_url() {
         Err(NexusEmitError::ServerRejected { .. }) => {
             panic!("unreachable URL must NOT surface as ServerRejected");
         }
+        // `NexusEmitError` is `#[non_exhaustive]` — wildcard required for
+        // the cross-crate match. Only `Transport` is an acceptable error
+        // for an unreachable URL; any other variant is a contract break.
+        Err(other) => {
+            panic!("unreachable URL must surface as Transport, got {other:?}");
+        }
         Ok(()) => panic!("unreachable URL must NOT succeed"),
     }
 }

@@ -49,6 +49,7 @@ pub struct LcmLoopCreateResult {
 
 /// RPC errors.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum LcmRpcError {
     /// Transport / HTTP failure.
     #[error("transport: {0}")]

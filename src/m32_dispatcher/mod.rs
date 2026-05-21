@@ -132,6 +132,7 @@ impl Default for HumanAcceptanceSignature {
 
 /// Outcome of a dispatch attempt.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum DispatchOutcome {
     /// Conductor accepted the request; carries a Conductor-assigned id.
     Accepted {
@@ -145,9 +146,14 @@ pub enum DispatchOutcome {
     },
 }
 
-/// Refusal reasons (closed set).
+/// Refusal reasons.
+///
+/// `#[non_exhaustive]`: this is an evolving wire enum — new refusal classes
+/// may be added as the dispatch check-sequence grows. Within-crate matches
+/// stay exhaustive; external consumers must include a wildcard arm.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum RefusalReason {
     /// `PrivilegeEscalation` without acknowledgement.
     PrivilegeNotAcknowledged,
@@ -193,6 +199,7 @@ pub enum RefusalReason {
 
 /// Dispatcher errors.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum DispatcherError {
     /// Conductor wire-format failure.
     #[error("wire format: {0}")]

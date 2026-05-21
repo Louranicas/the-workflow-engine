@@ -7,6 +7,7 @@ use thiserror::Error;
 
 /// Failure modes for the m2 stcortex consumer surface.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum StcortexConsumerError {
     /// Could not reach stcortex over WebSocket at `uri`.
     #[error("connection to stcortex at {uri} failed: {reason}")]

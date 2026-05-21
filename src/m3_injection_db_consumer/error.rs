@@ -14,6 +14,7 @@ use thiserror::Error;
 
 /// Failure modes for the m3 injection.db consumer.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum InjectionDbError {
     /// Could not open the injection.db SQLite file at `path`.
     #[error("database open failed at {path}: {reason}")]

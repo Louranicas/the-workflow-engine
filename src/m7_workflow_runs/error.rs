@@ -4,6 +4,7 @@ use thiserror::Error;
 
 /// Failure modes for the workflow_runs central hub.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum WorkflowError {
     /// Generic SQLite failure (prepare / execute / column extraction).
     #[error("sqlite error: {0}")]

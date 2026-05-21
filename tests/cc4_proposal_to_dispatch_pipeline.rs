@@ -171,6 +171,9 @@ fn pipeline_proposal_to_dispatched_outcome() {
         DispatchOutcome::Refused { reason } => {
             panic!("expected Accepted, got Refused: {reason:?}")
         }
+        // `DispatchOutcome` is `#[non_exhaustive]` — wildcard required for
+        // the cross-crate match.
+        other => panic!("expected Accepted, got {other:?}"),
     }
     let calls = log.lock().expect("log").clone();
     assert_eq!(calls.len(), 1);

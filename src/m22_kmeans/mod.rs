@@ -26,6 +26,7 @@ pub struct ClusteredPoint {
 
 /// K-means errors.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum KMeansError {
     /// `k` exceeded the number of points.
     #[error("k={k} exceeds point count {n}")]

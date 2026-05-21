@@ -46,6 +46,7 @@ pub enum MutationKind {
 
 /// Builder errors.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum VariantBuilderError {
     /// Source pattern was empty.
     #[error("empty source pattern")]

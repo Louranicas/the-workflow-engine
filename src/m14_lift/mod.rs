@@ -44,13 +44,22 @@ pub const M31_MODULATION_CLAMP: f64 = 0.3;
 
 /// Workflow identifier newtype (AP30 prefix-guarded at the m13/m42 boundary).
 ///
-/// The newtype is opaque on purpose: callers MUST construct via
-/// [`WorkflowId::from_validated`] when they already hold an
-/// [`crate::m9_watcher_namespace_guard::ValidatedNamespace`]. The `pub`
-/// tuple field is retained for serde / test convenience but its content
-/// is contractually expected to carry the `workflow_trace_*` prefix.
+/// The newtype is opaque on purpose: the inner `String` is **private** so
+/// no caller can bypass the m9 namespace gate. Construct via either
+/// [`WorkflowId::from_validated`] (when you already hold a
+/// [`crate::m9_watcher_namespace_guard::ValidatedNamespace`]) or the
+/// fallible [`WorkflowId::new`] (which runs the m9 validator). The inner
+/// content is contractually guaranteed to carry the `workflow_trace_*`
+/// prefix.
+///
+/// `#[serde(transparent)]` keeps the wire form identical to a bare string
+/// — the encapsulation is a compile-time guarantee with zero wire cost.
+/// Note: `Deserialize` reconstructs the newtype directly from the wire
+/// string and does NOT re-run the m9 validator; deserialised ids are
+/// trusted to the same degree as the upstream that serialised them.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct WorkflowId(pub String);
+#[serde(transparent)]
+pub struct WorkflowId(String);
 
 impl WorkflowId {
     /// Borrow the inner string.
@@ -66,6 +75,28 @@ impl WorkflowId {
         v: &crate::m9_watcher_namespace_guard::ValidatedNamespace,
     ) -> Self {
         Self(v.as_str().to_owned())
+    }
+
+    /// Fallible constructor: runs the m9 namespace validator on `raw` and
+    /// returns a `WorkflowId` only if the string carries the
+    /// `workflow_trace_*` prefix (and is otherwise well-formed).
+    ///
+    /// This is the canonical entry point for callers that hold a raw,
+    /// unvalidated string — it is impossible to construct a `WorkflowId`
+    /// that bypasses the m9 namespace gate.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::m9_watcher_namespace_guard::NamespaceViolation`] if
+    /// `raw` fails m9 validation (wrong prefix, empty, whitespace, control
+    /// characters, etc.).
+    pub fn new(
+        raw: &str,
+    ) -> Result<Self, crate::m9_watcher_namespace_guard::NamespaceViolation>
+    {
+        let validated =
+            crate::m9_watcher_namespace_guard::assert_workflow_trace_namespace(raw)?;
+        Ok(Self::from_validated(&validated))
     }
 
     /// Returns `true` iff the inner string carries the
@@ -595,16 +626,33 @@ mod tests {
 
     #[test]
     fn workflow_id_as_str_roundtrip() {
-        let id = WorkflowId("workflow_trace_abc".into());
+        let id = WorkflowId::new("workflow_trace_abc").expect("valid ns");
         assert_eq!(id.as_str(), "workflow_trace_abc");
     }
 
     #[test]
     fn workflow_id_serde_roundtrip() {
-        let id = WorkflowId("workflow_trace_xyz".into());
+        let id = WorkflowId::new("workflow_trace_xyz").expect("valid ns");
         let s = serde_json::to_string(&id).expect("ser");
         let back: WorkflowId = serde_json::from_str(&s).expect("de");
         assert_eq!(back, id);
+        // #[serde(transparent)] — the wire form is a bare JSON string.
+        assert_eq!(s, "\"workflow_trace_xyz\"");
+    }
+
+    // rationale: m9-gate enforcement — WorkflowId::new rejects any string
+    // outside the `workflow_trace` namespace, so the newtype cannot be
+    // constructed in a way that bypasses the namespace guard.
+    #[test]
+    fn workflow_id_new_rejects_non_workflow_trace_namespace() {
+        let err = WorkflowId::new("orac_learn")
+            .expect_err("non-workflow_trace namespace must be rejected");
+        assert!(matches!(
+            err,
+            crate::m9_watcher_namespace_guard::NamespaceViolation::WrongPrefix { .. }
+        ));
+        // Sanity: the happy path still constructs.
+        assert!(WorkflowId::new("workflow_trace_ok").is_ok());
     }
 
     // ====================================================================
@@ -720,8 +768,13 @@ mod tests {
     // has_workflow_trace_prefix agrees with m9 const.
     #[test]
     fn workflow_id_prefix_check_agrees_with_m9_const() {
-        let good = WorkflowId("workflow_trace_xyz".into());
-        let bad = WorkflowId("orac_xyz".into());
+        let good = WorkflowId::new("workflow_trace_xyz").expect("valid ns");
+        // `bad` carries a non-workflow_trace prefix; it can only be built
+        // by deserialising raw wire bytes (m9 gate cannot be bypassed via
+        // `new`/`from_validated`). This exercises the advisory check on
+        // such a deserialised value.
+        let bad: WorkflowId =
+            serde_json::from_str("\"orac_xyz\"").expect("de raw");
         assert!(good.has_workflow_trace_prefix());
         assert!(!bad.has_workflow_trace_prefix());
     }

@@ -97,7 +97,7 @@ reaches all hardening state from the table above.
 
 **Project state:** `workflow-trace` is no longer planning-only. G9 fired on 2026-05-17; HOLD-v2 is lifted. The full 26-module Rust architecture is now present in `src/` with both binaries and the shared `workflow_core` library.
 
-**Latest verified git anchor:** `9db534d hardening(the-workflow-engine): Cluster H — m40/m41/m42 god-tier pass` on branch `main`.
+**Latest verified git anchor:** `2096fd0 docs(workflow-trace): fold final verified mutation result — 96.3%` on branch `main`, pushed origin + gitlab. (Supersedes the 2026-05-20 `9db534d` Cluster-H anchor — the Hardening Fleet and the S1003733 remediation have both landed since; see the S1003733 block at the top of this file for current authority.)
 
 **Implemented clusters/modules:**
 - Cluster A: m1/m2/m3 substrate ingest — Atuin, stcortex narrowed consumer, injection.db.
@@ -255,7 +255,7 @@ cd /home/louranicas/claude-code-workspace/the-workflow-engine && \
 | **Gates** | G1–G9 all resolved; **G9 FIRED 2026-05-17** — live record in `GATE_STATE.md` |
 | **Last spec version** | v1.2 binding (Zen-audit-locked); **v1.3 patch pending** (single-phase override absorption) |
 | **Vault** | 88 files / 2.4MB across root + `module specs/` (9 files) + `boilerplate modules/` (10 subdirs + 4 gold-standard exemplars) + `deployment framework/` (10 phase docs) |
-| **Git** | branch `main` at `2fbfbd1` (Hardening Fleet W5 docs persist); assessment-remediation S1003733 in flight |
+| **Git** | branch `main` at `2096fd0` — Hardening Fleet W0–W5 (`dc25335..e8f6dd3`) + assessment-remediation S1003733 (`0cc7be3..2096fd0`) **both COMPLETE**; pushed origin + gitlab |
 | **Services** | 11/11 healthy at last probe (8082, 8083, 8092, 8111, 8120, 8125, 8130, 8132, 8133, 8180, 10002) |
 | **Watcher** | ready · eligible · 48,723 observations · proposals_submitted 0 · R13 elapsed |
 | **Substrate** | LTP/LTD = 0.043 (35× below healthy); substrate_LTP_density 0.018 (Phase 1 PASSING) |

@@ -46,21 +46,19 @@
 
 ---
 
-## Luke physical actions remaining (post-S1002209 cascade — 2 items)
+## Luke physical actions remaining (current)
 
-S1002209 directive "complete each task 1-6" has cleared B1 (path-elected) + B2 (green-lit + delivered) + task-5 stale-row (Command authorised to amend). Remaining Luke terminal actions:
+S1002209 cleared B1, B2, B4, B5, B6 and fired G9. Remaining human/operator action is deployment-plane bring-up when Luke wants live dispatch-plane soak:
 
-1. **B3 / Task 4 — Conductor bring-up** (~30s; non-blocking pre-G9):
+1. **B3 / Conductor bring-up** (~30s; live-plane optional until dispatch soak):
    `~/.local/bin/devenv -c ~/.config/devenv/devenv.toml start --services weaver,zen,enforcer`
-   Then verify: `curl :8141/health` for weaver. Conductor binaries already installed; flip `CONDUCTOR_ENFORCEMENT_ENABLED=1` after 24h NoOp soak.
-2. **Task 6 — G9 fire** (single phrase, after G7-G8 green):
-   Type exactly: `start coding workflow-trace`
-   Triggers HOLD-v2 envelope lift; Cluster D Day 1 begins (m8 build-cfg → m9 namespace guard → m10 Ember CI → m11 decay).
+   Then verify: `curl :8141/health` for weaver. Conductor binaries already installed; flip `CONDUCTOR_ENFORCEMENT_ENABLED=1` only after NoOp soak / ratification.
 
 **Closed by S1002209 directive:**
 - B1 (Luke "complete each task" → drive G1-G8 sequence elected)
 - B2 (Luke "complete each task" → v1.3 patch green-lit + delivered via v3 AUDIT-REQUEST)
 - Task 5 stale-row (Luke "complete each task" → Command waived to amend workspace-root CLAUDE.local.md "Workflow Engine" row)
+- Task 6 / G9 fire (`start coding workflow-trace`) — FIRED; HOLD-v2 lifted; 26-module Rust implementation now present.
 
 **Dropped earlier:**
 - D-B5 POVM `:8125` restart (m42 stcortex-only pivot decoupled)

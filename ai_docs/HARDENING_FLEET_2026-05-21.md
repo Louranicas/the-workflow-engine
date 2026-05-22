@@ -62,8 +62,8 @@ In-session `/loop` self-pacing between waves; TaskList (#1–#6) = goal tracker;
 | W1 | Quality floor — all 26 modules to ≥50 meaningful tests | `dc25335` | 1310 → 1782 |
 | W2 | 19 security findings resolved — KEYSTONE `project_after_prefix` correctness bug, 9 lock-poison panics, LIKE-injection, error-swallow, m9 namespace boundary, m8 false-gate docstrings, HTTP body caps | `c662b2d` + `5cb4822` | → 1834 |
 | W3 | Type-design — `#[non_exhaustive]` ×24, `WorkflowId` + `MinSupport` encapsulation, 5 comment-accuracy fixes | `2e3113d` | → 1835 |
-| W4 | `cargo-mutants` scoped to m10/m11/m21/m22. **Final verified run** (S1003733, post-Wave-G + C22, frozen tree @ `ce0d77b`, 4 h): **324 mutants — 259 caught / 10 missed / 0 timeout / 55 unviable → 96.3 % kill rate** (259 of 269 viable). The Wave-D+ iteration-cap fix eliminated all 20 prior m21 `build_variants` timeout mutants (0 timeout). Wave G (`c0ec95c`) killed 5 of the prior 15 survivors; the **10 remaining survivors are all proven-equivalent mutants** (9 m21 `build_variants` — design-induced by the iteration-cap defense-in-depth; 1 m22 `kmeans_plus_plus_seed:310` — FNV-collision-required) — each carries an in-code `// mutant-equivalent:` proof. **Every non-equivalent mutant in scope is killed.** *(Prior wording — "412 mutants, 80.6 %, every surviving non-timeout mutant resolved" — did not reconcile with any committed artifact; corrected + independently re-verified S1003733.)* | `5de71ac` + `c0ec95c` | → 1924 |
-| W5 | Docs reconciliation (CLAUDE.md charter + project & workspace CLAUDE.local.md) · 4-surface persistence · commit + push both remotes | (W5 commit) | 1903 |
+| W4 | `cargo-mutants` scoped to m10/m11/m21/m22. **Final verified run** (S1003733, post-Wave-G + C22, frozen tree @ `ce0d77b`, 4 h): **324 mutants — 259 caught / 10 missed / 0 timeout / 55 unviable → 96.3 % kill rate** (259 of 269 viable). The Wave-D+ iteration-cap fix eliminated all 20 prior m21 `build_variants` timeout mutants (0 timeout). Wave G (`c0ec95c`) killed 5 of the prior 15 survivors; the **10 remaining survivors are all proven-equivalent mutants** (9 m21 `build_variants` — design-induced by the iteration-cap defense-in-depth; 1 m22 `kmeans_plus_plus_seed:310` — FNV-collision-required) — each carries an in-code `// mutant-equivalent:` proof. **Every non-equivalent mutant in scope is killed.** *(Prior wording — "412 mutants, 80.6 %, every surviving non-timeout mutant resolved" — did not reconcile with any committed artifact; corrected + independently re-verified S1003733.)* | `5de71ac` + `c0ec95c` | → 1903 |
+| W5 | Docs reconciliation (CLAUDE.md charter + project & workspace CLAUDE.local.md) · 4-surface persistence · commit + push both remotes | `e8f6dd3` | 1903 |
 
 Gate green every wave: `cargo check` + `clippy -D warnings` + `clippy -D clippy::pedantic` +
 `cargo test --all-targets --all-features --release`. Zen audit packets W1/W2/W3 filed in
@@ -74,3 +74,20 @@ dormant tripwire; see `src/m8_povm_build_prereq/mod.rs` module doc); the **W3 #5
 core-type-encapsulation portfolio**
 ([HARDENING_W3_TYPE_DESIGN_PORTFOLIO.md](HARDENING_W3_TYPE_DESIGN_PORTFOLIO.md)) → completed
 in remediation Wave C (6 representable-illegal-state holes closed).
+
+## Reconciliation note — S1004115 (2026-05-23)
+
+A final docs-reconciliation pass folding the post-W5 truth into this canonical record:
+
+- **W5 commit** — `e8f6dd3` ("hardening(workflow-trace): W5 — docs reconciliation + 4-surface
+  persist"). The earlier `(W5 commit)` placeholder is now filled — a commit cannot carry its
+  own hash, so the W5 row was sealed with a placeholder and back-filled here.
+- **Test-count column reconciled** — W4 commit `5de71ac` = W3's 1835 + the 68 mutant-killing
+  tests named in its own commit message = **1903**; W5 is docs-only, so it holds at 1903. The
+  earlier W4 figure `1924` was unreconcilable with any commit and is corrected to 1903.
+- **Post-W5 arc** — the assessment-driven remediation **S1003733** (`0cc7be3` → `2096fd0`:
+  21/22 findings + C22 binary wiring + Wave G mutant-kill + final mutation fold) took the
+  suite **1903 → 1967** and the mutation kill-rate to **96.3 %**. See the project
+  `CLAUDE.local.md` S1003733 block for the full remediation record.
+- **Current `main` HEAD:** `2096fd0` — Hardening Fleet `dc25335..e8f6dd3` + S1003733
+  `0cc7be3..2096fd0`, all pushed origin (GitHub) + gitlab.

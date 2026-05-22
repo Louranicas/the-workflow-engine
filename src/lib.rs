@@ -134,6 +134,7 @@ pub use m42_stcortex_emit::{
 pub mod m9_watcher_namespace_guard;
 pub mod m10_ember_ci_gate;
 pub mod m11_fitness_weighted_decay;
+pub mod orchestration;
 pub mod user_facing_strings;
 
 pub use m1_atuin_consumer::{
@@ -165,4 +166,19 @@ pub use m11_fitness_weighted_decay::{
     chrono_now_ms, compute_decay_factor, fitness_factor, frequency_factor, recency_factor,
     run_consolidation_cycle, AcceptedWorkflowDecay, DecayConfig, DecayError, DecayFactor,
     FrequencyReader, LifecycleBank, PathwayWeightReader, SunsetPhase, SunsetStats,
+};
+
+// The orchestration layer — the pipeline drivers behind the two binaries.
+// Re-exported under `crystallise_*` / `dispatch_*` prefixes so the two
+// same-named `Config` / `Report` / `run` / `ArgError` / `OrchestrationError`
+// types from each sub-module do not collide at the crate root.
+pub use orchestration::crystallise::{
+    parse_args as parse_crystallise_args, run as run_crystallise, ArgError as CrystalliseArgError,
+    Config as CrystalliseConfig, OrchestrationError as CrystalliseError,
+    Report as CrystalliseReport, ReportFormat as CrystalliseReportFormat,
+};
+pub use orchestration::dispatch::{
+    parse_args as parse_dispatch_args, run as run_dispatch, ArgError as DispatchArgError,
+    CandidateOutcome as DispatchCandidateOutcome, Config as DispatchConfig,
+    OrchestrationError as DispatchError, Report as DispatchReport,
 };

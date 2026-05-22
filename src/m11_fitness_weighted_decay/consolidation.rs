@@ -1481,4 +1481,77 @@ mod tests {
                 "{id} was mutated despite Step-0 short-circuit");
         }
     }
+
+    // rationale: Comparison mutant kill — `consolidation.rs:335:19` is the
+    // Step 3 hard-prune gate `weight < config.prune_threshold && sunset_at
+    // .is_some()`. SURVIVING mutant `<`→`<=` (335:19). The discriminating
+    // input is the equality boundary: post-decay weight EXACTLY equal to
+    // `prune_threshold` (0.05, F4) AND an explicit `sunset_at` set so the
+    // second `&&` conjunct is satisfied.
+    //   real `<`  : `0.05 < 0.05` is FALSE → hard prune does NOT fire →
+    //               workflows_pruned == 0, bank.prunes empty.
+    //   `<=` mut  : `0.05 <= 0.05` is TRUE → `&& sunset_at.is_some()`
+    //               (true) → mark_for_prune fires → workflows_pruned == 1,
+    //               bank.prunes == ["wf_edge"].
+    // The exact `workflows_pruned == 0` + empty `bank.prunes` assertion
+    // fires the canary: a `<=` mutant produces 1 / ["wf_edge"].
+    //
+    // `sunset_at` is set to a FUTURE instant (`now + 1 day`) so Step 4
+    // auto-sunset (`sunset_at < now`) cannot fire and confound the count.
+    // Decay is a no-op (factor 1.0 via one_wf_bank_no_decay-style fixture)
+    // so the post-decay weight Step 3 reads is exactly 0.05. Step 2.5
+    // PrunePending DOES fire here (0.05 is inside the soft band
+    // [0.05, 0.10)) — that is the `workflows_prune_pending` counter, a
+    // different field, and is asserted == 1 to document the expected
+    // co-occurring soft transition.
+    #[test]
+    fn hard_prune_gate_is_strict_at_exact_prune_threshold_boundary() {
+        let now = 1_700_000_000_000_i64;
+        let mut bank = MockBank {
+            active: vec![make_active("wf_edge", "pw", now)],
+            // post-decay weight EXACTLY at the hard floor (0.05, F4).
+            weights: HashMap::from([(String::from("wf_edge"), 0.05)]),
+            // Explicit sunset set so the `&& sunset_at.is_some()` conjunct
+            // of the :335 gate is satisfied — FUTURE so Step 4 cannot fire.
+            sunsets: HashMap::from([(String::from("wf_edge"), now + 86_400_000)]),
+            transitions: vec![],
+            prunes: vec![],
+        };
+        // pathway weight 1.0 → fitness 1.0; count == cohort_max → freq 1.0;
+        // last_run_ms == now → recency 1.0 → compound 1.0 → decay factor
+        // 1.0 → post-decay weight stays EXACTLY 0.05.
+        let pathways = MockPathways(HashMap::from([(String::from("pw"), 1.0)]));
+        let freq = MockFreq {
+            counts: HashMap::from([(String::from("wf_edge"), 10)]),
+            cohort_max: 10,
+        };
+        let cfg = DecayConfig::default();
+        let stats = run_consolidation_cycle(&mut bank, &pathways, &freq, &cfg, || Some(now))
+            .expect("cycle ok");
+        // Decay must be a no-op so Step 3 reads exactly 0.05.
+        assert!(
+            (bank.weight_of("wf_edge").unwrap_or(0.0) - 0.05).abs() < 1e-12,
+            "decay must be a no-op for this boundary fixture",
+        );
+        // `weight < prune_threshold` is FALSE at weight == threshold →
+        // hard prune does NOT fire. A `<`→`<=` mutant at :335 fires it.
+        assert_eq!(
+            stats.workflows_pruned, 0,
+            "weight exactly at prune_threshold (0.05) must NOT hard-prune \
+             — the `<` at :335 is strictly exclusive of the boundary",
+        );
+        assert!(
+            bank.prunes.is_empty(),
+            "no mark_for_prune expected at the exact hard-floor boundary; \
+             a :335 `<`→`<=` mutant marks wf_edge: {:?}",
+            bank.prunes,
+        );
+        // Documented co-occurring soft transition: 0.05 IS inside the
+        // soft band [0.05, 0.10) so Step 2.5 PrunePending fires (separate
+        // counter — pins that the test exercises the real control flow).
+        assert_eq!(
+            stats.workflows_prune_pending, 1,
+            "0.05 is inside the soft band → exactly one PrunePending",
+        );
+    }
 }

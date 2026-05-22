@@ -286,7 +286,7 @@ fn kmeans_plus_plus_seed(points: &[Vec<f64>], k: usize, seed: u64) -> Vec<Vec<f6
                           the hash-perturbation of near-equal distances that \
                           F6 exists to eliminate"
             )]
-            // MUTANT-EQUIVALENT (cargo-mutants 278:69 `>` -> `>=`): the
+            // mutant-equivalent (cargo-mutants 303:69 `>` -> `>=`): the
             // `tiebreak >= best_tiebreak` mutant differs from `>` ONLY when
             // a later candidate satisfies `tiebreak == best_tiebreak`. Both
             // `tiebreak` and `best_tiebreak` are 64-bit FNV-1a hashes of
@@ -299,7 +299,14 @@ fn kmeans_plus_plus_seed(points: &[Vec<f64>], k: usize, seed: u64) -> Vec<Vec<f6
             // for the same 1-in-2^64 reason, and idx=0 always wins via the
             // first `d > best_dist` clause before the tiebreak is consulted.)
             // For every constructible input the two operators are observably
-            // identical, so no killing test exists.
+            // identical, so no killing test exists. NOTE: only the SECOND
+            // `>` here (`tiebreak > best_tiebreak`, col 69) is equivalent
+            // under `>=`. The FIRST `>` (`d > best_dist`, col 26) is NOT
+            // equivalent — an exact distance tie reorders `d == best_dist`
+            // observably; killed by `mutkill_303_*` in tests.rs. The
+            // col-69 `>`→`==` and `>`→`<` mutants are likewise killable
+            // (the tiebreak path still fires on real ties) and are also
+            // killed by `mutkill_303_*`.
             let wins = d > best_dist || (d == best_dist && tiebreak > best_tiebreak);
             if wins {
                 best_dist = d;

@@ -1537,3 +1537,198 @@ fn mutkill_160_squared_l2_is_real_distance_not_zero() {
     let dz = squared_l2(&[7.0, 7.0], &[7.0, 7.0]);
     assert!((dz - 0.0).abs() < 1e-15, "identical points => 0.0, got {dz}");
 }
+
+// ====================================================================
+// W4 mutation-kill pass (S1003529 follow-up) — `kmeans_plus_plus_seed`
+// SURVIVING mutants at mod.rs:238 and mod.rs:303. Each test below is a
+// SELF-CONTAINED, DETERMINISTIC killer: it re-derives the seeder's own
+// FNV-1a tiebreak / first-index arithmetic with the real (un-mutated)
+// `fnv1a_64` hash function as an INDEPENDENT oracle, then asserts the
+// seeder output matches. Only the COMPARISON OPERATORS inside
+// `kmeans_plus_plus_seed` are mutated by cargo-mutants — never `fnv1a_64`
+// itself — so the oracle stays correct under every mutant and the
+// assertion fires when an operator is flipped.
+// ====================================================================
+
+/// Independent oracle: the seeder's first-centroid index for `seed`.
+/// Mirrors `mod.rs:234` — `fnv1a_64(seed.to_le_bytes()) % points.len()`.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "hash % n_points is < n_points, which fits usize losslessly"
+)]
+fn oracle_first_idx(seed: u64, n_points: u64) -> usize {
+    use crate::m4_cascade::cluster_id::fnv1a_64;
+    (fnv1a_64(&seed.to_le_bytes()) % n_points) as usize
+}
+
+/// Independent oracle: the per-candidate tiebreak hash the seeder computes
+/// for candidate `idx` in seeding round `i`. Mirrors `mod.rs:264-271` —
+/// `fnv1a_64([idx_le, i_le, seed_le].concat())`.
+fn oracle_tiebreak(idx: u64, i: u64, seed: u64) -> u64 {
+    use crate::m4_cascade::cluster_id::fnv1a_64;
+    fnv1a_64(
+        &[idx.to_le_bytes(), i.to_le_bytes(), seed.to_le_bytes()].concat(),
+    )
+}
+
+#[test]
+// KILLS 238:29 `delete -` in kmeans_plus_plus_seed.
+// Line 238: `let mut best_dist = -1.0_f64;`. Deleting the unary minus
+// makes `best_dist` start at `+1.0` instead of `-1.0`.
+//
+// `best_dist` is the running max-min-distance during farthest-point
+// selection. The first legitimate candidate must always win its initial
+// comparison so a real point (not the stale index 0) is selected. With
+// the real `-1.0` floor, ANY candidate distance `d >= 0` satisfies
+// `d > best_dist`. With the `+1.0` mutant, a candidate only wins if
+// `d > 1.0` — so on an input where every second-seed min-distance is
+// strictly below 1.0, NO candidate ever wins `d > best_dist`, the
+// tiebreak clause never fires either (`d == 1.0` is false), and
+// `best_idx` is frozen at its initial `0` → the seeder returns
+// `points[0]` as the second centroid regardless of true distances.
+//
+// Discriminating input: four tightly-packed 1-D points whose pairwise
+// squared distances are all < 1.0. `points[0] == [0.9]`. For any seed
+// whose FNV-1a first index is 0 (first centroid == [0.9]):
+//   real `-1.0` : second seed = the genuine farthest point from [0.9],
+//                 which is [0.0] (squared-dist 0.81, strictly the max:
+//                 [0.3]→0.36, [0.6]→0.09). → seeder[1] == [0.0].
+//   `+1.0` mut  : every d <= 0.81 < 1.0 → best_idx frozen at 0 →
+//                 second seed = points[0] == [0.9]. → seeder[1] == [0.9].
+// The exact `seeder[1] == [0.0]` assertion fires the canary.
+fn mutkill_238_delete_unary_minus_freezes_seed_selection() {
+    use super::kmeans_plus_plus_seed;
+    // All pairwise squared distances < 1.0 (max is (0.9-0.0)^2 = 0.81).
+    let pts: Vec<Vec<f64>> = vec![pt(&[0.9]), pt(&[0.0]), pt(&[0.3]), pt(&[0.6])];
+    let mut checked = 0_usize;
+    for seed in 0_u64..256 {
+        // Only seeds whose first centroid is points[0] == [0.9]
+        // discriminate (otherwise the real farthest may also be [0.9]).
+        if oracle_first_idx(seed, 4) != 0 {
+            continue;
+        }
+        let seeds = kmeans_plus_plus_seed(&pts, 2, seed);
+        assert_eq!(seeds.len(), 2, "seeder must return k=2 centroids");
+        assert_eq!(
+            seeds[0],
+            vec![0.9],
+            "oracle says first centroid is points[0]=[0.9] for seed {seed}",
+        );
+        // Real `-1.0` floor → genuine farthest from [0.9] is [0.0]
+        // (squared-dist 0.81). The `+1.0` mutant freezes best_idx at 0
+        // and returns [0.9] (a duplicate of the first seed).
+        assert_eq!(
+            seeds[1],
+            vec![0.0],
+            "seed {seed}: second centroid must be the genuine farthest \
+             point [0.0]; a :238 `delete -` mutant freezes best_dist at \
+             +1.0 so no sub-1.0 distance ever wins and the seeder returns \
+             points[0]=[0.9] (a duplicate of the first seed)",
+        );
+        assert_ne!(
+            seeds[1], seeds[0],
+            "seed {seed}: a working seeder never duplicates the first \
+             centroid; a :238 mutant collapses both centroids to [0.9]",
+        );
+        checked += 1;
+    }
+    // Guard the test itself: the seed sweep MUST exercise the killing
+    // path at least a few times, else the test is vacuous.
+    assert!(
+        checked >= 10,
+        "seed sweep exercised the kill path only {checked} times — \
+         expected many seeds with first index 0",
+    );
+}
+
+#[test]
+// KILLS 303:26 (`d > best_dist` → `>=`), 303:69 (`tiebreak > best_tiebreak`
+// → `==`), and 303:69 (`> ` → `<`) in kmeans_plus_plus_seed.
+// Line 303: `let wins = d > best_dist || (d == best_dist && tiebreak >
+// best_tiebreak);`
+//
+// Discriminating input: three 1-D points `[[0.0], [5.0], [-5.0]]` at
+// indices 0,1,2. When the FNV-1a first centroid is index 0 (`[0.0]`),
+// the second-seed loop sees candidate idx 1 (`[5.0]`) and idx 2
+// (`[-5.0]`) at the EXACT same squared distance 25.0 from `[0.0]` — a
+// genuine, bit-exact distance tie. The seeder resolves the tie with the
+// FNV-1a `tiebreak` hash. Tracing the real loop (idx order 0,1,2):
+//   idx 0: d=0   → wins via `d > best_dist` → best_idx=0, best_tiebreak=T0
+//   idx 1: d=25  → wins via `d > best_dist` → best_idx=1, best_tiebreak=T1
+//   idx 2: d=25  → `d > best_dist` is FALSE; `d == best_dist` TRUE →
+//                  wins IFF `tiebreak(T2) > best_tiebreak(T1)`.
+// Therefore real second centroid = [-5.0] iff T2 > T1, else [5.0].
+//   303:26 `d > best_dist` → `d >= best_dist`: idx 2's `25 >= 25` is
+//      TRUE → idx 2 ALWAYS wins on the tie → second == [-5.0] always.
+//   303:69 `tiebreak > best_tiebreak` → `==`: idx 2 wins iff `T2 == T1`,
+//      an FNV-1a collision on distinct inputs → never → second == [5.0]
+//      always (idx 1 is never displaced).
+//   303:69 `tiebreak > best_tiebreak` → `<`: idx 2 wins iff `T2 < T1` —
+//      the EXACT inverse of the real `T2 > T1` rule.
+// The test re-derives T1, T2 with the real `fnv1a_64` (round index i=1,
+// the `for i in 1..k` loop's only iteration for k=2) and asserts the
+// seeder's second centroid equals the real-rule expectation for EVERY
+// tie-producing seed. The sweep is verified to hit both branches
+// (T2 > T1 and T2 < T1) so all three mutants are exercised:
+//   - a `T2 > T1` seed: real → [-5.0]; `==` mutant → [5.0] (kill);
+//                       `<` mutant → [5.0] (kill).
+//   - a `T2 < T1` seed: real → [5.0];  `>=` mutant → [-5.0] (kill);
+//                       `<` mutant → [-5.0] (kill).
+fn mutkill_303_tiebreak_comparison_resolves_exact_distance_ties() {
+    use super::kmeans_plus_plus_seed;
+    // idx 0 = [0.0]; idx 1 = [5.0]; idx 2 = [-5.0]. From [0.0] the
+    // squared distances to idx 1 and idx 2 are both exactly 25.0.
+    let pts: Vec<Vec<f64>> = vec![pt(&[0.0]), pt(&[5.0]), pt(&[-5.0])];
+    let mut greater_branch_hits = 0_usize;
+    let mut lesser_branch_hits = 0_usize;
+    for seed in 0_u64..256 {
+        // The tie only arises when the first centroid is idx 0 = [0.0].
+        if oracle_first_idx(seed, 3) != 0 {
+            continue;
+        }
+        // Round index i = 1 (k=2 → `for i in 1..2` runs once at i=1).
+        let t1 = oracle_tiebreak(1, 1, seed);
+        let t2 = oracle_tiebreak(2, 1, seed);
+        // FNV-1a of distinct 24-byte inputs: a collision is not
+        // constructible, so T1 != T2 always holds here.
+        assert_ne!(t1, t2, "seed {seed}: tiebreak collision (unreachable)");
+        // Real `>` rule: idx 2 (`[-5.0]`) wins the tie iff T2 > T1.
+        let expected_second: Vec<f64> = if t2 > t1 {
+            greater_branch_hits += 1;
+            vec![-5.0]
+        } else {
+            lesser_branch_hits += 1;
+            vec![5.0]
+        };
+        let seeds = kmeans_plus_plus_seed(&pts, 2, seed);
+        assert_eq!(seeds.len(), 2, "seeder must return k=2 centroids");
+        assert_eq!(
+            seeds[0],
+            vec![0.0],
+            "oracle says first centroid is [0.0] for seed {seed}",
+        );
+        assert_eq!(
+            seeds[1], expected_second,
+            "seed {seed}: on the exact distance tie (idx 1 and idx 2 both \
+             at squared-dist 25.0 from [0.0]) the second centroid must be \
+             the FNV-tiebreak winner under the real `>` rule (T2={t2} vs \
+             T1={t1}) → {expected_second:?}. A :303:26 `>`→`>=` mutant \
+             always picks the last tied index [-5.0]; a :303:69 `>`→`==` \
+             mutant always keeps [5.0]; a :303:69 `>`→`<` mutant inverts \
+             the rule. Got {:?}.",
+            seeds[1],
+        );
+    }
+    // Guard: the sweep MUST exercise BOTH tiebreak branches, otherwise a
+    // mutant could survive on an un-hit branch.
+    assert!(
+        greater_branch_hits >= 3,
+        "sweep hit the T2>T1 branch only {greater_branch_hits}× — needed to \
+         kill the :303:69 `>`→`==` mutant",
+    );
+    assert!(
+        lesser_branch_hits >= 3,
+        "sweep hit the T2<T1 branch only {lesser_branch_hits}× — needed to \
+         kill the :303:26 `>`→`>=` mutant",
+    );
+}

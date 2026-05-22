@@ -138,6 +138,38 @@ pub fn build_variants(
     let mut loop_iterations = 0_usize;
     // Round-robin: at each step prefer a swap, then a skip, until both
     // classes are exhausted or the cap is reached.
+    //
+    // mutant-equivalent (cargo-mutants 141:21/141:48/141:59/141:79 — all
+    // 7 operator mutants on this `while` guard): this loop is hardened
+    // with defense-in-depth — the independent `MAX_LOOP_ITERATIONS` break
+    // above + the inner `out.len() < MAX_VARIANTS_PER_PATTERN` guard on
+    // EVERY `out.push`. Every flip of this guard's operators is therefore
+    // observably equivalent on the function's only output (the returned
+    // `Vec`), proven case by case:
+    //  - 141:48 `&&`→`||`: makes the guard strictly MORE permissive, so
+    //    the loop runs >= as many iterations, never fewer. Once `out.len()`
+    //    reaches the cap the two inner `out.len() < MAX` guards block all
+    //    pushes, so every extra iteration has a no-op body; the loop then
+    //    terminates via `MAX_LOOP_ITERATIONS`. Output is identical — this
+    //    is exactly the hang→bounded-output conversion the cap exists for.
+    //  - 141:21 `<`→`<=` (`out.len() <= MAX`): diverges only at
+    //    `out.len() == MAX`, where both inner `out.len() < MAX` push
+    //    guards are already false → no-op body → cap-terminated. Identical
+    //    output.
+    //  - 141:59 `<`→`==`/`>`/`<=` (the `swap_i < n_swaps` disjunct):
+    //    `swap_i` and `skip_i` advance in lockstep (one each per
+    //    iteration) and `n_skips == n_swaps + 1` for every `len >= 2`
+    //    (both 0 for `len == 1`), so whenever `swap_i < n_swaps` holds,
+    //    `skip_i < n_skips` also holds — the swap disjunct is logically
+    //    redundant. Flipping it cannot change the disjunction's value
+    //    while the loop is live; at the end (`swap_i == n_swaps`) any
+    //    extra iteration the flip allows has a no-op body (inner real
+    //    `swap_i < n_swaps` / `skip_i < n_skips` both false). Identical
+    //    output.
+    //  - 141:79 `<`→`<=` (the `skip_i < n_skips` disjunct): diverges only
+    //    at `skip_i == n_skips`, which (lockstep advancement) implies
+    //    `swap_i == n_swaps` → the inner real guards block both pushes →
+    //    no-op body → cap-terminated. Identical output.
     while out.len() < MAX_VARIANTS_PER_PATTERN && (swap_i < n_swaps || skip_i < n_skips) {
         // Independent runaway-loop safety bound: break BEFORE doing any
         // further work if the iteration counter reaches the hard cap. The
@@ -146,7 +178,24 @@ pub fn build_variants(
         if loop_iterations >= MAX_LOOP_ITERATIONS {
             break;
         }
+        // mutant-equivalent (cargo-mutants 149:25 `+=`→`*=`): with `*=`,
+        // `loop_iterations` (initialised to 0) computes `0 * 1 == 0` every
+        // iteration and is frozen at 0, so the `>= MAX_LOOP_ITERATIONS`
+        // break above can never fire. That break is a REDUNDANT safety net
+        // — for every valid input the legitimate `while` guard (intact
+        // under this single mutation) terminates the loop in at most 7
+        // iterations, far below `MAX_LOOP_ITERATIONS` (32), so the cap is
+        // never reached on real code either. Disabling an unreached guard
+        // changes no observable behaviour. (Per the `MAX_LOOP_ITERATIONS`
+        // doc: this guard "NEVER changes behaviour on valid inputs".)
         loop_iterations += 1;
+        // mutant-equivalent (cargo-mutants 150:42 `<`→`<=` on
+        // `out.len() < MAX`): at this point `out.len()` equals its value
+        // at the `while`-guard check (only `loop_iterations += 1` ran
+        // since), which the un-mutated `while` guard proved `< MAX`. So
+        // `out.len() < MAX` here is ALWAYS true (`out.len() <= MAX - 1`),
+        // and `out.len() <= MAX` is therefore also always true. The
+        // conjunct is a defense-in-depth no-op; flipping it is equivalent.
         if swap_i < n_swaps && out.len() < MAX_VARIANTS_PER_PATTERN {
             let mut steps = pattern.steps().to_vec();
             steps.swap(swap_i, swap_i + 1);
@@ -159,6 +208,18 @@ pub fn build_variants(
             });
             swap_i += 1;
         }
+        // mutant-equivalent (cargo-mutants 162:19 `<`→`<=` on
+        // `skip_i < n_skips`): this `if` runs only when the enclosing
+        // iteration ran, i.e. when the `while` guard's
+        // `(swap_i < n_swaps || skip_i < n_skips)` was true. If
+        // `skip_i == n_skips` then (lockstep advancement, see the
+        // `while`-guard comment) `swap_i == n_swaps` too, so the `while`
+        // disjunction would have been false and the iteration would not
+        // have run. Hence whenever this line executes, `skip_i < n_skips`
+        // is ALWAYS true — and `skip_i <= n_skips` is then also always
+        // true. The flip cannot change the branch taken; it is equivalent.
+        // (The swap `if` above does not touch `skip_i`, so `skip_i` here
+        // equals its iteration-start value.)
         if skip_i < n_skips && out.len() < MAX_VARIANTS_PER_PATTERN {
             let mut steps = pattern.steps().to_vec();
             steps.remove(skip_i);

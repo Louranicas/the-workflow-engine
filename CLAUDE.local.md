@@ -64,6 +64,13 @@ Authored S1004115 (2026-05-23), dual-frame, gap-analysis-corrected.
   · stcortex ns `workflow_trace_completion_s1004115` (memories 18376 genesis + 18383 interview-locked + 4 bidi pathways ↔ `workflow_trace_hardening_2026_05_21`) · this anchor.
 - **Decisions:** Phase 4 interview COMPLETE (S1004115) — a 12-round / 48-question grilling;
   all 48 locked in plan **§ 15** (47 on recommendation, 1 deviation D26).
+- **Session checkpoint (S1004115) — cold-start anchor for a new context window:** vault
+  [[the-workflow-engine-vault/Session S1004115 — Completion Plan v2 Locked]] · shared-context
+  `~/projects/shared-context/sessions/2026-05-23T071500_workflow-trace-completion-plan-v2-s1004115.md`
+  · stcortex ns `habitat_sessions` mem 18387 (bidi ↔ `workflow_trace_completion_s1004115`
+  mem 18376/18383) · POVM ns `workflow_trace_completion_s1004115` (deprecated-overlap mirror)
+  · injection.db workstream `workflow-trace-completion-plan-v2-s1004115` + causal_chain id 115
+  + session_trajectory 1004115. Every surface carries a reverse-anchor back to this section.
 - **Next:** node 0.A — explicit go for **Phase 1**. All design decisions are locked;
   Phases 1–3 are decision-free and start on that word.
 

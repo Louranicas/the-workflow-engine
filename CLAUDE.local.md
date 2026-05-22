@@ -45,6 +45,27 @@ by the iteration-cap defense-in-depth) — closed-as-equivalent; R4 m8 POVM-gate
 
 ---
 
+## 📋 COMPLETION PLAN v2 — S1004115 (path to v0.1.0 / M0)
+
+A comprehensive plan to close every outstanding the-workflow-engine task — honest residuals
+(R1 m33 verifiers, R2 m22 K-means CLI wiring), decision-gated wiring, audit fold-ins, doc
+debt, operator hand-offs — and reach a clean **v0.1.0 / M0** tag. **Status: PLAN v2 —
+awaiting node-0.A review.** Authored S1004115 (2026-05-23), dual-frame, gap-analysis-corrected.
+
+- **Canonical:** [`ai_docs/WORKFLOW_TRACE_COMPLETION_PLAN_V2_S1004115.md`](ai_docs/WORKFLOW_TRACE_COMPLETION_PLAN_V2_S1004115.md)
+  — 10 phases, ~9–18 Claude-days to M0. Supersedes v1 [`…_S1004115.md`](ai_docs/WORKFLOW_TRACE_COMPLETION_PLAN_S1004115.md).
+- **Gap analysis (dual-frame):** [`…_CONVENTIONAL_GAP_ANALYSIS.md`](ai_docs/WORKFLOW_TRACE_COMPLETION_PLAN_S1004115_CONVENTIONAL_GAP_ANALYSIS.md)
+  (3 HIGH / 6 MED / 3 LOW) + [`…_NA_GAP_ANALYSIS.md`](ai_docs/WORKFLOW_TRACE_COMPLETION_PLAN_S1004115_NA_GAP_ANALYSIS.md)
+  (9 frame gaps / 3 tensions / 2 convergent) — all 24 findings accepted into v2.
+- **What v0.1.0 certifies:** engine-internal completeness only — explicitly **not** a
+  substrate-safety milestone (that is v0.2.0: NA-GAP-07/08/10, ADR D-S1002127-03).
+- **4 surfaces:** ai_docs (canonical) · vault [[the-workflow-engine-vault/Workflow-Trace Completion Plan v2 S1004115]]
+  · stcortex ns `workflow_trace_completion_s1004115` (memory id 18376 + bidi pathways 20324/20326 ↔ `workflow_trace_hardening_2026_05_21`) · this anchor.
+- **Next:** node 0.A — approve v2, then the Phase 4 interview (Round A 3 no-default + Round B
+  7 mechanical). Phases 1–3 are decision-free and may start on approval.
+
+---
+
 ## 🔧 HARDENING FLEET — 2026-05-21 (S1003529) · COMPLETE
 
 End-to-end quality + security hardening of the 26-module codebase, directed by Luke @ node

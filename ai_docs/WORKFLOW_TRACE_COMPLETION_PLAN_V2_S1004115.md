@@ -1,6 +1,6 @@
 # Workflow-Trace Completion Plan **v2** — S1004115 (close all outstanding tasks → v0.1.0 / M0)
 
-> **Authored:** 2026-05-23 (S1004115) · **Status:** PLAN v2 — awaiting node-0.A review
+> **Authored:** 2026-05-23 (S1004115) · **Status:** PLAN v2 — decisions LOCKED (§ 15), awaiting node-0.A go for Phase 1
 > **Supersedes:** [`WORKFLOW_TRACE_COMPLETION_PLAN_S1004115.md`](WORKFLOW_TRACE_COMPLETION_PLAN_S1004115.md) (v1)
 > **Re-baselined on:** git HEAD `6c3a5c5` (v1 was authored against the stale `2096fd0` — gap C-1).
 > **Corrected by:** the dual-frame gap analysis —
@@ -164,7 +164,7 @@ CARGO_TARGET_DIR=./target cargo test --all-targets --all-features --release
    (`T4-DEAD-ERR` is **excluded** — it needs DB7; executed in Phase 6/10.)
 3. Gate green per commit.
 
-### Phase 4 — Decision interview  *(node-0.A gate; runs after Phase 2 so it is informed)* · ~1–2 h
+### Phase 4 — Decision interview  ✅ COMPLETE (S1004115) — 48 decisions locked in § 15  · ~1–2 h
 Per gap NA-3, the interview is **split** so the load-bearing questions are not buried in a
 fatigue-inducing batch with cheap defaults.
 
@@ -307,10 +307,11 @@ Phase 3 ─┘                                          │
 | 8 — integration | ~0.5–1 day | — |
 | 9 — Zen + SD | ~1–2 days | Zen pace |
 | 10 — M0 ship | ~0.5 day | + CI if DB5=yes (~0.5 d) |
-| **M0 total** | **~9–18 working days** of Claude-code effort | + Luke/Zen gating |
+| **M0 total** | **~10–13 working days** of Claude-code effort (decisions locked — § 15) | + Luke/Zen gating |
 
-v1 quoted ~7–12 days; v2's honest range is **~9–18**, the upper bound assuming DB2 picks the
-cost-wire change and DA2 picks Consistency-now. The lower bound assumes both defer.
+v1 quoted ~7–12 days; v2's pre-interview range was ~9–18. The Phase 4 interview (§ 15) locked
+DB2 → Cost stub and DA2 → Consistency defer, so Phase 6 lands near its low end and the **M0
+roll-up narrows to ~10–13 Claude-days**.
 
 ## 6. Risk register
 
@@ -478,15 +479,116 @@ rather than fully solved — § 9 records why.
 Every stcortex write (here and in Phases 1/10) is read back; a silently-failed write
 degrades four-surface persistence to three (the POVM write-only trap — gap NA-6).
 
-## 14. Open decisions for node 0.A
+## 14. Status — all design decisions locked
 
-1. **Approve plan v2** as the path to M0 — or redirect.
-2. **Phase 4 interview** — Round A (DA1 CC-7, DA2 Consistency, DA3 M0-scope ratification:
-   *no defaults*) + Round B (DB1–DB7: defaults flagged). Runs after Phase 2.
-3. **DA3 specifically** — ratify § 8's statement of what `v0.1.0` certifies, or pull v0.2.0
-   forward (adds Phase 11).
-4. **Execution authorisation** — Phases 1–3 are decision-free and start on approval;
-   Phases 5–7 need the interview. G9 already fired, so code work is charter-authorised —
-   this is a courtesy confirmation.
+The Phase 4 interview is **complete** (S1004115, 2026-05-23) — all 48 decisions are locked
+in **§ 15**. Every "needs DAx / DBx" annotation in Parts A–B is now answered; the plan is
+fully specified.
 
-*Plan v2 authored S1004115 · 2026-05-23 · Claude @ cortex · dual-frame, gap-analysis-corrected · awaiting Luke @ node 0.A.*
+**The single remaining gate:** Luke @ node 0.A gives the explicit go for **Phase 1**. Per
+D48, execution is a separate authorisation from plan approval — nothing starts until that
+word. Phases 1–3 are decision-free; Phases 5–7 are unblocked by § 15.
+
+---
+
+## 15. Phase 4 interview — locked decisions (S1004115)
+
+The Phase 4 decision interview ran 2026-05-23 as a 12-round / 48-question grilling
+(node 0.A). All 48 are locked below — 47 took the recommended option, 1 deviated (**D26**).
+The phase bodies' "needs DAx / DBx" annotations are answered here.
+
+**Round 1 — Scope & milestone**
+- **D1** M0 certifies **engine-internal completeness only** — substrate-safety is v0.2.0.
+- **D2** workflow-trace is an **internal habitat milestone** — no crates.io / external users.
+- **D3** **No deadline** — quality-first; every phase its own gate.
+- **D4** **v0.2.0 is a real committed follow-on milestone**, not a shelf.
+
+**Round 2 — m33 Security verifier & gate semantics**
+- **D5** Security verdict above ceiling = **hard Refuse**.
+- **D6** The m33 gate is **blocking** — a Refuse stops dispatch.
+- **D7** Default `--ack-ceiling` = **Sandboxed** (most restrictive; fail-safe).
+- **D8** Every Refuse/Amend verdict **emits a substrate-confirmable WireEvent** (Phase 6f).
+
+**Round 3 — m33 Cost & Consistency verifiers**
+- **D9** **Cost = documented Approve-stub for M0** (no cost field on the wire).
+- **D10** If a real cost signal is ever wired: metric = **step-count × mutation-weight**.
+- **D11** **Consistency verifier deferred to v0.2.0** — rules unspecified; M0 ships a stub.
+- **D12** Bank-accessor seam: **add a read-only accessor on-demand**, not speculatively.
+
+**Round 4 — m33 Ember verifier**
+- **D13** Ember scope = **reduced M0 subset** (clarity + safe-naming + ambiguity).
+- **D14** Ember assesses **proposal-artefact quality**.
+- **D15** Ember **reuses m10's Ember CI machinery** where it fits.
+- **D16** Ember below-bar verdict = **Amend** (quality issue, not a Refuse).
+
+**Round 5 — R2 / m22 K-means**
+- **D17** Features = **5-dim**: step-count-norm, mutation one-hot ×3, Levenshtein-from-identity.
+- **D18** Diversity cluster **influences m31 selection** (not observability-only).
+- **D19** Cluster count **k is adaptive** — derived from variant count.
+- **D20** `diversity_cluster` is **emitted to stcortex/Nexus**.
+
+**Round 6 — CC-7**
+- **D21** **CC-7 is wired** — `PressureEvent` → m23 for M0.
+- **D22** Pressure **modulates m23 compose-priority** (additive, bounded).
+- **D23** **m15 is audited in Phase 2** before CC-7 wiring.
+- **D24** The NA framing is **accepted** — CC-7 is the substrate's voice in composition.
+
+**Round 7 — Audit governance**
+- **D25** If no Zen verdict by M0: **substitute an independent reviewer**.
+- **D26** ⚠ *DEVIATION* — the substitute is **the in-session `zen` agent**, not /ultrareview
+  (habitat-native; no external billing).
+- **D27** SD drift: **reconcile the 8 Class-A/B items now**; defer the 4 Class-C to v0.2.0.
+- **D28** Mutation bar: **hold ≥96.3%**; re-verify every module touched in Phases 5–7.
+
+**Round 8 — Release engineering**
+- **D29** **CI ships with M0** — GitHub Actions + GitLab CI running the 4-stage gate on push.
+- **D30** Version: **tag a clean `v0.1.0`**; drop the CHANGELOG `-s1003733` suffix.
+- **D31** Dead error variants: **keep + test** (construct each).
+- **D32** Directory rename `workflow-trace/`: **post-M0**.
+
+**Round 9 — Operator / deployment plane**
+- **D33** Conductor bring-up: **post-M0**, before the dispatch soak.
+- **D34** `wf-dispatch --execute`: **dry-run verification is enough for M0**; live `--execute`
+  is a documented post-M0 item.
+- **D35** Enforcement: **24h NoOp soak**, then flip `CONDUCTOR_ENFORCEMENT_ENABLED=1`.
+- **D36** The post-M0 dispatch soak is **carried by the Watcher ☤**.
+
+**Round 10 — Substrate frame**
+- **D37** Substrate-load: the **engine-timed proxy is adequate for M0** (honestly labelled);
+  a true substrate-emitted signal is v0.2.0.
+- **D38** Clock-coherence: **document the CC-5 clock crossings for M0**; fix in v0.2.0.
+- **D39** Absorbed NA gaps: **correct the project record** where spec-only; implement in M0
+  **only** what the M0 verifiers load-bearingly need.
+- **D40** Cadence: **invocation-only** — M0 and v0.2.0; no daemon mode.
+
+**Round 11 — Execution model**
+- **D41** Executor: **Claude solo, sequential, in-session** (subagents for Phase 2 audits +
+  the Phase 9 zen review only).
+- **D42** Drift: **full independent re-verification every phase** (gate + `git log` + exercise).
+- **D43** Per-phase done-evidence: **gate output + test-count delta + commit SHA** (+ scoped
+  `cargo-mutants` for code phases) in the commit message + a running ledger.
+- **D44** **Harness Tasks** track the 10 phases; **one commit per phase/sub-phase**.
+
+**Round 12 — Strategic premise**
+- **D45** Conviction: **complete it** — workflow-trace deserves completion.
+- **D46** Opportunity cost: **workflow-trace M0 first**, then Master Plan v2 / Ember.
+- **D47** Premise: **believed** — the mined-workflow signal is real; Phase 8's live-atuin
+  exercise shows first evidence.
+- **D48** After the interview: **fold in, persist, stop for explicit node-0.A approval**
+  before Phase 1.
+
+### Consequences for the plan
+
+- **Effort narrows.** D9 (Cost stub) + D11 (Consistency defer) take Phase 6 to its low end:
+  6a Security ~0.5 d · 6b Ember ~1–1.5 d · 6c Cost stub ~0.25 d · 6d Consistency stub
+  ~0.25 d · 6e m9 seam ~0.5 d · 6f verdict receipts ~1 d ≈ **~3.5–4 days**. With CI (+0.5 d)
+  the **M0 roll-up narrows from ~9–18 to ~10–13 Claude-days**.
+- **The m33 gate at M0:** 4 verifier kinds — Security + Ember **real**, Cost + Consistency
+  **documented stubs** — blocking, fail-safe (D5/D6/D7), verdict-emitting (D8).
+- **R2 m22 is fully real** (D17–D20): not decorative diversity. CC-7 is wired (D21–D24).
+- **D26 is the one deviation** — the audit substitute is the habitat-native `zen` agent;
+  /ultrareview is excluded.
+- **§ 14 is closed** — every design decision is locked; the only remaining gate is Luke's
+  explicit "start Phase 1" (D48).
+
+*Plan v2 authored S1004115 · 2026-05-23 · Claude @ cortex · dual-frame, gap-analysis-corrected · 48 decisions locked · awaiting Luke @ node 0.A go for Phase 1.*

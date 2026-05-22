@@ -3,7 +3,8 @@
 # Workflow-Trace Completion Plan v2 — S1004115
 
 **Vault mirror** (condensed) of the canonical completion plan. Authored 2026-05-23 (S1004115),
-re-baselined on git HEAD `6c3a5c5`. Status: **PLAN v2 — awaiting node-0.A review**.
+re-baselined on git HEAD `6c3a5c5`. Status: **PLAN v2 — 48 decisions LOCKED (Phase 4 interview
+complete, S1004115), awaiting node-0.A go for Phase 1**.
 
 ## What this plan is
 
@@ -56,13 +57,20 @@ zero rejected.
 stub, DA2 Consistency-now vs defer). v0.2.0 (NA-GAP-07/08/10) is a separate ~1,200-LOC
 milestone.
 
-## Key open decisions for node 0.A
+## Decisions — LOCKED (Phase 4 interview, S1004115)
 
-- **DA1** — CC-7: keep or sever the substrate's only compositional voice (no default).
-- **DA2** — Consistency verifier: implement for M0 or defer to v0.2.0 (no default).
-- **DA3** — ratify that `v0.1.0` certifies engine-internal completeness, not substrate-safety.
-- **DB1–DB7** — Security hard/soft · Cost wire-field vs stub · Ember rubric scope · m22
-  feature dims · CI yes/no · canonical version string · dead-error-variant keep/deprecate.
+The Phase 4 interview ran as a 12-round / 48-question grilling — all 48 decisions locked
+(47 on recommendation, 1 deviation). Full answer key: canonical plan **§ 15**. Headlines:
+
+- **M0** = engine-internal completeness only; substrate-safety = v0.2.0 (a real committed milestone).
+- **m33 gate** = blocking, fail-safe — Security (hard-Refuse) + Ember (Amend) real; Cost +
+  Consistency documented stubs; every verdict emits a WireEvent.
+- **R2 m22** fully real — 5-dim features, adaptive k, influences m31 selection, cluster emitted.
+- **CC-7 wired** — `PressureEvent` modulates m23 compose-priority.
+- **Audit** — if Zen stays silent, the in-session `zen` agent substitutes (not /ultrareview).
+- **Release** — CI ships with M0; clean `v0.1.0` tag; rename post-M0.
+- **Execution** — Claude solo, sequential, full re-verify every phase; ~10–13 Claude-days.
+- **The single remaining gate:** node 0.A's explicit go for Phase 1.
 
 ## Anchors — four surfaces
 

@@ -8,6 +8,45 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ## [Unreleased]
 
+### [v0.1.0-s1003733] — 2026-05-22 (S1003733) — assessment remediation + binary wiring
+
+Assessment-driven remediation. A god-tier 7-facet code-quality assessment scored
+the-workflow-engine 80/100; Luke @ node 0.A directed "fix all identified issues". **21 of 22
+findings closed + the C22 binary wiring + Wave G mutant-kill.** Commits `0cc7be3..ae7d460` on
+`main`, pushed both remotes. Tests **1903 → 1967**, clippy + pedantic clean every wave.
+
+#### Added
+- **`wf-crystallise` + `wf-dispatch` are real CLI programs** (were one-line `println!` stubs).
+  Pipeline logic lives in the new `workflow_core::orchestration` module (`crystallise` +
+  `dispatch` sub-modules — each a `Config`, hand-rolled `parse_args`, and a `run()` driver);
+  the binaries are thin `main()` wrappers. JSONL `WorkflowProposal` bridge crystallise→dispatch.
+  `--offline` / `--dry-run` safe-default modes; graceful degradation when habitat services are
+  down. 22 new integration tests for the lib↔binary seam.
+- Operator/developer docs: `QUICKSTART.md`, `docs/COMMAND_MAPPING.md`, `docs/DIAGNOSTICS.md`,
+  `ai_docs/API_MAP.md`, `ultramap/WF_{CRYSTALLISE,DISPATCH}_PIPELINE.md`.
+
+#### Changed
+- Documentation integrity: the W4 mutation-testing over-claim ("412 mutants / 80.6%",
+  unreproducible) corrected to artifact-backed + independently re-verified numbers
+  (324 mutants, 254 caught, 94.4%); the "W4 in progress / 1835 tests" doc-drift swept.
+- 8 contained code fixes: typed `MinerError::MaxLengthZero` (was silent coercion); `MaxGap`
+  encapsulation; `DispatcherError::WireFormat` detail surfaced in `DispatchOutcome`;
+  `KMeansError::NonFiniteCoordinate` variant (removed the `usize::MAX` sentinel); `unwrap_or(0)`
+  audit; SEC3 `$PATH` fallback removed; `StcortexWriter::new` → `new_unchecked`.
+- Core-type encapsulation (W3 #5–#10 portfolio): 6 representable-illegal-state holes closed —
+  `Pattern` (KEYSTONE — `canonical_hash` can no longer desync), `WorkflowProposal` (F2-gated
+  fallible constructor), `AcceptedWorkflow`, `NexusEvent.kind` → `NexusEventKind` enum, the
+  `BatternId`/`CascadeClusterId`/`ChainId` newtypes, `WorkflowRunRow` → `RunState{Open,Closed}`.
+- CC-4 diversity threaded through `compose_proposals`; CC-5 canonical `workflow_pathway_id`;
+  `EscapeSurfaceProfile` acknowledgement gate made **monotone** (security MEDIUM —
+  `FileWrite`/`NetworkEgress` no longer dispatch unacknowledged).
+- m21 `build_variants` iteration cap (timeout mutants → bounded/catchable). m32/m22 oversized
+  modules split into `tests.rs` siblings; m13 test-helper deduplication.
+
+#### Resolved
+- F2 m8 POVM-gate architecture decision → **KEEP-DORMANT** (dormant tripwire; static `build.rs`
+  enforcement; no in-tree POVM read site post-m42-pivot).
+
 ### [v0.1.0-cluster-d-day-1-m8] — 2026-05-17 (S1002209) — first code-bearing release
 
 🔥 **G9 fired. HOLD-v2 envelope LIFTED. m8 LIVE.**

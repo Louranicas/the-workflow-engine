@@ -12,6 +12,37 @@
 
 ---
 
+## ✅ ASSESSMENT-DRIVEN REMEDIATION — S1003733 · COMPLETE (2026-05-22)
+
+A god-tier 7-facet code-quality assessment (Command, S1003733) scored the-workflow-engine
+**80/100**. Luke @ node 0.A directed a full remediation — "fix all identified issues, do not
+carry forward". **21 of 22 findings closed + the C22 binary wiring + Wave G mutant-kill.**
+
+**Outcome:** tests **1903 → 1967**, 0 failures, clippy + pedantic clean every wave; mutation
+kill-rate 85.7% → ~96.7% post-fix. The two binaries are no longer `println!` stubs.
+
+| Wave | Commit | What |
+|------|--------|------|
+| A–E | `0cc7be3` | 21 findings — doc integrity · contained fixes · 6-hole core-type encapsulation · CC-4/CC-5 wiring + `EscapeSurfaceProfile` monotone security gate · structure |
+| W4-verify | `046e955` | verified post-fix mutation result folded into the W4 record |
+| Wave G | `c0ec95c` | 6 surviving mutants killed + 9 m21 mutants proven-equivalent |
+| C22 | `ae7d460` | `wf-crystallise` + `wf-dispatch` wired — real CLI programs over a new `workflow_core::orchestration` module; JSONL proposal bridge; 22 integration tests |
+
+**Cold-start:** canonical record [`ai_docs/HARDENING_FLEET_2026-05-21.md`](ai_docs/HARDENING_FLEET_2026-05-21.md)
+(W4 row carries the verified mutation numbers) · vault [[Assessment Remediation S1003733]] ·
+new operator docs [`README.md`](README.md) · [`QUICKSTART.md`](QUICKSTART.md) ·
+[`docs/COMMAND_MAPPING.md`](docs/COMMAND_MAPPING.md) · [`docs/DIAGNOSTICS.md`](docs/DIAGNOSTICS.md) ·
+[`ai_docs/API_MAP.md`](ai_docs/API_MAP.md) · [`ARCHITECTURE.md`](ARCHITECTURE.md) ·
+`ultramap/WF_{CRYSTALLISE,DISPATCH}_PIPELINE.md`.
+
+**Open follow-ups (honest residuals — node 0.A):** R1 m33 dispatch verifiers are
+conservative-default (`Approve`) placeholders — real per-kind policy logic pending; R2 m22
+K-means diversity is not assembled on the CLI batch paths (`compose_proposals` is passed an
+honest `|_| None`); R3 the 9 m21 `build_variants` mutants are proven-equivalent (design-induced
+by the iteration-cap defense-in-depth) — closed-as-equivalent; R4 m8 POVM-gate = KEEP-DORMANT.
+
+---
+
 ## 🔧 HARDENING FLEET — 2026-05-21 (S1003529) · COMPLETE
 
 End-to-end quality + security hardening of the 26-module codebase, directed by Luke @ node
@@ -25,11 +56,11 @@ remotes. **Tests 1310 → 1903; clippy + pedantic clean every wave.**
 - **W3** `2e3113d` — type-design: `#[non_exhaustive]` ×24, `WorkflowId` + `MinSupport`
   encapsulation, comment accuracy (→ 1835).
 - **W4** `5de71ac` — mutation testing: `cargo-mutants` scoped to m10/m11/m21/m22.
-  Post-remediation verified run (S1003733, frozen tree @ `0cc7be3`): 324 mutants —
-  254 caught / 15 missed / 0 timeout / 55 unviable → **94.4% kill rate**. The S1003733
-  Wave-D+ iteration-cap fix eliminated all 20 prior m21 `build_variants` timeout mutants.
-  15 survivors documented (9 m21 / 5 m22 / 1 m11) — focused mutant-kill pass recommended.
-  (→ 1921.)
+  Post-remediation verified run (S1003733): 324 mutants — 254 caught / 15 missed / 0 timeout
+  / 55 unviable → **94.4% kill rate**. The S1003733 Wave-D+ iteration-cap fix eliminated all
+  20 prior m21 `build_variants` timeout mutants; Wave G (`c0ec95c`) then killed 6 of the 15
+  survivors and proved the remaining 9 m21 mutants equivalent. (Tests → 1967 after the full
+  S1003733 remediation + C22 binary wiring — see the S1003733 remediation block above.)
 - **W5** `e8f6dd3` — docs reconciliation + 4-surface persistence + push.
 
 Gate every wave: `cargo check` + `clippy -D warnings` + `clippy -D clippy::pedantic` +

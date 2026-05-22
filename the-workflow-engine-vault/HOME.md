@@ -1,7 +1,7 @@
 ---
 title: The Workflow Engine — Vault HOME
-date: 2026-05-17 (S1002127 · Wave 4.B closeout)
-status: ACTIVE — G9 fired 2026-05-17; 26-module Rust codebase implemented (~31k LOC); Hardening Fleet 2026-05-21 complete (W1-W5, 1903 tests, clippy+pedantic clean)
+date: 2026-05-22 (S1003733 · assessment remediation + C22 binary wiring)
+status: ACTIVE — G9 fired 2026-05-17; 26-module Rust codebase implemented (~31k LOC); both binaries wired (C22); assessment remediation S1003733 complete (1967 tests, clippy+pedantic clean)
 authority: Luke @ node 0.A
 ---
 
@@ -9,7 +9,29 @@ authority: Luke @ node 0.A
 
 > Back to: `~/claude-code-workspace/the-workflow-engine/` · [[CLAUDE.md]] · [[CLAUDE.local.md]]
 
-This vault holds the workflow-engine codebase's artefacts. **The codebase is implemented** — G9 fired 2026-05-17, HOLD-v2 lifted; 26 modules, ~31k LOC, 1903 tests, hardened end-to-end by the Hardening Fleet 2026-05-21. Older "planning-only / HOLD-v2 / no code" language in notes below is **superseded archaeology** — current authority is [[Hardening Fleet 2026-05-21]], `../CLAUDE.local.md`, `../GATE_STATE.md`, and git history.
+This vault holds the workflow-engine codebase's artefacts. **The codebase is implemented and the two binaries are real CLI programs** — G9 fired 2026-05-17, HOLD-v2 lifted; 26 modules, ~31k LOC, **1967 tests**, hardened end-to-end by the Hardening Fleet 2026-05-21 and the assessment-driven remediation S1003733 (2026-05-22). `wf-crystallise` and `wf-dispatch` are no longer stubs — both are wired over a new `workflow_core::orchestration` library module (commit `ae7d460`). Older "planning-only / HOLD-v2 / no code / stub binary" language in notes below is **superseded archaeology** — current authority is [[Assessment Remediation S1003733]], [[Hardening Fleet 2026-05-21]], `../CLAUDE.local.md`, `../GATE_STATE.md`, and git history.
+
+---
+
+## ✅ Assessment Remediation — S1003733 (2026-05-22) · COMPLETE
+
+A god-tier 7-facet code-quality assessment scored `workflow-trace` **80/100**. The
+assessment-driven remediation closed 21 findings across 5 gated waves (A–E), wired both
+binaries (**C22**), and killed/proved-equivalent every surviving mutant (**Wave G**).
+**Tests 1903 → 1967; clippy + pedantic clean; commits `dc25335..ae7d460` on `main`, pushed.**
+
+- **Binaries wired (C22)** — `wf-crystallise` and `wf-dispatch` are real CLI programs; the
+  pipeline logic lives in the new `workflow_core::orchestration` library module so the
+  lib↔binary seam is integration-testable. `WorkflowProposal` JSONL is the crystallise→dispatch
+  handoff, closing the bank-persistence gap.
+- **5 remediation waves** — A docs-integrity, B contained code fixes, C core-type
+  encapsulation (6 illegal-state holes closed), D synergy wiring + security
+  (monotone EscapeSurfaceProfile gate), E structure.
+- **Wave G mutation closeout** — 15 surviving mutants resolved: 6 killed by discriminating
+  tests, 9 m21 `build_variants` loop-condition mutants proven-equivalent.
+
+**Full note: [[Assessment Remediation S1003733]]** · canonical map `/tmp/wfe-assessment-S1003733/CODEBASE_MAP.md`
+· cold-start hub `../CLAUDE.local.md`.
 
 ---
 
@@ -17,7 +39,8 @@ This vault holds the workflow-engine codebase's artefacts. **The codebase is imp
 
 End-to-end quality + security hardening of the implemented 26-module codebase, directed by
 Luke @ node 0.A in collaboration with Zen. 6 waves committed (`dc25335..e8f6dd3`, pushed
-both remotes); **tests 1310 → 1903; clippy + pedantic clean every wave.**
+both remotes); **tests 1310 → 1903; clippy + pedantic clean every wave.** Followed by the
+assessment remediation S1003733 above (tests → 1967).
 
 **Full note: [[Hardening Fleet 2026-05-21]]** · canonical `../ai_docs/HARDENING_FLEET_2026-05-21.md`
 · cold-start hub `../CLAUDE.local.md` § "HARDENING FLEET". Persisted across 6 bidirectionally-
@@ -74,12 +97,13 @@ linked surfaces: ai_docs · this vault · stcortex (`workflow_trace_hardening_20
 
 ## Current state
 
-- **Direction:** single-phase deployment (Luke override 2026-05-17 of phased recommendation)
-- **Module count:** 26 (was 25 + Phase C TBD; m33 `workflow_verifier` added; Phase C TBD dropped)
-- **LOC estimate:** ~5,200 (was ~1,750 Phase A + ~3,500 Phase B sketched)
-- **Spec status:** v1.2 binding (single-phase override needs v1.3 patch + Zen re-audit)
-- **Build status:** HOLD-v2 — gated on G1-G9, none green yet
-- **Naming:** working name `workflow-trace` (Path A leading draft, not formally ratified; Luke directive used "workflow-engine" colloquially)
+- **Direction:** single-phase deployment (Luke override 2026-05-17 of phased recommendation) — **shipped**
+- **Module count:** 26, all implemented (`workflow_core` lib + `wf-crystallise` / `wf-dispatch` binaries)
+- **LOC:** ~31k implemented (the realised codebase is larger than the planning-era ~5,200 LOC estimate)
+- **Spec status:** v1.3 binding (`ai_docs/GENESIS_PROMPT_V1_3.md`); G7 Zen audit history closed
+- **Build status:** G9 fired 2026-05-17 — code work authorised. Full 4-stage gate green; **1967 tests; clippy + pedantic clean**
+- **Binaries:** `wf-crystallise` + `wf-dispatch` are real CLI programs (C22, commit `ae7d460`) over `workflow_core::orchestration`
+- **Naming:** Cargo package `workflow-trace`; directory still `the-workflow-engine/` (rename deferred post-M0, cosmetic)
 
 ---
 
@@ -88,6 +112,11 @@ linked surfaces: ai_docs · this vault · stcortex (`workflow_trace_hardening_20
 - [[MASTER_INDEX]] — comprehensive catalogue · open-issues tracker · gate-state snapshot
 - [[workflow-engine-code-base]] — **workflow tracker** · chronological audit · decision log · team-contribution map · architectural evolution
 - [[Vault Save Status S1001982]] — audit trail of what lives where
+
+## Hardening + remediation (current reality)
+
+- [[Assessment Remediation S1003733]] — **7-facet assessment (80/100) · 5-wave remediation · C22 binary wiring · Wave G mutation closeout · Bugs & Known Issues · Diagnostics**
+- [[Hardening Fleet 2026-05-21]] — 6-wave end-to-end quality + security hardening (W0–W5)
 
 ## Primary artefact
 
@@ -140,19 +169,24 @@ Each row links to both the vault mirror (reading surface) AND the canonical work
 
 ---
 
-## Gates G1-G9 (pre-build, all NOT GREEN)
+## Gates G1-G9 — ALL RESOLVED (G9 fired 2026-05-17)
 
-| # | Gate | State | Owner |
-|---:|---|---|---|
-| G1 | RATIFICATION (Watcher close-notice) | ⏸ | Watcher |
-| G2 | NAMING (directory rename `the-workflow-engine/` → `workflow-trace/`) | ⏸ | Command (after G1) |
-| G3 | :8125 REDEPLOY VERIFY (povm-v2 rebuild; learning_health 0.05-0.15) | ⏸ | Luke trigger + Command-3 + Zen verify |
-| G4 | WATCHER NOTES (Hebbian v3 reconciliation ✅ filed Zen-audited PASS-WITH-MINOR-AMEND; Ember rubric §5.1 Held-semantics ⚠ amendment pending) | partial | Watcher |
-| G5 | GENESIS INTERVIEW + F2 hard gate | ⏸ | Command-2 + Watcher + Zen synchronous |
-| G6 | DUAL-FRAME GAP ANALYSIS | ⏸ | Command-2 + persona voices |
-| G7 | ZEN SPEC AUDIT (APPROVE/REFUSE/AMEND) | ⏸ | Zen |
-| G8 | FOUR-SURFACE PERSISTENCE | ⏸ | Command + Watcher (gated on G7 APPROVE) |
-| G9 | EXPLICIT START-CODING SIGNAL | ⚠ queued-intent-only | Luke ("start coding workflow-trace" observed but out-of-sequence per Zen block) |
+The nine pre-genesis gates are **closed**. G9 fired 2026-05-17; HOLD-v2 lifted; the 26-module
+codebase was implemented, hardened (Hardening Fleet 2026-05-21), and remediated against a
+7-facet assessment (S1003733). Live gate record: `../GATE_STATE.md` (G9 FIRED table). This
+section is retained only as historical context — the project is past the gate phase.
+
+| # | Gate | Resolution |
+|---:|---|---|
+| G1 | RATIFICATION (Watcher close-notice) | resolved |
+| G2 | NAMING (directory rename) | deferred post-M0 (cosmetic); Cargo package is `workflow-trace` |
+| G3 | :8125 redeploy verify | resolved (m42 stcortex-only pivot decoupled workflow-trace from POVM) |
+| G4 | Watcher notes (Hebbian v3 / Ember rubric) | resolved |
+| G5 | Genesis interview + F2 hard gate | resolved |
+| G6 | Dual-frame gap analysis | resolved |
+| G7 | Zen spec audit | resolved (v1.3 binding) |
+| G8 | Four-surface persistence | resolved |
+| G9 | Explicit start-coding signal | **FIRED 2026-05-17** — Luke typed `start coding workflow-trace` |
 
 ---
 

@@ -11,33 +11,51 @@
 
 ---
 
-## Root-level docs (Wave-2 author target — TBD)
+## Operator + developer docs (post-G9 — LIVE)
+
+> Authored during the S1003733 assessment-driven remediation. These are the
+> day-to-day operator/developer surface for the implemented 26-module codebase.
 
 | Doc | Purpose | Status |
 |---|---|---|
-| `ARCHITECTURE_DEEP_DIVE.md` | Cross-cluster topology, message flows, state machines (dev-ops-engine-v3 mirror) | TBD Wave 2 |
-| `CODE_MODULE_MAP.md` | All 26 modules with public exports, dependencies, hot paths | TBD Wave 2 |
-| `DEPLOYMENT_GUIDE.md` | End-to-end deploy recipe (synthesis of vault deployment framework) | TBD Wave 2 |
-| `ERROR_TAXONOMY.md` | thiserror taxonomy across clusters | TBD Wave 2 |
-| `MESSAGE_FLOWS.md` | Cross-cluster + cross-service message envelopes | TBD Wave 2 |
-| `META_TREE_MIND_MAP.md` | Concept tree (dev-ops-engine-v3 mirror) | TBD Wave 2 |
-| `ONBOARDING.md` | New contributor cold-start (post-G9) | TBD Wave 2 |
-| `PERFORMANCE.md` | Hot-path performance budgets, benchmarks, profiling guide | TBD Wave 2 |
-| `QUICKSTART.md` | 5-minute developer quickstart | TBD Wave 2 |
-| `STATE_MACHINES.md` | Sunset lifecycle, dispatch flow, verifier state machines | TBD Wave 2 |
-| `CARGO_LAYOUT_SPEC.md` | Workspace structure spec (until G9; replaces real Cargo.toml) | TBD Wave 2 |
-| `GENESIS_PROMPT_V1_3.md` | Binding spec v1.3 amendment | **LIVE** |
+| [`../QUICKSTART.md`](../QUICKSTART.md) | 5-minute developer quickstart — build, run both binaries, read the gate | **LIVE** |
+| [`../docs/DIAGNOSTICS.md`](../docs/DIAGNOSTICS.md) | God-tier diagnostics + troubleshooting — 4-stage gate, `wf-crystallise` / `wf-dispatch` symptoms, external-service matrix, m8 build warnings, logging, build/env issues | **LIVE** |
+| [`../docs/COMMAND_MAPPING.md`](../docs/COMMAND_MAPPING.md) | `wf-crystallise` / `wf-dispatch` CLI flag reference + command mapping | **LIVE** |
+| [`API_MAP.md`](API_MAP.md) | Public-API surface across `wf-crystallise` + `wf-dispatch` + `workflow_core` lib (the authoritative `pub use` inventory) | **LIVE** |
+| [`HARDENING_FLEET_2026-05-21.md`](HARDENING_FLEET_2026-05-21.md) | Hardening Fleet remediation record — W0–W5 waves, baseline, results, S1003733 resolution (m8 KEEP-DORMANT, W3 type-design portfolio) | **LIVE** |
+| [`HARDENING_W2_FINDINGS.md`](HARDENING_W2_FINDINGS.md) | Wave-2 security findings detail (19 findings) | **LIVE** |
+| [`HARDENING_W3_TYPE_DESIGN_PORTFOLIO.md`](HARDENING_W3_TYPE_DESIGN_PORTFOLIO.md) | Wave-3 type-design portfolio (`#[non_exhaustive]`, newtype encapsulation) | **LIVE** |
+
+## Root-level docs (descriptive reference set — LIVE)
+
+| Doc | Purpose | Status |
+|---|---|---|
+| [`ARCHITECTURE_DEEP_DIVE.md`](ARCHITECTURE_DEEP_DIVE.md) | Cross-cluster topology, message flows, state machines | **LIVE** |
+| [`CODE_MODULE_MAP.md`](CODE_MODULE_MAP.md) | All 26 modules with public exports, dependencies, hot paths | **LIVE** (descriptive companion to [`API_MAP.md`](API_MAP.md)) |
+| [`DEPLOYMENT_GUIDE.md`](DEPLOYMENT_GUIDE.md) | End-to-end deploy recipe (synthesis of vault deployment framework) | **LIVE** |
+| [`ERROR_TAXONOMY.md`](ERROR_TAXONOMY.md) | thiserror taxonomy across clusters | **LIVE** |
+| [`MESSAGE_FLOWS.md`](MESSAGE_FLOWS.md) | Cross-cluster + cross-service message envelopes | **LIVE** |
+| [`META_TREE_MIND_MAP.md`](META_TREE_MIND_MAP.md) | Concept tree | **LIVE** |
+| [`ONBOARDING.md`](ONBOARDING.md) | New contributor cold-start | **LIVE** |
+| [`PERFORMANCE.md`](PERFORMANCE.md) | Hot-path performance budgets, benchmarks, profiling guide | **LIVE** |
+| [`STATE_MACHINES.md`](STATE_MACHINES.md) | Sunset lifecycle, dispatch flow, verifier state machines | **LIVE** |
+| [`QUICKSTART.md`](QUICKSTART.md) | Quickstart (ai_docs copy; root-level [`../QUICKSTART.md`](../QUICKSTART.md) is the operator-facing canonical) | **LIVE** |
+| [`CARGO_LAYOUT_SPEC.md`](CARGO_LAYOUT_SPEC.md) | Workspace structure spec (historical — superseded by the real `Cargo.toml` post-G9) | Superseded |
+| [`GENESIS_PROMPT_V1_3.md`](GENESIS_PROMPT_V1_3.md) | Binding spec v1.3 amendment | **LIVE** |
+| [`CONVENTIONAL_GAP_ANALYSIS_S1002209.md`](CONVENTIONAL_GAP_ANALYSIS_S1002209.md) | Conventional-frame gap analysis (G6) | **LIVE** |
+| [`NA_GAP_ANALYSIS_S1002127_SCAFFOLD.md`](NA_GAP_ANALYSIS_S1002127_SCAFFOLD.md) | Non-anthropocentric (Frame-A) gap analysis (G6) | **LIVE** |
+| [`HARDENING_FLEET_CARRY_FORWARD_S1002600.md`](HARDENING_FLEET_CARRY_FORWARD_S1002600.md) · [`MUTATION_TEST_REPORT_S1002600.md`](MUTATION_TEST_REPORT_S1002600.md) | Carry-forward register + mutation-test report (S1002600) | **LIVE** |
 
 ## Subdirs
 
 | Dir | Contents | Status |
 |---|---|---|
-| [`layers/`](layers/) | Per-cluster docs (8 files) | TBD Wave 2 |
-| [`modules/`](modules/) | Per-module operational docs (26 files) | TBD Wave 2 (mirror of `ai_specs/modules/`) |
-| [`decisions/`](decisions/) | ADRs (single-phase override, m42 pivot, …) | Seeded; growing |
-| [`schematics/`](schematics/) | Mermaid diagrams (per cluster + cross-cluster) | TBD Wave 2 |
-| [`runbooks/`](runbooks/) | Operational runbooks (per phase) | Mirror to `optimisation-v7/RUNBOOKS/` |
-| [`reflections/`](reflections/) | Session reflections (S1001982+) | TBD as work lands |
+| [`layers/`](layers/) | Per-cluster docs | Seeded |
+| [`modules/`](modules/) | Per-module operational docs (mirror of `ai_specs/modules/`) | Empty — use [`ai_specs/modules/`](../ai_specs/modules/) + [`CODE_MODULE_MAP.md`](CODE_MODULE_MAP.md) + [`API_MAP.md`](API_MAP.md) |
+| [`decisions/`](decisions/) | ADRs — `2026-05-17-substrate-as-actor-deferrals.md` (D-S1002127-03); see also [`optimisation-v7/decisions/`](optimisation-v7/decisions/) | Seeded; growing |
+| [`schematics/`](schematics/) | Mermaid diagrams (per cluster + cross-cluster) | Seeded |
+| [`runbooks/`](runbooks/) | Operational runbooks (per phase) — mirror of `optimisation-v7/RUNBOOKS/` | Seeded |
+| [`reflections/`](reflections/) | Session reflections (S1001982+) | Seeded |
 | [`optimisation-v7/`](optimisation-v7/) | V7 framework (45 deliverables; canonical for many docs) | **LIVE** |
 
 ---

@@ -1,8 +1,8 @@
 ---
 title: MASTER INDEX — the-workflow-engine vault
-date: 2026-05-17 (S1002127 · Wave 4.B closeout)
+date: 2026-05-22 (S1003733 · assessment remediation + C22 binary wiring)
 kind: index
-status: planning-only · HOLD-v2 active · Wave 4.B NA-GAP remediation LIVE
+status: ACTIVE — G9 fired; 26-module codebase implemented; both binaries wired (C22); 1967 tests, clippy+pedantic clean
 ---
 
 # MASTER INDEX
@@ -10,6 +10,21 @@ status: planning-only · HOLD-v2 active · Wave 4.B NA-GAP remediation LIVE
 > Back to: [[HOME]] · [[CLAUDE.md]] · [[CLAUDE.local.md]]
 
 Comprehensive catalogue of every artefact in the the-workflow-engine vault, organised by purpose.
+
+> **Current reality (2026-05-22):** the project is **implemented**. G9 fired 2026-05-17;
+> 26 modules / ~31k LOC; both binaries (`wf-crystallise`, `wf-dispatch`) are real CLI
+> programs after C22; the Hardening Fleet (W0–W5) + the assessment-driven remediation
+> S1003733 (5 waves + C22 + Wave G) are complete — **1967 tests, clippy + pedantic clean**,
+> commits `dc25335..ae7d460` on `main` (pushed). Any "planning-only / HOLD-v2 / stub binary"
+> language remaining below is superseded archaeology. See [[Assessment Remediation S1003733]]
+> and [[Hardening Fleet 2026-05-21]] for the live state.
+
+---
+
+## 0b. Current-state notes (read these first for live reality)
+
+- [[Assessment Remediation S1003733]] — **7-facet assessment (80/100), 5-wave remediation, C22 binary wiring, Wave G mutation closeout, per-facet deltas, Bugs & Known Issues (all assessment findings CLOSED), Diagnostics, open follow-ups**
+- [[Hardening Fleet 2026-05-21]] — 6-wave end-to-end quality + security hardening (W0–W5)
 
 ---
 
@@ -27,7 +42,10 @@ Comprehensive catalogue of every artefact in the the-workflow-engine vault, orga
 
 - [[Genesis Prompt v1.2 S1001982]] ↔ canonical [[THE_WORKFLOW_ENGINE_GENESIS_PROMPT_V1_S1001982]] — Zen-audit-locked spec · v1.0 → v1.1 → v1.2 evolution · 9 pre-genesis gates · hard refusals · failure-mode table
 
-> **Note:** v1.2 lists 11 modules (Phase A only); single-phase override means v1.3 patch is required to absorb the 26-module architecture + waiver record. v1.3 needs Zen re-audit (G7).
+> **Note:** v1.2 listed 11 modules (Phase A only). The single-phase override was absorbed
+> into **v1.3** (`../ai_docs/GENESIS_PROMPT_V1_3.md`, 46K) — the binding spec for the realised
+> 26-module architecture. v1.3 cleared its G7 Zen audit; G9 fired 2026-05-17 and the codebase
+> is now implemented + hardened.
 
 ## 3. Deliberation artefacts (how we got here)
 
@@ -170,32 +188,41 @@ Vault notes use **Title Case with S1001982 session-id suffix** for the post-town
 
 ## ⚠️ Known open issues
 
-| # | Issue | Location | Status |
-|---|---|---|---|
-| 1 | Module-count inconsistency across artefacts (28 in v0 / 11 in v1.2 / 25 in Module Structure / 26 in Modules Synergy Clusters) | [[Genesis Prompt v0 S1001982]] + [[workflow-engine-code-base]] | Reconciliation needed at G5 |
-| 2 | Module-naming-convention inconsistency (m01 zero-padded vs m1 unpadded) | [[Genesis Prompt v0 S1001982]] | Reconciliation needed at G5 |
-| 3 | v1.3 patch pending (single-phase Luke override absorption) | [[Genesis Prompt v1.2 S1001982]] | Awaiting authoring + Zen G7 re-audit |
-| 4 | Ember rubric §5.1 Held semantics (Zen AMEND-BEFORE-SERVICE-ADOPTION) | [[Genesis Prompt v1.2 S1001982]] m10 | Watcher's lane to amend |
-| 5 | Conductor Wave 1B/1C/2/3 not LIVE (`auto_start=false`) | [[Modules Synergy Clusters and Feature Verification S1001982]] m32 dependency | Awaiting Luke terminal bring-up |
-| 6 | G9 fired out-of-sequence (Zen URGENT block stands) | [[Genesis Prompt v1.2 S1001982]] G9 | Awaiting Luke direction (drive G1-G8 OR per-gate waivers) |
+The original 6 planning-era open issues are **all resolved** — the gate sequence is closed,
+v1.3 is the binding spec, and the 26-module codebase is implemented. The honest **residuals**
+after the S1003733 remediation + C22 wiring are tracked in [[Assessment Remediation S1003733]]
+§ "Bugs & Known Issues" — summarised here:
 
-See [[workflow-engine-code-base]] for full open-issue tracker.
+| # | Residual | Location | Status |
+|---|---|---|---|
+| R1 | m33 verifiers are conservative-default (`Approve`) placeholders — real per-kind policy logic needs inputs the binary does not yet receive | `src/m33_verifier/`, `src/orchestration/dispatch.rs` | OPEN — honest scope note from C22 |
+| R2 | m22 K-means diversity not assembled on the CLI batch paths — `wf-crystallise` passes an honest `\|_\| None` closure, not a faked signal | `src/orchestration/crystallise.rs` | OPEN — honest scope note from C22 |
+| R3 | 9 m21 `build_variants` loop-condition mutants proven output-equivalent (not killable; defense-in-depth iteration cap makes the mutation inert) | `src/m21_variant_builder/` | CLOSED-AS-EQUIVALENT — `// mutant-equivalent:` proof comments in source |
+| R4 | m8 POVM trust gate is a dormant build.rs tripwire (KEEP-DORMANT decision), not a runtime pipeline stage | `src/m8_povm_build_prereq/` | RESOLVED — architecture decision (keep-dormant) |
+
+**Resolved planning-era issues** (historical): module-count / naming-convention inconsistency
+(reconciled at 26 modules, `m<N>` unpadded); v1.3 patch (authored, G7-cleared); Ember rubric
+§5.1 (resolved); Conductor `auto_start=false` (Luke terminal action, non-blocking — `--dry-run`
+is the default-safe `wf-dispatch` mode); G9 out-of-sequence (G9 fired 2026-05-17).
+
+See [[Assessment Remediation S1003733]] for the full Bugs & Known Issues / Diagnostics tables
+and [[workflow-engine-code-base]] for the historical open-issue tracker.
 
 ---
 
-## Gate states snapshot (mirror of HOME)
+## Gate states snapshot — ALL RESOLVED (G9 fired 2026-05-17)
 
 | # | Gate | State |
 |---:|---|---|
-| G1 | Watcher ratification close-notice | ⏸ |
-| G2 | Directory rename `the-workflow-engine/` → `workflow-trace/` | ⏸ |
-| G3 | `:8125` redeploy verify (povm-v2 live) | ⏸ |
-| G4 | Watcher notes (Hebbian v3 ✅ / Ember rubric ⚠) | partial |
-| G5 | Genesis interview + F2 hard gate | ⏸ |
-| G6 | Dual-frame gap analysis | ⏸ |
-| G7 | Zen spec audit (APPROVE/REFUSE/AMEND) | ⏸ |
-| G8 | Four-surface persistence | ⏸ |
-| G9 | Luke explicit start-coding signal | ⚠ queued-intent-only |
+| G1 | Watcher ratification close-notice | ✅ resolved |
+| G2 | Directory rename `the-workflow-engine/` → `workflow-trace/` | deferred post-M0 (cosmetic) |
+| G3 | `:8125` redeploy verify (povm-v2 live) | ✅ resolved (m42 stcortex-only pivot) |
+| G4 | Watcher notes (Hebbian v3 / Ember rubric) | ✅ resolved |
+| G5 | Genesis interview + F2 hard gate | ✅ resolved |
+| G6 | Dual-frame gap analysis | ✅ resolved |
+| G7 | Zen spec audit (APPROVE/REFUSE/AMEND) | ✅ resolved (v1.3 binding) |
+| G8 | Four-surface persistence | ✅ resolved |
+| G9 | Luke explicit start-coding signal | 🔥 **FIRED 2026-05-17** |
 
 ---
 

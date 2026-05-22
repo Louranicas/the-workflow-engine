@@ -9,7 +9,19 @@
 
 `ai_specs/` carries **prescriptive** specs — what each module MUST be (god-tier Rust contracts that constrain implementation). Compare with `ai_docs/` which carries **descriptive** runtime documentation.
 
-Every `.rs` source file authored post-G9 will have its spec here. Specs are authoritative; if code drifts from spec, the spec wins (or the spec is amended via D-B6 AMEND-loop).
+Every `.rs` source file authored post-G9 has its spec here. Specs are authoritative; if code drifts from spec, the spec wins (or the spec is amended via D-B6 AMEND-loop). G9 fired 2026-05-17 and the 26-module codebase is implemented — these specs are now read against live source, not as a pre-build target.
+
+## Descriptive runtime docs (sister surface — `ai_docs/`)
+
+The following operator/developer docs are **descriptive** (how the running system behaves), so they live in `ai_docs/` and `docs/`, not here. Cross-referenced for navigation:
+
+| Doc | Purpose |
+|---|---|
+| [`../QUICKSTART.md`](../QUICKSTART.md) | 5-minute developer quickstart |
+| [`../docs/DIAGNOSTICS.md`](../docs/DIAGNOSTICS.md) | Diagnostics + troubleshooting (gate, both binaries, external-service matrix, m8 build warnings) |
+| [`../docs/COMMAND_MAPPING.md`](../docs/COMMAND_MAPPING.md) | `wf-crystallise` / `wf-dispatch` CLI flag reference |
+| [`../ai_docs/API_MAP.md`](../ai_docs/API_MAP.md) | Public-API surface (`pub use` inventory) — the descriptive companion to `API_SPEC.md` below |
+| [`../ai_docs/HARDENING_FLEET_2026-05-21.md`](../ai_docs/HARDENING_FLEET_2026-05-21.md) | Hardening Fleet remediation record (W0–W5 + S1003733 resolution) |
 
 ---
 

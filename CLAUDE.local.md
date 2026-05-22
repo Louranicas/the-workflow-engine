@@ -19,7 +19,9 @@ A god-tier 7-facet code-quality assessment (Command, S1003733) scored the-workfl
 carry forward". **21 of 22 findings closed + the C22 binary wiring + Wave G mutant-kill.**
 
 **Outcome:** tests **1903 → 1967**, 0 failures, clippy + pedantic clean every wave; mutation
-kill-rate 85.7% → ~96.7% post-fix. The two binaries are no longer `println!` stubs.
+kill-rate 85.7% → **96.3% verified** (final run: 324 mutants, 259 caught / 10 missed / 0 timeout
+— every non-equivalent mutant in scope killed; the 10 survivors are all proven-equivalent).
+The two binaries are no longer `println!` stubs.
 
 | Wave | Commit | What |
 |------|--------|------|
@@ -56,11 +58,12 @@ remotes. **Tests 1310 → 1903; clippy + pedantic clean every wave.**
 - **W3** `2e3113d` — type-design: `#[non_exhaustive]` ×24, `WorkflowId` + `MinSupport`
   encapsulation, comment accuracy (→ 1835).
 - **W4** `5de71ac` — mutation testing: `cargo-mutants` scoped to m10/m11/m21/m22.
-  Post-remediation verified run (S1003733): 324 mutants — 254 caught / 15 missed / 0 timeout
-  / 55 unviable → **94.4% kill rate**. The S1003733 Wave-D+ iteration-cap fix eliminated all
-  20 prior m21 `build_variants` timeout mutants; Wave G (`c0ec95c`) then killed 6 of the 15
-  survivors and proved the remaining 9 m21 mutants equivalent. (Tests → 1967 after the full
-  S1003733 remediation + C22 binary wiring — see the S1003733 remediation block above.)
+  Final verified run (S1003733, post-Wave-G + C22): 324 mutants — 259 caught / 10 missed /
+  0 timeout / 55 unviable → **96.3% kill rate**. The Wave-D+ iteration-cap fix eliminated all
+  20 prior m21 `build_variants` timeout mutants; Wave G (`c0ec95c`) killed 5 of the prior 15
+  survivors; the 10 remaining are all proven-equivalent (9 m21 + 1 m22, each with an in-code
+  `// mutant-equivalent:` proof) — every non-equivalent mutant in scope is killed. (Tests →
+  1967 after the full S1003733 remediation + C22 binary wiring.)
 - **W5** `e8f6dd3` — docs reconciliation + 4-surface persistence + push.
 
 Gate every wave: `cargo check` + `clippy -D warnings` + `clippy -D clippy::pedantic` +

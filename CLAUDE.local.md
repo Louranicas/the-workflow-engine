@@ -25,9 +25,11 @@ remotes. **Tests 1310 → 1903; clippy + pedantic clean every wave.**
 - **W3** `2e3113d` — type-design: `#[non_exhaustive]` ×24, `WorkflowId` + `MinSupport`
   encapsulation, comment accuracy (→ 1835).
 - **W4** `5de71ac` — mutation testing: `cargo-mutants` scoped to m10/m11/m21/m22.
-  Committed baseline run = 319 mutants (240 caught / 20 missed / 20 timeout / 39 unviable;
-  85.7% caught of 280 viable). 68 mutant-killing tests authored targeting the 20 missed
-  mutants; the 20 m21 `build_variants` timeout mutants remain unscored. (→ 1903.)
+  Post-remediation verified run (S1003733, frozen tree @ `0cc7be3`): 324 mutants —
+  254 caught / 15 missed / 0 timeout / 55 unviable → **94.4% kill rate**. The S1003733
+  Wave-D+ iteration-cap fix eliminated all 20 prior m21 `build_variants` timeout mutants.
+  15 survivors documented (9 m21 / 5 m22 / 1 m11) — focused mutant-kill pass recommended.
+  (→ 1921.)
 - **W5** `e8f6dd3` — docs reconciliation + 4-surface persistence + push.
 
 Gate every wave: `cargo check` + `clippy -D warnings` + `clippy -D clippy::pedantic` +

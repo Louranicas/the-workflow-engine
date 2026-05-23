@@ -235,6 +235,13 @@ pub struct Report {
     /// AND that the substrate did not see it (a transient nexus outage
     /// does not silently swallow the receipt).
     pub nexus_refusal_emit_failures: usize,
+    /// Phase 8 step 2 / gap NA-4 — `true` when the run started with
+    /// `CONDUCTOR_ENFORCEMENT_ENABLED` unset or `"0"`. The dispatch still
+    /// proceeds (per § 15 D34, dry-run-by-default is the safe gate at
+    /// M0), but the operator MUST know that any m33 `Approve` verdicts
+    /// emitted into the Conductor are advisory — the Conductor itself
+    /// owns enforcement. Silent-pass when the flag is `"1"`.
+    pub conductor_enforcement_advisory: bool,
 }
 
 impl Report {
@@ -251,6 +258,7 @@ impl Report {
             completed: false,
             refusal_receipts_emitted: 0,
             nexus_refusal_emit_failures: 0,
+            conductor_enforcement_advisory: false,
         }
     }
 }
@@ -670,6 +678,25 @@ impl ConductorClient for HttpConductorClient {
 /// selector configuration. A down Conductor is not a fault.
 pub fn run(config: &Config) -> Result<Report, OrchestrationError> {
     let mut report = Report::empty(config.dry_run);
+
+    // Plan v2 § 3 Phase 8 step 2 / gap NA-4 — Conductor enforcement-state
+    // assertion. The Conductor's own `CONDUCTOR_ENFORCEMENT_ENABLED`
+    // environment flag governs whether the dispatch-side actually
+    // enforces the verdicts wf-dispatch emits. When unset or "0",
+    // wf-dispatch still proceeds (per § 15 D34, dry-run-by-default is the
+    // M0 safety gate), but the operator must know the verdicts are
+    // advisory. Read once at the top of the run, before any dispatch.
+    let enforcement_env = std::env::var("CONDUCTOR_ENFORCEMENT_ENABLED").ok();
+    if !matches!(enforcement_env.as_deref(), Some("1")) {
+        report.conductor_enforcement_advisory = true;
+        tracing::warn!(
+            target: "wf_dispatch",
+            env_var = "CONDUCTOR_ENFORCEMENT_ENABLED",
+            value = enforcement_env.as_deref().unwrap_or("<unset>"),
+            "Conductor enforcement is disabled; m33 Approve verdicts are advisory. \
+             Plan v2 § 3 Phase 8 step 2 (gap NA-4 fold)."
+        );
+    }
 
     // Stage 1 — load proposals from the JSONL bridge.
     let proposals = load_proposals(&config.proposals_in)?;

@@ -49,6 +49,17 @@ pub const DEFAULT_MAX_GAP: usize = 5;
 /// Maximum mined pattern length handed to m20.
 pub const DEFAULT_MAX_PATTERN_LENGTH: usize = 8;
 
+/// Plan v2 § 3 Phase 8 step 3 / gap NA-2 — substrate-side load observation
+/// threshold. The m1 atuin ingest stage times its own read against the
+/// (read-only) atuin SQLite. When the read takes longer than this, the
+/// engine flags `m1_read_perturbation_observed: true` on the report —
+/// not as a hard error but as an observability signal that the engine's
+/// read may be perturbing atuin's concurrent foreground writes (per § 15
+/// D37 — engine-timed proxy adequate for M0; substrate-emitted signal is
+/// v0.2.0 NA-GAP-04). 500 ms picked as the upper-bound on a healthy
+/// atuin read against a typical-sized `history.db`.
+pub const M1_READ_PERTURBATION_THRESHOLD_MS: u64 = 500;
+
 // ─── output format ──────────────────────────────────────────────────────
 
 /// Report rendering format selected via `--format`.
@@ -265,6 +276,16 @@ pub struct Report {
     pub proposals_written: usize,
     /// stages skipped because `--offline` was set or a live service was down.
     pub stages_skipped: Vec<String>,
+    /// Phase 8 step 3 / gap NA-2 — engine-timed proxy for substrate-side
+    /// load observation. Wall-clock duration of the m1 atuin read in
+    /// milliseconds. Per § 15 D37 (engine-timed proxy adequate for M0),
+    /// this is a Frame-A measurement of a Frame-B property; a true
+    /// substrate-emitted contention signal is v0.2.0 NA-GAP-04.
+    pub m1_read_latency_ms: u64,
+    /// Phase 8 step 3 / gap NA-2 — `true` when `m1_read_latency_ms`
+    /// exceeded [`M1_READ_PERTURBATION_THRESHOLD_MS`]. Honest label:
+    /// observability signal, not a hard error.
+    pub m1_read_perturbation_observed: bool,
     /// `true` once the pipeline reached the end without aborting.
     pub completed: bool,
 }
@@ -282,6 +303,8 @@ impl Report {
             patterns_mined: 0,
             proposals_written: 0,
             stages_skipped: Vec::new(),
+            m1_read_latency_ms: 0,
+            m1_read_perturbation_observed: false,
             completed: false,
         }
     }
@@ -421,13 +444,31 @@ pub fn run(config: &Config) -> Result<Report, OrchestrationError> {
     // `povm_calibrated` cfg) rather than as a runtime pipeline stage.
 
     // Stage 1 — m1 atuin ingest (file stage; always runs).
+    //
+    // Plan v2 § 3 Phase 8 step 3 / gap NA-2 / § 15 D37 — engine-timed
+    // proxy for substrate-side load observation. The duration of the
+    // (read-only) atuin read is captured; if it exceeds the perturbation
+    // threshold the report flags it as an observability signal. Honestly
+    // labelled: this is a Frame-A measurement of a Frame-B property
+    // (a true substrate-emitted contention signal is v0.2.0 NA-GAP-04).
     let atuin_cfg = AtuinConsumerConfig {
         db_path_override: Some(config.atuin_db.clone()),
         ..AtuinConsumerConfig::default()
     };
+    let m1_read_start = std::time::Instant::now();
     let atuin_rows = open_atuin_readonly(&atuin_cfg)?.collect_all()?;
+    let m1_read_elapsed = m1_read_start.elapsed();
+    report.m1_read_latency_ms = u64::try_from(m1_read_elapsed.as_millis()).unwrap_or(u64::MAX);
+    report.m1_read_perturbation_observed =
+        report.m1_read_latency_ms > M1_READ_PERTURBATION_THRESHOLD_MS;
     report.atuin_rows = atuin_rows.len();
-    tracing::info!(target: "wf_crystallise", rows = report.atuin_rows, "m1 atuin ingest complete");
+    tracing::info!(
+        target: "wf_crystallise",
+        rows = report.atuin_rows,
+        latency_ms = report.m1_read_latency_ms,
+        perturbation = report.m1_read_perturbation_observed,
+        "m1 atuin ingest complete"
+    );
 
     // Stage 1b — m3 injection.db ingest (file stage; always runs).
     let injection_cfg = InjectionDbConfig {

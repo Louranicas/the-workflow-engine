@@ -291,3 +291,66 @@ fn dispatch_parse_args_missing_value_is_typed_error() {
     let err = parse_args(&args(&["--conductor-url"])).expect_err("missing");
     assert_eq!(err, ArgError::MissingValue("--conductor-url"));
 }
+
+// rationale: Phase 8 step 2 / gap NA-4 — Conductor enforcement-state
+// assertion. When `CONDUCTOR_ENFORCEMENT_ENABLED` is unset OR not "1",
+// the report MUST flag `conductor_enforcement_advisory: true` so the
+// operator knows m33 Approve verdicts are advisory until the Conductor
+// itself enforces them. Run with the env var explicitly unset.
+//
+// NOTE: env vars are process-global; this test uses
+// `std::env::remove_var` which can race with parallel tests. Workflow-
+// trace's other tests do not touch CONDUCTOR_ENFORCEMENT_ENABLED, so no
+// pollution is expected. Hold guard via single-threaded asserts only.
+// rationale: Phase 8 step 2 / gap NA-4 — Conductor enforcement-state
+// assertion. The flag CONDUCTOR_ENFORCEMENT_ENABLED governs whether
+// m33 verdicts are advisory or enforced at the dispatcher; only the
+// exact value "1" silences the report's `conductor_enforcement_advisory`
+// flag. Combined into ONE test (rather than two) to keep the env-var
+// mutations strictly sequential — `cargo test` parallelises tests by
+// default, so two parallel tests touching the same process-global env
+// var would race. The three sub-cases exercise the documented contract:
+// unset, "0", and "1".
+//
+// SAFETY: `std::env::set_var` / `remove_var` are process-global; this is
+// the only test in workflow-trace that touches CONDUCTOR_ENFORCEMENT_ENABLED.
+#[test]
+fn dispatch_conductor_enforcement_advisory_three_branches() {
+    let fx = Fixture::with_proposals(1);
+
+    // Branch 1: env unset → advisory=true (NA-4 fold).
+    unsafe {
+        std::env::remove_var("CONDUCTOR_ENFORCEMENT_ENABLED");
+    }
+    let r = run(&fx.dry_run_config()).expect("dry-run completes (env unset)");
+    assert!(
+        r.conductor_enforcement_advisory,
+        "env unset → conductor_enforcement_advisory must be true"
+    );
+
+    // Branch 2: env = "0" → advisory=true.
+    unsafe {
+        std::env::set_var("CONDUCTOR_ENFORCEMENT_ENABLED", "0");
+    }
+    let r = run(&fx.dry_run_config()).expect("dry-run completes (env 0)");
+    assert!(
+        r.conductor_enforcement_advisory,
+        "env=\"0\" → conductor_enforcement_advisory must be true"
+    );
+
+    // Branch 3: env = "1" → advisory=false (silent pass-through).
+    unsafe {
+        std::env::set_var("CONDUCTOR_ENFORCEMENT_ENABLED", "1");
+    }
+    let r = run(&fx.dry_run_config()).expect("dry-run completes (env 1)");
+    assert!(
+        !r.conductor_enforcement_advisory,
+        "env=\"1\" → conductor_enforcement_advisory must be false"
+    );
+
+    // Restore default for any later parallel test that might (incorrectly)
+    // assume the env is unset.
+    unsafe {
+        std::env::remove_var("CONDUCTOR_ENFORCEMENT_ENABLED");
+    }
+}

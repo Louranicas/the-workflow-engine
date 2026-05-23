@@ -201,6 +201,19 @@ fn crystallise_offline_run_completes_and_counts_substrate_inputs() {
         report.observations_merged >= 3,
         "at least the 3 injection chains were merged"
     );
+    // Phase 8 step 3 / gap NA-2 — m1 read latency is captured as the
+    // engine-timed proxy for substrate-side load (per § 15 D37). The
+    // tiny test fixture (24 atuin rows) reads in milliseconds; the
+    // observation MUST be populated (`<` MAX) and the perturbation flag
+    // MUST be false (24 rows << 500 ms threshold).
+    assert!(
+        report.m1_read_latency_ms < u64::MAX,
+        "m1_read_latency_ms must be populated (got u64::MAX → record default)"
+    );
+    assert!(
+        !report.m1_read_perturbation_observed,
+        "the test fixture is too small to exceed the perturbation threshold"
+    );
 }
 
 #[test]

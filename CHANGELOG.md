@@ -28,7 +28,9 @@ findings closed + the C22 binary wiring + Wave G mutant-kill.** Commits `0cc7be3
 #### Changed
 - Documentation integrity: the W4 mutation-testing over-claim ("412 mutants / 80.6%",
   unreproducible) corrected to artifact-backed + independently re-verified numbers
-  (324 mutants, 254 caught, 94.4%); the "W4 in progress / 1835 tests" doc-drift swept.
+  (324 mutants, 259 caught, 96.3% — post-Wave-G + S1003733-final; 10 surviving mutants all
+  proven-equivalent with in-code `// mutant-equivalent:` proofs); the "W4 in progress /
+  1835 tests" doc-drift swept.
 - 8 contained code fixes: typed `MinerError::MaxLengthZero` (was silent coercion); `MaxGap`
   encapsulation; `DispatcherError::WireFormat` detail surfaced in `DispatchOutcome`;
   `KMeansError::NonFiniteCoordinate` variant (removed the `usize::MAX` sentinel); `unwrap_or(0)`

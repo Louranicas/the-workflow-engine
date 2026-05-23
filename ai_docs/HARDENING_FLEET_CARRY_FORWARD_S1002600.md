@@ -1,5 +1,24 @@
 # Hardening Fleet — Carry-Forward Register
 
+> **⚠ SUPERSEDED — 2026-05-23 (S1004115, Plan v2 Phase 1, DOC-2).**
+> This file is the 2026-05-20 scout-pass + Wave A–D snapshot. It is preserved
+> as historical record only. The **authoritative current state** is:
+> - Hardening Fleet W1–W5 + S1003733 remediation + C22 binary wiring →
+>   [`HARDENING_FLEET_2026-05-21.md`](HARDENING_FLEET_2026-05-21.md)
+> - True residual list at HEAD `968540e` →
+>   [`PHASE1_RESIDUAL_LIST_S1004115.md`](PHASE1_RESIDUAL_LIST_S1004115.md)
+> - Completion Plan v2 (decisions locked) →
+>   [`WORKFLOW_TRACE_COMPLETION_PLAN_V2_S1004115.md`](WORKFLOW_TRACE_COMPLETION_PLAN_V2_S1004115.md)
+> - Session state →
+>   [`../CLAUDE.local.md`](../CLAUDE.local.md)
+>
+> Test count then: 1262. Test count now: **1967**. Mutation kill-rate then:
+> 94.9 % (m9/m11/m20 only, 118 mutants). Mutation kill-rate now: **96.3 %**
+> (324 mutants, full S1003733 + Wave-G scope). Items closed since this
+> snapshot are catalogued in `PHASE1_RESIDUAL_LIST_S1004115.md` § "Closed-since-S1002600".
+> Open items are the M0 work surface in Plan v2 Phases 1–10. Do not use this
+> file as a fix-target list — use the residual list.
+
 > **Source:** 5-scout Δ→Φ→Ψ morphogenic fleet pass dispatched 2026-05-20.
 > Mission §8: no unnecessary carry-forward — every deferred item carries a
 > concrete completion plan + the agent's reasoning for not closing it

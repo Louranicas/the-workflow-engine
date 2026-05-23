@@ -308,30 +308,6 @@ pub enum OrchestrationError {
 
 // ─── verifiers ──────────────────────────────────────────────────────────
 
-/// Conservative default verifier: approves every workflow.
-///
-/// The m33 gate requires exactly one [`Verifier`] per [`VerifierKind`].
-/// At M0, three of the four kinds (Consistency, Cost, Ember) are wired
-/// as documented stubs per Plan v2 § 15 D9 (Cost stub), D11 (Consistency
-/// stub), and D13 (Ember reduced subset — pending Phase 6b real impl).
-/// The Security kind is wired via [`SecurityVerifier`], not this stub.
-struct ConservativeVerifier {
-    kind: VerifierKind,
-}
-
-impl Verifier for ConservativeVerifier {
-    fn kind(&self) -> VerifierKind {
-        self.kind
-    }
-
-    fn verify(&self, _workflow: &crate::m30_bank::AcceptedWorkflow) -> VerifierVerdict {
-        // Conservative default — see the struct doc comment. The gate is
-        // real and runs; the verdict is a documented stub per § 15
-        // D9/D11/D13.
-        VerifierVerdict::Approve
-    }
-}
-
 // rationale: Plan v2 §15 D5 (Security verdict above ceiling = hard Refuse),
 // D6 (m33 gate is blocking), D7 (default ack_ceiling = Sandboxed).
 //
@@ -524,11 +500,35 @@ impl Verifier for CostVerifier {
     }
 }
 
+// rationale: Plan v2 §15 D11 — Consistency verifier is deferred to v0.2.0
+// and ships at M0 as a documented Approve-stub. A real Consistency verifier
+// would check bank-conflict (e.g., a proposed variant whose `variant_id`
+// already exists on an `AcceptedWorkflow` in the curated bank, or whose
+// pattern_hash overlaps a sunset-pending entry) — that needs a
+// `CuratedBank::client_ref()` accessor (T4-API #1 still open per Phase 1
+// residual list) which D12 says to add on-demand, not speculatively.
+// Per D11 the stub ships at M0; the gate is structurally present, and
+// the substitution to a real verifier is a one-impl change once the
+// bank accessor lands in v0.2.0.
+struct ConsistencyVerifier;
+
+impl Verifier for ConsistencyVerifier {
+    fn kind(&self) -> VerifierKind {
+        VerifierKind::Consistency
+    }
+
+    fn verify(&self, _workflow: &crate::m30_bank::AcceptedWorkflow) -> VerifierVerdict {
+        // Plan v2 §15 D11 — documented Approve-stub; real Consistency
+        // verifier requires bank-accessor seam (T4-API #1; D12 on-demand).
+        VerifierVerdict::Approve
+    }
+}
+
 /// Build the four-verifier set required by [`aggregate`] — exactly one
-/// [`Verifier`] per [`VerifierKind`]. Per Plan v2 § 15:
+/// [`Verifier`] per [`VerifierKind`]. Per Plan v2 § 15 — all four named
+/// after Phase 6a-6d:
 /// - **Security** → [`SecurityVerifier`] (D5/D6/D7).
-/// - Consistency → [`ConservativeVerifier`] stub (D11; replaced with a
-///   named [`ConsistencyVerifier`] in Phase 6d).
+/// - **Consistency** → [`ConsistencyVerifier`] documented stub (D11).
 /// - **Cost** → [`CostVerifier`] documented stub (D9).
 /// - **Ember** → [`EmberVerifier`] (D13/D14/D15/D16).
 fn build_verifiers(ack_ceiling: EscapeSurfaceProfile) -> Vec<Box<dyn Verifier>> {
@@ -539,7 +539,7 @@ fn build_verifiers(ack_ceiling: EscapeSurfaceProfile) -> Vec<Box<dyn Verifier>> 
                 VerifierKind::Security => Box::new(SecurityVerifier::new(ack_ceiling)),
                 VerifierKind::Ember => Box::new(EmberVerifier),
                 VerifierKind::Cost => Box::new(CostVerifier),
-                VerifierKind::Consistency => Box::new(ConservativeVerifier { kind }),
+                VerifierKind::Consistency => Box::new(ConsistencyVerifier),
             }
         })
         .collect()
@@ -807,8 +807,8 @@ fn load_proposals(path: &Path) -> Result<Vec<WorkflowProposal>, OrchestrationErr
 mod tests {
     use super::{
         build_verifiers, ember_verdict, parse_args, render_workflow_artefact, security_verdict,
-        ArgError, Config, CostVerifier, EmberVerifier, SecurityVerifier, Verifier,
-        VerifierVerdict, DEFAULT_TOP_K,
+        ArgError, Config, ConsistencyVerifier, CostVerifier, EmberVerifier, SecurityVerifier,
+        Verifier, VerifierVerdict, DEFAULT_TOP_K,
     };
     use crate::m32_dispatcher::EscapeSurfaceProfile;
     use crate::m33_verifier::VerifierKind;
@@ -1088,6 +1088,37 @@ mod tests {
                 panic!("Rejected must map to Amend (D16), NOT Refuse")
             }
             VerifierVerdict::Approve => panic!("Rejected must map to Amend, not Approve"),
+        }
+    }
+
+    // rationale: Phase 6d — D11 Consistency verifier is a documented
+    // Approve-stub; the real bank-conflict-detection logic is v0.2.0
+    // work pending the CuratedBank::client_ref() seam (T4-API #1, D12
+    // on-demand). For M0 every workflow Approves under Consistency.
+    #[test]
+    fn consistency_verifier_is_documented_approve_stub_per_d11() {
+        use crate::m14_lift::LiftSnapshot;
+        use crate::m20_prefixspan::{Pattern, StepToken};
+        use crate::m21_variant_builder::build_variants;
+        use crate::m23_proposer::build_proposal;
+        use crate::m30_bank::AcceptedWorkflow;
+        use std::time::SystemTime;
+
+        let pattern = Pattern::new(vec![StepToken(3), StepToken(4)], 25, (0, 0));
+        let variants = build_variants(&pattern).expect("variants");
+        let snapshot = LiftSnapshot {
+            lift: Some(0.5),
+            ci_half: Some(0.05),
+            n: 25,
+            latest_ts_ms: 0,
+            computed_at: SystemTime::now(),
+        };
+        let verifier = ConsistencyVerifier;
+        assert_eq!(verifier.kind(), VerifierKind::Consistency);
+        for v in variants {
+            let proposal = build_proposal(v, &snapshot, None).expect("proposal");
+            let wf = AcceptedWorkflow::for_test(9, proposal, 0, i64::MAX, 1.0, None, 0);
+            assert_eq!(verifier.verify(&wf), VerifierVerdict::Approve);
         }
     }
 

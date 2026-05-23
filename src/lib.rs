@@ -135,6 +135,7 @@ pub use m42_stcortex_emit::{
 };
 pub mod m9_watcher_namespace_guard;
 pub mod m10_ember_ci_gate;
+pub mod back_pressure;
 pub mod m11_fitness_weighted_decay;
 pub mod orchestration;
 pub mod refusal_token;

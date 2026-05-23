@@ -1,13 +1,115 @@
 # the-workflow-engine — Local Session State (delta)
 
 > **Back to:** [CLAUDE.md](CLAUDE.md) — project charter (structural facts; do not duplicate here)
-> **🟢 v0.1.0 / M0 SHIPPED 2026-05-23 (S1004115):** see the "v0.1.0 / M0 SHIPPED" section directly below for cold-start anchor.
+> **🟡 v0.2.0 IN FLIGHT (PLANNING) — S1004377, 2026-05-23:** see the "v0.2.0 IN FLIGHT (PLANNING)" section directly below for cold-start anchor. **Plan v1 + dual-frame gap analyses landed; v2 fold-in + Phase 4 interview pending.**
+> **🟢 v0.1.0 / M0 SHIPPED 2026-05-23 (S1004115):** see the "v0.1.0 / M0 SHIPPED" section further below for the canonical M0 ship record.
 > **Vault home:** [the-workflow-engine-vault/HOME.md](the-workflow-engine-vault/HOME.md)
 > **God-tier synthesis:** [the-workflow-engine-vault/GOD_TIER_CONSOLIDATION_S1001982.md](the-workflow-engine-vault/GOD_TIER_CONSOLIDATION_S1001982.md)
 > **Deployment recipe:** [the-workflow-engine-vault/ULTIMATE_DEPLOYMENT_FRAMEWORK_S1001982.md](the-workflow-engine-vault/ULTIMATE_DEPLOYMENT_FRAMEWORK_S1001982.md)
 > **Workflow tracker:** [the-workflow-engine-vault/workflow-engine-code-base.md](the-workflow-engine-vault/workflow-engine-code-base.md) — 15 phases / 13 decisions / 13 open issues
 >
 > **Synergy with [CLAUDE.md](CLAUDE.md):** the charter holds the rules (how to behave, which protocols govern the fleet). This file holds the state those rules operate over — live workstream, pending decisions, persisted surfaces, cold-start pointers. **Charter answers _how_; this file answers _what the world looks like right now_.** Do NOT duplicate charter content here.
+
+---
+
+## 🟡 v0.2.0 IN FLIGHT (PLANNING) — S1004377, 2026-05-23
+
+> **Cold-start anchor:** if you are a fresh Claude context window resuming this project,
+> read THIS section FIRST. It supersedes the v0.1.1 + v0.2.0 PREP / v0.1.0 / M0 SHIPPED
+> blocks below as the live state delta; those remain the canonical M0 + post-M0 records.
+
+**State:** Plan v1 authored + dual-frame gap analyses returned. v2 fold-in pending (next discrete turn unit). Phase 4 decision interview not yet run. No source code touched; engine still at `v0.1.0` tag (`df00fd2`).
+
+### Authorisation chain
+
+| Gate | Status | Source |
+|------|--------|--------|
+| v0.2.0 plan-authoring invocation per §15 D40 | ✅ AUTHORISED by Luke @ node 0.A in S1004377 | this session, in-message "Start v0.2.0 planning" |
+| Draft anchor decisions DAW-1 + DAW-2 | ✅ LOCKED at v1 draft | Luke chose Tier 2 (wire-contracts) first + full Plan v2 mirror (all 5 Tiers) |
+| Conventional + NA gap analyses | ✅ COMPLETE | sibling docs (see below) |
+| v2 author with §12 disposition fold-in | ⏳ PENDING — next turn | follows Plan v2 precedent |
+| Phase 4 interview (12-round / ~16-20 questions) | ⏳ PENDING — after v2 | seed in v1 §15; expanded by gap-analysis findings |
+| §15 lock-in of v2 final decisions | ⏳ PENDING — after interview | mirrors Plan v2 §15 shape |
+| 4-surface persist of v2 | ⏳ PENDING — after lock-in | per Plan v2 §13 read-back-verify |
+| Luke @ node 0.A "start Phase 1" go | ⏳ PENDING — execution gate separate from plan ratification per D48 | |
+
+### Artefacts at this save
+
+| Surface | Path | State |
+|---------|------|-------|
+| ai_docs canonical (v1 DRAFT) | [`ai_docs/WORKFLOW_TRACE_V020_PLAN_S1004377.md`](ai_docs/WORKFLOW_TRACE_V020_PLAN_S1004377.md) | 433 lines / ~6,600 words / 45K — 12 phases / Part A + Part B + Part C / §12 disposition placeholder / §15 11 seed questions |
+| Conventional gap analysis | [`ai_docs/WORKFLOW_TRACE_V020_PLAN_S1004377_CONVENTIONAL_GAP_ANALYSIS.md`](ai_docs/WORKFLOW_TRACE_V020_PLAN_S1004377_CONVENTIONAL_GAP_ANALYSIS.md) | 578 lines / ~5,844 words / 39K — **13 findings (4 HIGH / 7 MED / 2 LOW)** |
+| NA gap analysis | [`ai_docs/WORKFLOW_TRACE_V020_PLAN_S1004377_NA_GAP_ANALYSIS.md`](ai_docs/WORKFLOW_TRACE_V020_PLAN_S1004377_NA_GAP_ANALYSIS.md) | 265 lines / ~7,028 words / 48K — **12 findings (5 HIGH-class) + 3 load-bearing tensions + 4 convergent recommendations** |
+| Sources read this turn | Plan v2 canonical + ADR D-S1002127-03 + Phase 2 audit + Phase 9 reconciliation + v0.2.0 stub + CHANGELOG [v0.1.0] | unchanged |
+
+### Findings that block Phase 1 (conventional pass parting word)
+
+The conventional analyst named four findings as Phase-1-blockers — **must resolve in v2 fold-in before Phase 1 can start**:
+
+| ID | Finding | Recommended fix shape |
+|----|---------|----------------------|
+| **C-2 HIGH** | V1 RefusalToken structurally coupled to W1/SD11 (m13 outbox, m40 receipts, m41 RPC all serialise refusal-shaped events at v0.1.0); sequencing them 3 phases apart double-pays JSONL fixture regen | Co-land V1 with Phase 5 W1, OR name a dedicated Phase 7.0 re-regen sub-step |
+| **C-3 HIGH** | DX-W binary frame ("W1 or W2") silently retires option (iii) audit-overlay (what v0.1.0/M0 actually shipped) and bundles 2 hidden sub-decisions (variant-aggregation function + SemVer backwards-compat) | Split DX-W into DX-W.a / DX-W.b / DX-W.c |
+| **C-4 HIGH** | Phase 9 DX-V3=own-module's Zen G7 re-audit cascade is invisible in `~3-4 day` estimate; cross-talk dir has zero `zen_*verdict*` for any workflow-trace wave — same risk class as Plan v2 Conv C-4 | Add DX-V3.b ("if Zen silent for N days, ship or hold?"); inflate Phase 9 estimate |
+| **C-5 HIGH** | Phase 5 W3 `mutation-weight` source is unverified (`grep -rn mutation_weight src/` → zero); requires a primitive that doesn't exist | Pin source in Phase 1 OR Phase 2; if no source, W3 floor estimate wrong |
+
+### NA pass headline findings (HIGH severity)
+
+The NA analyst surfaced 5 HIGH-class findings — Part B is **a genuine second authoring but bounded one level above the structural frame choices the plan inherits**:
+
+| ID | Finding | Recommended fix |
+|----|---------|-----------------|
+| **NA-1 HIGH** | DAW-1 Tier-2-first was locked pre-analysis without a substrate-frame defence — silent Frame-A trap | Reopen DAW-1 as Phase 4 Round-A question; defend or revise |
+| **NA-2 HIGH** | §7 substrate enumeration is missing **RALPH, the Watcher, and the Cargo build graph** | Add the three to §7 + add corresponding Part-B reauthored paragraphs |
+| **NA-3 HIGH** | Round B "defaults acceptable" still contains 3 substrate-shape questions (DX-1, DX-2, DX-5) whose cheap defaults will produce predictable Frame-A minima | Promote DX-1, DX-2, DX-5 to Round A no-defaults OR split each into "substrate-shape vs mechanism" sub-questions |
+| **NA-4 HIGH** | V3's self-canary mitigation requires the substrate participation v0.2.0 doesn't ship | Add a §6 risk-register entry + a Phase 9 acceptance test for "V3 fails-silently when its own emitter is broken" |
+| **NA-5 HIGH** | V5 in-engine-receiver-only emits `RefusalToken::Unavailable` audit-indistinguishable from substrate-authored refusal — hides cross-habitat drift | Add `RefusalToken::CrossHabitatUnavailable` variant or a provenance field; force visibility of cross-habitat schema absence |
+
+Single highest-leverage fix surfaced by NA: **add the recursion sub-section to §9** — applied honestly it forces NA-2 → NA-1 → NA-10 in sequence (§9 currently checks the three named primitives V2/V3/V5 but does not recurse to itself or §7's substrate list).
+
+### Three load-bearing tensions (NA)
+
+1. **DAW-1 reopen** — Tier-2-first vs substrate-frame primacy. Convergent with C-3 (DX-W split).
+2. **§9 self-check recursion** — single highest-leverage fix per NA analyst.
+3. **Certification language re-labelling** — "engine + substrate co-completeness" is Frame-A in substrate vocabulary (NA-10).
+
+### Four convergent recommendations (both passes flag)
+
+- NA-3 ↔ C-10: Round B contains substrate-shape questions (NA frame) / Round A missing real decisions (conv frame) — both call for Round-A/B re-partition
+- NA-1 ↔ C-3: DAW-1 binary frame silently retires substrate-frame option (NA) / DX-W binary frame silently retires audit-overlay (conv) — both call for option-ladder split
+- NA-9 ↔ C-11: §9 self-check does not recurse (NA) / Part B annotates more than re-authors (conv) — both call for stronger §9
+- NA-5 ↔ C-9: V5 in-engine-receiver-only hides cross-habitat drift (NA) / risk register missing V5 cross-habitat schema-drift class (conv) — both call for a V5 visibility primitive
+
+### Standing for next turn (orchestrator-side)
+
+1. **Author v2** integrating both gap-analysis findings into §12 disposition table + Part A phase structure + Part B re-authoring (with §9 recursion sub-section) + §15 expanded interview question list (the original 11 + new Round-A promotions per NA-3 + new questions per C-2/C-3/C-4/C-5).
+2. **Run Phase 4 interview** with Luke @ node 0.A on the expanded question list.
+3. **§15 lock-in** of every interview decision.
+4. **4-surface persist** of v2 per Plan v2 §13 (with stcortex read-back-verify).
+
+### Standing for node 0.A (irreducibly Luke-only)
+
+- **Phase 4 interview answers** when the orchestrator brings the question list back (estimate: ~16-20 questions; 2-3 h Luke time).
+- **"Start Phase 1" go** per D48 once v2 is ratified.
+- All earlier-standing items remain: **OP-1** Conductor bring-up; **OP-2** directory rename; **OP-3** post-v0.2.0 substrate soak.
+
+### Cold-start sequence for fresh Claude window
+
+```bash
+cd /home/louranicas/claude-code-workspace/the-workflow-engine
+# 1. Read THIS section + v0.1.1 + v0.2.0 PREP block below
+$EDITOR CLAUDE.local.md
+# 2. Read Plan v1 (the artefact awaiting fold-in)
+$EDITOR ai_docs/WORKFLOW_TRACE_V020_PLAN_S1004377.md
+# 3. Read both gap analyses (the fold-in source)
+$EDITOR ai_docs/WORKFLOW_TRACE_V020_PLAN_S1004377_CONVENTIONAL_GAP_ANALYSIS.md
+$EDITOR ai_docs/WORKFLOW_TRACE_V020_PLAN_S1004377_NA_GAP_ANALYSIS.md
+# 4. Read Plan v2 itself for the structural precedent the v2 fold-in mirrors
+$EDITOR ai_docs/WORKFLOW_TRACE_COMPLETION_PLAN_V2_S1004115.md
+# 5. Verify git anchor (no source code touched this round)
+git log --oneline -3      # expected: 7d16c2c v0.2.0 prep on top of v0.1.0 tag
+git status -s -- .        # expected: 3 new ai_docs files only
+```
 
 ---
 

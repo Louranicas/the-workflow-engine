@@ -35,7 +35,8 @@ use crate::m21_variant_builder::{build_variants, WorkflowVariant};
 use crate::m22_kmeans::{
     extract_variant_features, kmeans, recommended_k_for_variant_count, KMeansConfig,
 };
-use crate::m23_proposer::compose_proposals;
+use crate::m15_pressure::{PressureRegister, PressureRegisterConfig};
+use crate::m23_proposer::compose_proposals_with_pressure;
 
 /// Default proposals JSONL output path.
 pub const DEFAULT_PROPOSALS_OUT: &str = "./proposals.jsonl";
@@ -509,9 +510,22 @@ pub fn run(config: &Config) -> Result<Report, OrchestrationError> {
     // See `build_variant_cluster_map` for the per-variant feature extraction,
     // adaptive-`k`, and degraded-fallback contract.
     let variant_to_cluster = build_variant_cluster_map(&patterns);
-    let proposals = compose_proposals(&patterns, &snapshot, |v| {
-        variant_to_cluster.get(&v.variant_id).copied()
-    });
+    // CC-7 wire — Plan v2 § 15 D22 "Pressure modulates m23 compose-priority
+    // (additive, bounded)". Read the current substrate pressure scalar from
+    // m15 (count of outstanding PHASE-B-RESERVATION-NOTICE files, saturated
+    // at `PRESSURE_SATURATION_N`); a missing notices directory reads as
+    // zero. The scalar feeds compose_proposals_with_pressure, which stable-
+    // sorts proposals so SAFER variants (Identity > Swap > Skip) surface
+    // first under elevated pressure. Zero pressure ⇒ output IDENTICAL to
+    // the pre-Phase-7 compose_proposals path. See
+    // `read_pressure_scalar_for_compose` for the read-and-degrade contract.
+    let pressure = read_pressure_scalar_for_compose(&mut report);
+    let proposals = compose_proposals_with_pressure(
+        &patterns,
+        &snapshot,
+        |v| variant_to_cluster.get(&v.variant_id).copied(),
+        pressure,
+    );
 
     // Stage 7 — write proposals JSONL.
     report.proposals_written = write_proposals_jsonl(&config.proposals_out, &proposals)?;
@@ -531,6 +545,45 @@ pub fn run(config: &Config) -> Result<Report, OrchestrationError> {
 
     report.completed = true;
     Ok(report)
+}
+
+/// Read the current m15 substrate pressure scalar for the m23 compose
+/// path (Phase 7 / CC-7 wire — Plan v2 § 15 D22 + D24).
+///
+/// The scalar is in `[0.0, 1.0]` and reflects the count of outstanding
+/// `PHASE-B-RESERVATION-NOTICE` JSONL files in the m15 notices directory,
+/// saturated at [`crate::m15_pressure::PRESSURE_SATURATION_N`]. A missing
+/// notices directory reads as `0.0` (fresh-deploy / cold-boot is honest
+/// zero pressure, never a fault).
+///
+/// **Degraded-read contract.** This function NEVER raises an
+/// [`OrchestrationError`]: any I/O fault enumerating the notices directory
+/// is logged via `tracing::warn` and the stage is added to
+/// `Report::stages_skipped` as `"m15-pressure-read"`; the returned scalar
+/// is `0.0`, which makes [`compose_proposals_with_pressure`] behave
+/// identically to the pre-Phase-7 compose path. m15 is a witness; its
+/// failure must not block the engine.
+fn read_pressure_scalar_for_compose(report: &mut Report) -> f64 {
+    let register = PressureRegister::new(PressureRegisterConfig::default());
+    match register.read_pressure_level() {
+        Ok(scalar) => {
+            tracing::debug!(
+                target: "wf_crystallise",
+                pressure = scalar,
+                "m15 pressure scalar read for m23 compose"
+            );
+            scalar
+        }
+        Err(err) => {
+            tracing::warn!(
+                target: "wf_crystallise",
+                error = %err,
+                "m15 pressure read failed — degrading to zero pressure (graceful)"
+            );
+            report.stages_skipped.push("m15-pressure-read".to_owned());
+            0.0
+        }
+    }
 }
 
 /// Assemble the `variant_id → cluster_index` map for the m23 diversity

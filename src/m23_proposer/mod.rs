@@ -9,7 +9,7 @@ use thiserror::Error;
 
 use crate::m14_lift::{LiftSnapshot, MIN_SAMPLE_SIZE};
 use crate::m20_prefixspan::Pattern;
-use crate::m21_variant_builder::WorkflowVariant;
+use crate::m21_variant_builder::{MutationKind, WorkflowVariant};
 
 /// **F2 hard gate:** proposals refuse to build when the m14 lift
 /// snapshot reports `n < MIN_SAMPLE_SIZE` or `lift.is_none()`.
@@ -265,6 +265,119 @@ pub fn compose_proposals(
         }
     }
     out
+}
+
+/// Maximum additive contribution the m15 pressure scalar may add to a
+/// proposal's composition priority.
+///
+/// **CC-7 wiring — bounded by construction.** The pressure scalar is in
+/// `[0.0, 1.0]` (see [`crate::m15_pressure::pressure_scalar_from_count`])
+/// and is multiplied by `MAX_PRESSURE_CONTRIBUTION` before being added to a
+/// proposal's safety-weighted priority. The contribution ceiling here
+/// caps how much the substrate's voice can shift composition order: even
+/// at saturated pressure, a proposal cannot gain more than this constant
+/// over its baseline lift. A small finite cap was chosen deliberately —
+/// pressure is a signal, not an amplifier (D22 "additive, bounded").
+pub const MAX_PRESSURE_CONTRIBUTION: f64 = 0.5;
+
+/// Per-mutation safety weight: under pressure, less-mutated variants
+/// (Identity) get the full bonus; more-aggressive mutations (Skip) get
+/// less. The contribution is the *product* of this weight and the
+/// clamped pressure scalar, multiplied by [`MAX_PRESSURE_CONTRIBUTION`].
+///
+/// Rationale: when the substrate is under unresolved pressure, the engine
+/// should preferentially surface SAFER proposals first — the Identity
+/// variant of a mined pattern is the closest to "do what you already do",
+/// and Swap / Skip mutations carry progressively more behavioural drift.
+/// All weights are in `[0.0, 1.0]`; under zero pressure every weight
+/// multiplies through to zero contribution, so the original compose order
+/// is preserved exactly.
+#[must_use]
+const fn mutation_safety_weight(mutation: &MutationKind) -> f64 {
+    match mutation {
+        MutationKind::Identity => 1.0,
+        MutationKind::Swap { .. } => 0.5,
+        MutationKind::Skip { .. } => 0.25,
+    }
+}
+
+/// Compute the bounded additive pressure contribution for a single proposal.
+///
+/// `pressure` is clamped to `[0.0, 1.0]` (silently — out-of-band callers
+/// get the same safe behaviour as in-band callers); the result is in
+/// `[0.0, MAX_PRESSURE_CONTRIBUTION]`. NaN-free by construction (clamp
+/// rejects NaN to `0.0`).
+#[must_use]
+fn pressure_priority_bonus(pressure: f64, proposal: &WorkflowProposal) -> f64 {
+    // NaN-safe clamp: any non-finite or out-of-band pressure collapses
+    // to zero contribution, never amplifies.
+    let clamped = if pressure.is_finite() {
+        pressure.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let weight = mutation_safety_weight(&proposal.variant().mutation);
+    MAX_PRESSURE_CONTRIBUTION * clamped * weight
+}
+
+/// Compose proposals with bounded additive pressure modulation
+/// (Phase 7 / CC-7 wire — D22 "Pressure modulates m23 compose-priority
+/// (additive, bounded)").
+///
+/// Behaves identically to [`compose_proposals`] when `pressure == 0.0`
+/// (and any other zero-bonus condition — non-finite pressure, all-zero
+/// safety weights). When `pressure > 0.0`, the returned vector is
+/// **stable-sorted** by descending priority, where priority is
+///
+/// ```text
+///     priority(p) = p.evidence_lift() + pressure_priority_bonus(pressure, p)
+/// ```
+///
+/// and `pressure_priority_bonus(pressure, p)` is in
+/// `[0.0, MAX_PRESSURE_CONTRIBUTION]` — bounded by construction (see the
+/// constant docstring). Stable sort means that proposals with equal
+/// priority retain their original (source-pattern) order, so the
+/// no-pressure path is provably identical to [`compose_proposals`].
+///
+/// **NA framing (D24).** Under elevated pressure, the substrate's
+/// outstanding `PHASE-B-RESERVATION-NOTICE` ledger is the signal — the
+/// composition path responds by surfacing SAFER variants first (Identity
+/// then Swap then Skip per [`mutation_safety_weight`]). Pressure is the
+/// substrate's voice in composition; it does not block, it re-orders.
+///
+/// `pressure` is a scalar in `[0.0, 1.0]`; values outside that band (or
+/// `NaN` / infinities) collapse to zero contribution — pressure can never
+/// amplify, only nudge.
+#[must_use]
+pub fn compose_proposals_with_pressure(
+    patterns: &[Pattern],
+    snapshot: &LiftSnapshot,
+    diversity_of: impl Fn(&WorkflowVariant) -> Option<usize>,
+    pressure: f64,
+) -> Vec<WorkflowProposal> {
+    let mut proposals = compose_proposals(patterns, snapshot, diversity_of);
+    // Fast path: zero or non-finite pressure ⇒ no reorder (no allocation,
+    // no sort traversal), preserving compose_proposals's source ordering.
+    if !pressure.is_finite() || pressure <= 0.0 {
+        return proposals;
+    }
+    // Stable sort by descending priority. Stable sort preserves the
+    // original index order for proposals with identical priority — this
+    // is the "no-pressure ⇒ identical output" invariant under partial
+    // ties.
+    proposals.sort_by(|a, b| {
+        let pa = a.evidence_lift() + pressure_priority_bonus(pressure, a);
+        let pb = b.evidence_lift() + pressure_priority_bonus(pressure, b);
+        // Reverse for descending; NaN-safe via total_cmp.
+        pb.total_cmp(&pa)
+    });
+    tracing::debug!(
+        target: "m23.compose",
+        pressure,
+        n_proposals = proposals.len(),
+        "m23::compose_proposals_with_pressure — pressure-aware reorder applied"
+    );
+    proposals
 }
 
 #[cfg(test)]
@@ -912,5 +1025,194 @@ mod tests {
         let id_orig = build_proposal(v.clone(), &s, None).expect("orig").proposal_id();
         let id_clone = build_proposal(v, &s, None).expect("clone").proposal_id();
         assert_eq!(id_orig, id_clone);
+    }
+
+    // ---- Phase 7 CC-7 wiring: compose_proposals_with_pressure ----
+
+    use super::{
+        compose_proposals_with_pressure, mutation_safety_weight, pressure_priority_bonus,
+        MAX_PRESSURE_CONTRIBUTION,
+    };
+
+    #[test]
+    // rationale: D22 "additive, bounded" — the per-proposal bonus must
+    // always fall within `[0.0, MAX_PRESSURE_CONTRIBUTION]` regardless
+    // of the input pressure value (NaN, ±inf, far above 1.0, negative).
+    fn pressure_bonus_is_bounded_under_adversarial_input() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let p = build_proposal(sample_variant(), &s, None).expect("ok");
+        for pressure in [
+            -1e9_f64,
+            -1.0,
+            0.0,
+            0.25,
+            0.5,
+            1.0,
+            10.0,
+            1e9,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            let bonus = pressure_priority_bonus(pressure, &p);
+            assert!(
+                bonus.is_finite(),
+                "bonus must be finite for any pressure (got NaN/inf at p={pressure})"
+            );
+            assert!(
+                (0.0..=MAX_PRESSURE_CONTRIBUTION).contains(&bonus),
+                "bonus {bonus} out of [0, {MAX_PRESSURE_CONTRIBUTION}] at p={pressure}"
+            );
+        }
+    }
+
+    #[test]
+    // rationale: Identity-no-op — zero pressure produces zero bonus.
+    fn pressure_bonus_zero_pressure_is_zero() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let p = build_proposal(sample_variant(), &s, None).expect("ok");
+        assert!((pressure_priority_bonus(0.0, &p) - 0.0).abs() < 1e-15);
+    }
+
+    #[test]
+    // rationale: D22 — at saturated pressure on an Identity variant, the
+    // bonus equals the ceiling exactly (Identity's safety weight is 1.0).
+    fn pressure_bonus_max_pressure_identity_hits_ceiling() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let p = build_proposal(sample_variant(), &s, None).expect("ok");
+        // sample_variant() is the first build_variants output = Identity.
+        assert!(matches!(p.variant().mutation, MutationKind::Identity));
+        let bonus = pressure_priority_bonus(1.0, &p);
+        assert!((bonus - MAX_PRESSURE_CONTRIBUTION).abs() < 1e-15);
+    }
+
+    #[test]
+    // rationale: D22 — safety weights are ordered Identity > Swap > Skip.
+    fn mutation_safety_weight_ordering() {
+        let identity_w = mutation_safety_weight(&MutationKind::Identity);
+        let swap_w = mutation_safety_weight(&MutationKind::Swap { at: 0 });
+        let skip_w = mutation_safety_weight(&MutationKind::Skip { at: 0 });
+        assert!(
+            identity_w > swap_w && swap_w > skip_w,
+            "expected Identity > Swap > Skip: got {identity_w} > {swap_w} > {skip_w}"
+        );
+    }
+
+    #[test]
+    // rationale: Determinism — zero pressure ⇒ output IDENTICAL to
+    // `compose_proposals`. This is the no-pressure backwards-compat
+    // contract (the entire reorder branch must be a no-op).
+    fn compose_with_pressure_zero_matches_compose() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let patterns = vec![
+            Pattern::new(vec![StepToken(1), StepToken(2), StepToken(3)], 25, (0, 0)),
+            Pattern::new(vec![StepToken(7), StepToken(8)], 22, (0, 1)),
+        ];
+        let base = compose_proposals(&patterns, &s, |_| None);
+        let with_pressure = compose_proposals_with_pressure(&patterns, &s, |_| None, 0.0);
+        assert_eq!(base.len(), with_pressure.len());
+        for (a, b) in base.iter().zip(with_pressure.iter()) {
+            assert_eq!(a.proposal_id(), b.proposal_id());
+        }
+    }
+
+    #[test]
+    // rationale: Determinism — non-finite pressure (NaN / ±inf) is
+    // identical to zero pressure (silent NaN-safe collapse).
+    fn compose_with_pressure_non_finite_pressure_is_no_op() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let patterns = vec![Pattern::new(vec![StepToken(1), StepToken(2)], 25, (0, 0))];
+        let base = compose_proposals(&patterns, &s, |_| None);
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -10.0] {
+            let out = compose_proposals_with_pressure(&patterns, &s, |_| None, bad);
+            assert_eq!(out.len(), base.len(), "len differs at pressure={bad}");
+            for (a, b) in base.iter().zip(out.iter()) {
+                assert_eq!(a.proposal_id(), b.proposal_id(), "id differs at p={bad}");
+            }
+        }
+    }
+
+    #[test]
+    // rationale: D22 + D24 — under elevated pressure, the Identity variant
+    // must surface AT OR BEFORE all Skip variants on the same pattern.
+    // (Skip variants carry the smallest safety weight; under any positive
+    // pressure their bonus is strictly smaller than Identity's.)
+    fn compose_with_pressure_surfaces_identity_before_skip() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        // Multi-step pattern → m21 emits Identity + Swap + Skip variants.
+        let patterns =
+            vec![Pattern::new(vec![StepToken(1), StepToken(2), StepToken(3)], 25, (0, 0))];
+        let out = compose_proposals_with_pressure(&patterns, &s, |_| None, 1.0);
+        assert!(out.len() >= 2);
+        let identity_pos = out
+            .iter()
+            .position(|p| matches!(p.variant().mutation, MutationKind::Identity))
+            .expect("Identity must be present");
+        // Every Skip variant must come AT OR AFTER the Identity variant.
+        for (i, p) in out.iter().enumerate() {
+            if matches!(p.variant().mutation, MutationKind::Skip { .. }) {
+                assert!(
+                    i >= identity_pos,
+                    "Skip variant surfaced before Identity at pressure=1.0 \
+                     (Skip@{i}, Identity@{identity_pos})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    // rationale: Determinism — repeated calls with identical pressure
+    // produce identical orderings (stable sort + pure inputs).
+    fn compose_with_pressure_is_deterministic() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let patterns =
+            vec![Pattern::new(vec![StepToken(11), StepToken(12), StepToken(13)], 25, (0, 0))];
+        let a = compose_proposals_with_pressure(&patterns, &s, |_| None, 0.75);
+        let b = compose_proposals_with_pressure(&patterns, &s, |_| None, 0.75);
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert_eq!(x.proposal_id(), y.proposal_id());
+        }
+    }
+
+    #[test]
+    // rationale: D22 bounded — across the full `[0,1]` pressure band, no
+    // proposal's effective priority shifts by more than the ceiling.
+    fn compose_with_pressure_contribution_never_exceeds_ceiling() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let pattern = Pattern::new(vec![StepToken(1), StepToken(2), StepToken(3)], 25, (0, 0));
+        let proposals = compose_proposals(&[pattern], &s, |_| None);
+        for proposal in &proposals {
+            for pressure in [0.0, 0.1, 0.25, 0.5, 0.75, 1.0] {
+                let bonus = pressure_priority_bonus(pressure, proposal);
+                assert!(
+                    bonus <= MAX_PRESSURE_CONTRIBUTION + 1e-12,
+                    "bonus {bonus} exceeds ceiling {MAX_PRESSURE_CONTRIBUTION} at p={pressure}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    // rationale: Empty input — pressure-aware compose on empty patterns
+    // returns empty (no allocation, no panic), matching the baseline.
+    fn compose_with_pressure_empty_input_returns_empty() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let out = compose_proposals_with_pressure(&[], &s, |_| None, 0.9);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    // rationale: F2 gate still fires under pressure — pressure does NOT
+    // promote sub-threshold evidence past the F2 floor (pressure modulates
+    // ORDER, never bypasses the evidence gate).
+    fn compose_with_pressure_does_not_bypass_f2_gate() {
+        let s = snap(PROPOSAL_F2_THRESHOLD - 1, Some(0.5), Some(0.05));
+        let patterns = vec![Pattern::new(vec![StepToken(1), StepToken(2)], 25, (0, 0))];
+        let out = compose_proposals_with_pressure(&patterns, &s, |_| None, 1.0);
+        assert!(
+            out.is_empty(),
+            "pressure must NOT promote sub-F2 proposals past the evidence gate"
+        );
     }
 }

@@ -113,7 +113,7 @@ Beyond the rubric, the working stance carried into this project:
 - **CC-4** Proposal → Bank → Dispatch Pipeline (F → G → Conductor)
 - **CC-5** Substrate Learning Loop (G → H → back to F via stcortex pathways)
 - **CC-6** Verification-Gated Dispatch (G internal: m33 → m32)
-- **CC-7** Pressure-Driven Evolution (E → spec interviews)
+- **CC-7** Pressure-Driven Evolution (E → F) — **WIRED Phase 7** (Plan v2 § 15 D21/D22/D24): m15 pressure scalar feeds `m23::compose_proposals_with_pressure` for additive, bounded composition-priority modulation; the JSONL `PHASE-B-RESERVATION-NOTICE` ledger still feeds Watcher / Zen spec interviews asynchronously (the file-drop coupling is preserved alongside the in-code wire).
 
 ---
 

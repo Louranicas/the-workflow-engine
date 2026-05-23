@@ -421,6 +421,64 @@ impl PressureRegister {
         out.sort();
         Ok(out)
     }
+
+    /// Read the current pressure level from the notices directory — a
+    /// bounded scalar in `[0.0, 1.0]` derived from the count of emitted
+    /// `PHASE-B-RESERVATION-NOTICE` JSONL files.
+    ///
+    /// **CC-7 wiring surface (Phase 7).** m15 is a witness, not a gate —
+    /// it never blocks. But the persistence-as-substrate surface (the
+    /// JSONL ledger in [`PressureRegisterConfig::notices_dir`]) is the
+    /// substrate's voice in composition: a fresh, un-cleared notice file
+    /// is an unresolved record of scope pressure on the engine. The
+    /// scalar returned here is `notices.len() / PRESSURE_SATURATION_N`
+    /// clamped to `[0.0, 1.0]`. Above [`PRESSURE_SATURATION_N`] outstanding
+    /// notices, pressure saturates at `1.0`. Empty / missing directory
+    /// reads as `0.0`.
+    ///
+    /// # Errors
+    ///
+    /// [`PressureRegisterError::WriteFailed`] only if the notices directory
+    /// exists but cannot be enumerated. A *missing* notices directory is
+    /// not an error — it reads as zero pressure (this is the cold-boot /
+    /// fresh-deploy state).
+    ///
+    /// # Returns
+    ///
+    /// A scalar in `[0.0, 1.0]` (NaN-free, finite by construction — every
+    /// arm produces a value bounded by the saturation cap before the final
+    /// `min`-clamp).
+    pub fn read_pressure_level(&self) -> Result<f64, PressureRegisterError> {
+        if !self.config.notices_dir.exists() {
+            return Ok(0.0);
+        }
+        let n = self.list_notices()?.len();
+        Ok(pressure_scalar_from_count(n))
+    }
+}
+
+/// Number of outstanding `PHASE-B-RESERVATION-NOTICE` files at which the
+/// pressure scalar saturates at `1.0`. Above this count, pressure stays at
+/// the cap (the substrate's voice never amplifies beyond bounded influence).
+pub const PRESSURE_SATURATION_N: usize = 10;
+
+/// Derive the bounded pressure scalar from a notice count. Pure helper —
+/// extracted so callers (and the m23 wire) can compose scalar values
+/// without going through the on-disk register.
+///
+/// `notices_count / PRESSURE_SATURATION_N`, clamped to `[0.0, 1.0]`.
+#[must_use]
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "PRESSURE_SATURATION_N is a small constant; usize→f64 fits losslessly"
+)]
+pub fn pressure_scalar_from_count(notices_count: usize) -> f64 {
+    let saturation = PRESSURE_SATURATION_N as f64;
+    let raw = notices_count as f64 / saturation;
+    // Bounded by construction: usize→f64 cannot produce NaN, so clamp's
+    // NaN edge case is unreachable here. The clamp keeps the result in
+    // `[0.0, 1.0]` regardless of how the saturation constant evolves.
+    raw.clamp(0.0, 1.0)
 }
 
 /// Sanitise a session id for use in a filename: keep only
@@ -1302,5 +1360,95 @@ mod tests {
             name.contains(&format!("{id:06}")),
             "filename must embed zero-padded id {id:06}: {name}"
         );
+    }
+
+    // ---- Phase 7 CC-7 wiring: pressure_scalar_from_count + read_pressure_level ----
+
+    #[test]
+    // rationale: Boundary — zero notices ⇒ zero pressure (cold-boot state).
+    fn pressure_scalar_zero_count_is_zero() {
+        assert!((super::pressure_scalar_from_count(0) - 0.0).abs() < 1e-15);
+    }
+
+    #[test]
+    // rationale: Boundary — one notice gives a fractional pressure
+    // strictly above zero and strictly below one.
+    fn pressure_scalar_single_notice_is_partial() {
+        let v = super::pressure_scalar_from_count(1);
+        assert!(v > 0.0 && v < 1.0, "expected (0,1): got {v}");
+    }
+
+    #[test]
+    // rationale: Boundary — at saturation count, the scalar is exactly 1.0.
+    fn pressure_scalar_at_saturation_is_one() {
+        let v = super::pressure_scalar_from_count(super::PRESSURE_SATURATION_N);
+        assert!((v - 1.0).abs() < 1e-15);
+    }
+
+    #[test]
+    // rationale: Bounded — far above saturation, the scalar saturates at
+    // 1.0 (the substrate's voice does not amplify without bound).
+    fn pressure_scalar_above_saturation_saturates_at_one() {
+        let v = super::pressure_scalar_from_count(super::PRESSURE_SATURATION_N * 100);
+        assert!((v - 1.0).abs() < 1e-15);
+    }
+
+    #[test]
+    // rationale: Bounded — even usize::MAX notices stays clamped to 1.0
+    // (saturation cap is a hard upper bound by construction).
+    fn pressure_scalar_usize_max_clamped_to_one() {
+        let v = super::pressure_scalar_from_count(usize::MAX);
+        assert!((v - 1.0).abs() < 1e-15);
+    }
+
+    #[test]
+    // rationale: Determinism — the scalar is a pure function of the count.
+    fn pressure_scalar_is_deterministic() {
+        for n in [0_usize, 1, 3, 5, 10, 50, 1_000] {
+            let a = super::pressure_scalar_from_count(n);
+            let b = super::pressure_scalar_from_count(n);
+            assert!((a - b).abs() < 1e-15, "non-deterministic at n={n}");
+        }
+    }
+
+    #[test]
+    // rationale: Cold-boot — a register pointing at a missing directory
+    // reads as zero pressure, not an error (CLAUDE.md anti-pattern: never
+    // raise an error for "the dir simply isn't there yet").
+    fn read_pressure_level_missing_directory_is_zero() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Point at a child path that does NOT exist.
+        let cfg = PressureRegisterConfig {
+            notices_dir: dir.path().join("does-not-exist"),
+            session_id: "TESTSESS".into(),
+        };
+        let reg = PressureRegister::new(cfg);
+        let v = reg.read_pressure_level().expect("read ok");
+        assert!((v - 0.0).abs() < 1e-15);
+    }
+
+    #[test]
+    // rationale: End-to-end — emit a notice via the register, then read
+    // pressure_level and confirm it ticks above zero (the substrate's
+    // voice is heard).
+    fn read_pressure_level_rises_after_emit() {
+        let (reg, _dir) = tmp_register();
+        let baseline = reg.read_pressure_level().expect("baseline");
+        assert!((baseline - 0.0).abs() < 1e-15);
+        let _ = reg
+            .detect_and_emit(
+                "auto_promote_workflow",
+                PressureSource::Unknown,
+                "test feature",
+                CharterSection::V1_3VerbClass,
+            )
+            .expect("emit")
+            .expect("category matched");
+        let after = reg.read_pressure_level().expect("after");
+        assert!(
+            after > baseline,
+            "pressure must rise after notice emit: baseline={baseline} after={after}"
+        );
+        assert!(after.is_finite() && (0.0..=1.0).contains(&after));
     }
 }

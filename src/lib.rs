@@ -86,8 +86,9 @@ pub use m14_lift::{
     DEFAULT_WINDOW_SIZE, MIN_SAMPLE_SIZE, WILSON_Z,
 };
 pub use m15_pressure::{
-    classify_excerpt, truncate_excerpt, CharterSection, ForbiddenCategory, PressureEvent,
-    PressureRegister, PressureRegisterConfig, PressureRegisterError, PressureSource,
+    classify_excerpt, pressure_scalar_from_count, truncate_excerpt, CharterSection,
+    ForbiddenCategory, PressureEvent, PressureRegister, PressureRegisterConfig,
+    PressureRegisterError, PressureSource, PRESSURE_SATURATION_N,
 };
 pub use m20_prefixspan::{
     mine_sequences, MaxGap, MinSupport, MinerError, Pattern, StepToken, DEFAULT_MAX_GAP,
@@ -103,8 +104,8 @@ pub use m22_kmeans::{
     FEATURE_LEVENSHTEIN_NORM, FEATURE_STEP_COUNT_NORM, RECOMMENDED_K_MAX,
 };
 pub use m23_proposer::{
-    build_proposal, compose_proposals, ProposerError, WorkflowProposal,
-    PROPOSAL_F2_THRESHOLD,
+    build_proposal, compose_proposals, compose_proposals_with_pressure, ProposerError,
+    WorkflowProposal, MAX_PRESSURE_CONTRIBUTION, PROPOSAL_F2_THRESHOLD,
 };
 pub use m30_bank::{
     workflow_pathway_id, AcceptedWorkflow, BankError, CuratedBank, DEFAULT_SUNSET_DAYS,

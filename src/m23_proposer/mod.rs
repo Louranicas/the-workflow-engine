@@ -47,6 +47,14 @@ pub struct WorkflowProposal {
     /// proposals lacking this field fail to deserialise (SemVer-break
     /// at wire level per DX-W.c).
     escape_surface: EscapeSurfaceProfile,
+    /// Engine-projected cost — W3 wire-bump per Plan v2 v0.2.0 §3 Phase 5
+    /// step 3 + §15 D10 metric `step_count × mutation_weight` per
+    /// DX-W3.src = `variant.mutation` (the `MutationKind` enum) →
+    /// [`mutation_weight_for`] classifier. Consumed by Phase 6 R2 Cost
+    /// real verifier (thresholds against `cost_ceiling`). Stacks the
+    /// W1 SemVer-break — v0.1.0 proposals lacking `cost` also fail to
+    /// deserialise (no `#[serde(default)]`).
+    cost: i64,
 }
 
 impl WorkflowProposal {
@@ -62,6 +70,7 @@ impl WorkflowProposal {
     ///
     /// Returns [`ProposerError::EvidenceBelowThreshold`] if `evidence_n` is
     /// below [`PROPOSAL_F2_THRESHOLD`].
+    #[allow(clippy::too_many_arguments)] // 8 args reflects the v0.2.0 W1+W3 wire shape; refactor to builder would be a separate v0.3.0 design (W3 keeps the F2 invariant on the constructor)
     pub fn new(
         proposal_id: u64,
         variant: WorkflowVariant,
@@ -70,6 +79,7 @@ impl WorkflowProposal {
         evidence_ci_half: f64,
         diversity_cluster: Option<usize>,
         escape_surface: EscapeSurfaceProfile,
+        cost: i64,
     ) -> Result<Self, ProposerError> {
         if evidence_n < PROPOSAL_F2_THRESHOLD {
             return Err(ProposerError::EvidenceBelowThreshold {
@@ -85,6 +95,7 @@ impl WorkflowProposal {
             evidence_ci_half,
             diversity_cluster,
             escape_surface,
+            cost,
         })
     }
 
@@ -133,6 +144,56 @@ impl WorkflowProposal {
     pub const fn escape_surface(&self) -> EscapeSurfaceProfile {
         self.escape_surface
     }
+
+    /// Engine-projected cost — W3 wire-bump per Plan v2 v0.2.0 §3 Phase 5
+    /// step 3 + §15 D10 metric `step_count × mutation_weight`. Consumed
+    /// by Phase 6 R2 Cost real verifier.
+    #[must_use]
+    pub const fn cost(&self) -> i64 {
+        self.cost
+    }
+}
+
+/// W3 mutation-weight classifier — Plan v2 v0.2.0 §3 Phase 5 step 3 +
+/// §15 D10 metric `step_count × mutation_weight` per DX-W3.src
+/// (`variant.mutation` is the `MutationKind` enum at
+/// `src/m21_variant_builder/mod.rs:47`; weight is derived here).
+///
+/// Cost-frame interpretation (NOT safety-frame — see
+/// [`mutation_safety_weight`] for the inverse): more-aggressive
+/// mutations cost more engine effort / risk per dispatch. The
+/// classifier is the v0.2.0 source-of-truth; v0.3.0 may upgrade to a
+/// per-StepToken table (DX-W3.src non-default arm).
+///
+/// Weights:
+/// - `Identity` = 1 (baseline; verbatim copy of the source pattern)
+/// - `Swap` = 2 (mild mutation; two adjacent steps transposed)
+/// - `Skip` = 4 (aggressive mutation; one step omitted)
+///
+/// Returns `u32` so the multiplication `step_count * weight` cannot
+/// overflow `i64` for any realistic input (`MAX_STEPS_PER_VARIANT ≈
+/// 32` × `u32::MAX` < `i64::MAX`).
+#[must_use]
+pub const fn mutation_weight_for(kind: &MutationKind) -> u32 {
+    match kind {
+        MutationKind::Identity => 1,
+        MutationKind::Swap { .. } => 2,
+        MutationKind::Skip { .. } => 4,
+    }
+}
+
+/// W3 cost projection — `step_count × mutation_weight_for(variant.mutation)`
+/// saturating to [`i64::MAX`] on overflow (impossible for realistic
+/// `WorkflowVariant`s but defensive).
+///
+/// Consumed by [`build_proposal_with_escape_surface`] to populate the
+/// proposal's `cost` field for Phase 6 R2 Cost verifier consumption.
+#[must_use]
+fn project_cost(variant: &WorkflowVariant) -> i64 {
+    let weight = mutation_weight_for(&variant.mutation);
+    let step_count: u64 = variant.steps.len() as u64;
+    let product: u128 = u128::from(step_count) * u128::from(weight);
+    i64::try_from(product).unwrap_or(i64::MAX)
 }
 
 /// Proposal-builder errors.
@@ -210,6 +271,11 @@ pub fn build_proposal_with_escape_surface(
     let proposal_id = crate::m4_cascade::cluster_id::fnv1a_64(
         format!("proposal:{}:{}", variant.variant_id, snapshot.n).as_bytes(),
     );
+    // W3 cost projection — computed before `variant` is moved into the
+    // constructor. Phase 6 R2 Cost verifier reads `proposal.cost()` and
+    // thresholds against `cost_ceiling`. The current classifier is the
+    // v0.2.0 source-of-truth per DX-W3.src.
+    let cost = project_cost(&variant);
     // Route through the F2-enforcing constructor. The `snapshot.n <
     // PROPOSAL_F2_THRESHOLD` check above already guarantees this succeeds;
     // `WorkflowProposal::new` re-checks the same floor so the invariant
@@ -222,6 +288,7 @@ pub fn build_proposal_with_escape_surface(
         ci_half,
         diversity_cluster,
         escape_surface,
+        cost,
     )
 }
 
@@ -1348,5 +1415,101 @@ mod tests {
         let restored: WorkflowProposal = serde_json::from_str(&serialised).expect("de");
         assert_eq!(p, restored, "round-trip identity");
         assert_eq!(restored.escape_surface(), EscapeSurfaceProfile::FileWrite);
+    }
+
+    // ========================================================================
+    // W3 cost field + mutation_weight_for classifier tests (Plan v2 v0.2.0
+    // §3 Phase 5 step 3 + §15 D10 metric step_count × mutation_weight per
+    // DX-W3.src = variant.mutation source). Verifies:
+    //   - mutation_weight_for variant ordering (Identity < Swap < Skip)
+    //   - cost projection = step_count × weight
+    //   - SemVer-break: v0.1.0+W1-shape JSONL (missing cost) fails to
+    //     deserialise (stacks the W1 break)
+    //   - cost round-trips through serde
+    // ========================================================================
+
+    #[test]
+    fn mutation_weight_for_identity_is_baseline_one() {
+        assert_eq!(super::mutation_weight_for(&MutationKind::Identity), 1);
+    }
+
+    #[test]
+    fn mutation_weight_for_orders_aggression_identity_lt_swap_lt_skip() {
+        // Cost-frame interpretation: more-aggressive mutations cost more.
+        let identity = super::mutation_weight_for(&MutationKind::Identity);
+        // Construct Swap and Skip with placeholder indices — the classifier
+        // doesn't read inner fields, only matches the variant tag.
+        let swap = super::mutation_weight_for(&MutationKind::Swap { at: 0 });
+        let skip = super::mutation_weight_for(&MutationKind::Skip { at: 0 });
+        assert!(identity < swap, "Identity ({identity}) < Swap ({swap})");
+        assert!(swap < skip, "Swap ({swap}) < Skip ({skip})");
+    }
+
+    #[test]
+    fn cost_projection_is_step_count_times_mutation_weight() {
+        // sample_variant() per the existing test fixture returns the first
+        // variant from build_variants of a 2-step pattern. We exercise
+        // each MutationKind explicitly via mutation_weight_for and check
+        // the cost arithmetic via build_proposal's projection.
+        let s = snap(30, Some(0.5), Some(0.05));
+        let p = build_proposal(sample_variant(), &s, None).expect("ok");
+        let v = p.variant();
+        let expected_cost = i64::try_from(
+            (v.steps.len() as u64) * u64::from(super::mutation_weight_for(&v.mutation)),
+        )
+        .expect("realistic-input cost fits i64");
+        assert_eq!(
+            p.cost(),
+            expected_cost,
+            "cost projection = step_count ({}) × mutation_weight ({}) for mutation {:?}",
+            v.steps.len(),
+            super::mutation_weight_for(&v.mutation),
+            v.mutation
+        );
+    }
+
+    #[test]
+    fn semver_break_v0_2_0_jsonl_missing_cost_fails_to_deserialise() {
+        // Stacks the W1 SemVer-break: a JSONL line that has `escape_surface`
+        // (W1 wire-shape) but NOT `cost` (the W3 addition) MUST fail to
+        // deserialise. No `#[serde(default)]` on cost — the absence is
+        // the SemVer-break contract per DX-W.c semantics extended to W3.
+        let w1_only_shape = serde_json::json!({
+            "proposal_id": 12345_u64,
+            "variant": {
+                "variant_id": 42_u64,
+                "steps": [],
+                "mutation": "identity",
+                "source_pattern_hash": 7_u64,
+            },
+            "evidence_n": 30_usize,
+            "evidence_lift": 0.5_f64,
+            "evidence_ci_half": 0.05_f64,
+            "diversity_cluster": null,
+            "escape_surface": "sandboxed",
+            // NOTE: cost intentionally absent.
+        });
+        let s = w1_only_shape.to_string();
+        let result: Result<WorkflowProposal, _> = serde_json::from_str(&s);
+        assert!(
+            result.is_err(),
+            "v0.1.0+W1-only proposals lacking cost MUST fail to deserialise at v0.2.0 W3 (SemVer-break stacking)"
+        );
+    }
+
+    #[test]
+    fn cost_round_trips_through_serde() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let p = build_proposal_with_escape_surface(
+            sample_variant(),
+            &s,
+            None,
+            EscapeSurfaceProfile::Sandboxed,
+        )
+        .expect("build");
+        let cost_before = p.cost();
+        let serialised = serde_json::to_string(&p).expect("ser");
+        let restored: WorkflowProposal = serde_json::from_str(&serialised).expect("de");
+        assert_eq!(restored.cost(), cost_before, "cost round-trips intact");
     }
 }

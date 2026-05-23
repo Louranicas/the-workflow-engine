@@ -31,7 +31,8 @@
 | Phase 4 interview (15 Round A + 3 Round B + 3 stated defaults = 21 decisions) | ✅ COMPLETE | 6 AskUserQuestion bundles answered by Luke this session |
 | §15 lock-in of v2 final decisions | ✅ COMPLETE | every "needs DX*" annotation answered |
 | 4-surface persist of v2 | ✅ COMPLETE this turn | **ai_docs canonical + Obsidian vault note + stcortex mem 18511 (READ-BACK VERIFIED per NA-6) with bidi pathways + this CLAUDE.local.md flip + injection.db causal_chain id 119** |
-| **Luke @ node 0.A "start Phase 1" go** | ⏳ **PENDING** — execution gate separate from plan ratification per D48 | |
+| **Luke @ node 0.A "start Phase 1" go** | ✅ **FIRED 2026-05-23 (S1004377)** — Luke "begin V2" | execution gate per D48 |
+| Phase 1 (re-baseline + ADR cascade + file:line re-verify + mutation-weight pin + RefusalToken ADR) | ⏳ **IN PROGRESS** — doc-only commit forthcoming | Plan v2 §3 Phase 1 + this session |
 
 ### Artefacts at this save
 

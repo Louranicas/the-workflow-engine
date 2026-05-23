@@ -6,6 +6,77 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ---
 
+## [v0.2.0-WIP] — 2026-05-23 (S1004377) — Plan v2 Phase 1 (re-baseline + ADR cascade)
+
+v0.2.0 execution opened per Luke @ node 0.A "begin V2" Phase 1 go (D48 execution
+gate fired). Phase 1 is doc-only (decision-free per Plan v2 §3); no source code
+touched. Engine at `v0.1.0` tag (`df00fd2`); tests 2048; clippy + pedantic clean;
+mutation kill-rate 96.3% held.
+
+#### Added (Phase 1)
+
+- **ADR `D-S1002127-03` Amendment 1** (`ai_docs/decisions/2026-05-17-substrate-as-actor-deferrals.md`
+  § 7) — registers **NA-GAP-01 (V1 RefusalToken) + NA-GAP-04 (V2 substrate
+  back-pressure) + NA-GAP-06-drain (C1 m13 outbox drain consumer)** as
+  **now-active v0.2.0 work-items** alongside the original NA-GAP-07/08/10
+  deferrals. Per Phase 2 audit (S1004115) §2 recommendations + Plan v2 §2.5
+  carry-overs. Cascade per C-8 step 2.5: per-phase responsibility (language
+  updates co-located with implementation), not single Phase-1 sweep.
+- **ADR `D-S1004XXX-04` NEW** (`ai_docs/decisions/2026-05-23-refusal-token-authorship-typing.md`)
+  — V1 RefusalToken authorship-typing design spec. 4-variant outer enum
+  (`SubstrateAuthored / EngineAuthored / OperatorAuthored / Unavailable`) per
+  DX-1 lock. 3-variant `Unavailable` sub-tag (`EngineImagined /
+  SubstrateUnreachable / SubstrateAuthored`) per DX-V5.b lock + NA-5
+  recommendation. Call-site classification table for 7 emit-sites. Phase 5
+  co-land with W1 (one wire-contract regen pass per C-2). Phase 7 call-site
+  audit + drain wire. SemVer-break per DX-W.c — v0.1.0 `proposals.jsonl` files
+  do not deserialise; migration note will ship with v0.2.0 § "Changed".
+
+#### Changed (Phase 1)
+
+- **Phase 1 step 3 `mutation-weight` source clarification** — DX-W3.src locked
+  as "variant.mutation count"; FP-verified `WorkflowVariant.mutation: MutationKind`
+  is an enum at `src/m21_variant_builder/mod.rs:47`, not an integer count.
+  Phase 5 W3 will derive weight via a small `mutation_weight_for(kind:
+  MutationKind) -> u32` classifier consuming the MutationKind variant. The
+  D10 metric `step-count × mutation-weight` stands; the source is
+  `variant.mutation` and the classifier is W3's contribution. `grep -rn
+  "mutation_weight" src/` returns one hit — a comment placeholder at
+  `src/orchestration/dispatch.rs:555` ("budget projection (per D10 metric)").
+  No primitive exists yet; Phase 5 W3 authors it.
+- **§2 file:line re-verify (per C-1 fold-in)** — `pub enum RefusalReason`
+  re-verified at `src/m32_dispatcher/mod.rs:228` (Plan v2 §2.1 V1 citation
+  was already corrected from v1 DRAFT's `:163`); `WorkflowVariant.mutation`
+  field confirmed at `src/m21_variant_builder/mod.rs:47`; `MutationKind`
+  variants begin at line `:55` (`Identity / Swap{..} / ...`).
+
+#### Resolved (Phase 1)
+
+- **C-1 (citation drift)** — all §2 file:line anchors re-verified at HEAD.
+- **C-5 (mutation-weight source unverified)** — pinned: variant.mutation
+  (MutationKind enum) → classifier function (Phase 5 W3 authors).
+- **C-8 (ADR amendment cascade)** — Amendment 1 § 7.3 names per-phase
+  responsibility; cascade discipline is co-located with implementation, not
+  swept in Phase 1.
+- **Phase 1 step 7 stcortex genesis memory** — read-back-verified mem **id 18511**
+  in namespace `workflow_trace_v020_s1004377` (already landed at v2
+  ratification persist S1004377; Phase 1 confirms presence + writes a
+  Phase-1-specific follow-up memory).
+
+#### Phase 1 done-evidence (per Plan v2 §15 D43)
+
+- **Gate (4-stage, all green):**
+  - `cargo check --all-targets --all-features` ✅
+  - `cargo clippy --all-targets --all-features -- -D warnings` ✅
+  - `cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic` ✅
+  - `cargo test --all-targets --all-features --release` ✅ **2048 passed / 0 failed / 1 ignored across 38 suites** (matches v0.1.0 baseline; +0 delta)
+- **Test-count delta:** +0 (doc-only phase as expected)
+- **Cargo-mutants:** N/A (no source code change)
+- **stcortex:** Phase 1 progress memory written + read-back-verified — mem **id 18517** in namespace `workflow_trace_v020_s1004377` (parent_ids = [18511]) per Plan v2 §13 + NA-6 discipline
+- **Build warnings (out of Phase 1 scope):** spacetimedb-sdk vendored upstream emits 3 `try_next` deprecation warnings (handed by DX-CI Option A submodule per Plan v2 §15; upstream fix tracked separately); `build.rs` emits 3 expected POVM CR-2 warning lines per `D-S1001982-01` design (POVM_CR2_DEPLOYED env-flag not set; downstream m8 dormant POVM-gate is KEEP-DORMANT per Plan v2 R4)
+
+---
+
 ## [v0.1.0] — 2026-05-23 (S1004115) — M0 / Workflow-Trace Completion Plan v2
 
 Completion Plan v2 (S1004115) — closed all outstanding tasks → v0.1.0 / M0 tag. The plan

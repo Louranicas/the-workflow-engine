@@ -1,19 +1,23 @@
 ---
-title: ADR — substrate-as-actor v0.2.0 deferrals (NA-GAP-07 / NA-GAP-08 / NA-GAP-10)
-date: 2026-05-17
-status: DEFERRED (target v0.2.0)
+title: ADR — substrate-as-actor v0.2.0 deferrals (NA-GAP-07 / NA-GAP-08 / NA-GAP-10) — AMENDED 2026-05-23 to add NA-GAP-01 / NA-GAP-04 / NA-GAP-06-drain
+date: 2026-05-17 (original) · 2026-05-23 (Amendment 1, S1004377)
+status: NOW-ACTIVE (v0.2.0 PLAN v2 RATIFIED S1004377; execution awaiting Luke "start Phase 1")
 adr_id: D-S1002127-03
-authors: Command (Tab 1 Orchestrator top-left), na-gap-analyst (Wave 3 dispatch), na-gap-analyst follow-up (Wave 4.B)
-session: S1002127
-authorising_session: S1002127 Luke "as per proposal" override (NA-GAP-01..11)
-audit_lane: Zen G7 (folded into v3 AUDIT-REQUEST per D-B6 AMEND-loop)
+amendment_history:
+  - 1: 2026-05-23 (S1004377, Plan v2 v0.2.0 §3 Phase 1 step 2) — adds NA-GAP-01 (V1 RefusalToken) + NA-GAP-04 (V2 substrate back-pressure) + NA-GAP-06-drain (C1 m13 outbox drain half) to the v0.2.0 active work-item list per Phase 2 audit (S1004115) §2 recommendations + v0.2.0 Plan v2 §2.5 carry-overs
+authors: Command (Tab 1 Orchestrator top-left), na-gap-analyst (Wave 3 dispatch), na-gap-analyst follow-up (Wave 4.B), Claude @ cortex (Amendment 1 S1004377)
+session: S1002127 (original) · S1004377 (Amendment 1)
+authorising_session: S1002127 Luke "as per proposal" override (NA-GAP-01..11) · S1004377 Luke "begin V2" / Phase 1 go
+audit_lane: Zen G7 (folded into v3 AUDIT-REQUEST per D-B6 AMEND-loop) · Amendment 1 in-session zen agent per D26
 gates_required: none for this ADR (v0.2.0 work item registration)
 supersedes: none
 companion_adrs:
   - 2026-05-17-m42-stcortex-only-pivot.md (D-S1001982-01)
   - 2026-05-17-g8-stcortex-persistence-plan.md (D-S1002127-01)
   - 2026-05-17-escape-surface-cardinality-7-privilege-escalation.md (D-S1002127-02)
-addresses: [NA-GAP-07 (partially — substrate-drift.md covers the cross-cutting half; m16 module deferred), NA-GAP-08 (full defer), NA-GAP-10 (full defer)]
+  - 2026-05-23-refusal-token-authorship-typing.md (D-S1004XXX-04 NEW — V1 design spec; companion to this Amendment 1)
+addresses_original: [NA-GAP-07 (partially — substrate-drift.md covers the cross-cutting half; m16 module deferred), NA-GAP-08 (full defer), NA-GAP-10 (full defer)]
+addresses_amendment_1: [NA-GAP-01 (V1 RefusalToken authorship-typing — full defer to v0.2.0 per Phase 2 audit S1004115 §2 NA-GAP-01 row recommendation), NA-GAP-04 (V2 substrate back-pressure budget — full defer per Phase 2 audit §2 NA-GAP-04 row), NA-GAP-06-drain (C1 m13 outbox drain consumer — full defer per Phase 2 audit §2 NA-GAP-06 partial row + Phase 9 §4 #9; the write half shipped at M0)]
 location_rationale: |
   Filed at ai_docs/decisions/ (NOT ai_docs/optimisation-v7/decisions/) because this ADR
   registers v0.2.0 follow-on work driven by NA gap analysis (substrate-as-actor frame),
@@ -174,6 +178,60 @@ This ADR is accepted when:
 
 ---
 
-> **Back to:** [`../../CLAUDE.md`](../../CLAUDE.md) · [`../../CLAUDE.local.md`](../../CLAUDE.local.md) · [`../../GATE_STATE.md`](../../GATE_STATE.md) · [`../NA_GAP_ANALYSIS_S1002127_SCAFFOLD.md`](../NA_GAP_ANALYSIS_S1002127_SCAFFOLD.md) · [`../../ai_specs/INDEX.md`](../../ai_specs/INDEX.md)
+> **Back to:** [`../../CLAUDE.md`](../../CLAUDE.md) · [`../../CLAUDE.local.md`](../../CLAUDE.local.md) · [`../../GATE_STATE.md`](../../GATE_STATE.md) · [`../NA_GAP_ANALYSIS_S1002127_SCAFFOLD.md`](../NA_GAP_ANALYSIS_S1002127_SCAFFOLD.md) · [`../../ai_specs/INDEX.md`](../../ai_specs/INDEX.md) · Amendment 1 cross-refs [`../WORKFLOW_TRACE_V020_PLAN_V2_S1004377.md`](../WORKFLOW_TRACE_V020_PLAN_V2_S1004377.md) · [`./2026-05-23-refusal-token-authorship-typing.md`](./2026-05-23-refusal-token-authorship-typing.md)
 
 *Filed 2026-05-17 (S1002127 · Wave 4.B closeout) · Command · planning-only · HOLD-v2 compliant · v0.2.0 work-item registration.*
+
+---
+
+## § 7 — AMENDMENT 1 (2026-05-23 · S1004377 · Plan v2 Phase 1 step 2)
+
+Per Plan v2 §3 Phase 1 step 2 + the Phase 2 audit (S1004115) §2 recommendation that the project record "8/11 NA gaps closed" be reframed as "3/8 fully + 2/8 partial naturally completed by Phase 6e/6f + 3/8 explicitly deferred or amended": this amendment registers **NA-GAP-01 (V1 RefusalToken)**, **NA-GAP-04 (V2 substrate back-pressure)**, and **NA-GAP-06-drain (C1 m13 outbox drain consumer)** as **now-active v0.2.0 work-items** alongside the original NA-GAP-07/08/10 deferrals.
+
+### § 7.1 — Work-items added to v0.2.0 active list
+
+| # | Item | Source frame | Plan v2 v0.2.0 anchor | Estimated effort |
+|---|------|--------------|----------------------|------------------|
+| **W4 (Amendment 1)** | NA-GAP-01 V1 `RefusalToken` authorship-typed enum (`SubstrateAuthored / EngineAuthored / OperatorAuthored / Unavailable(EngineImagined \| SubstrateUnreachable \| SubstrateAuthored)`) wired through m9/m32/m13/m40/m41/m42/m33 — replaces flat `RefusalReason` enum at `src/m32_dispatcher/mod.rs:228` | NA frame Phase 2 audit §2 NA-GAP-01 row | v2 §2.1 Tier 1 V1 + Phase 5 co-land with W1 (per C-2) + Phase 7 call-site threading + companion ADR D-S1004XXX-04 | ~150-300 LOC + ~80-150 tests |
+| **W5 (Amendment 1)** | NA-GAP-04 V2 substrate back-pressure budget — per-substrate `SubstrateBackPressureMode` enum (`Push / Pull / Unavailable`) per NA-8 reshape | Substrate frame Phase 2 audit §2 NA-GAP-04 row + v0.2.0 NA-8 | v2 §2.1 Tier 1 V2 + Phase 8 | ~200-400 LOC |
+| **W6 (Amendment 1)** | NA-GAP-06-drain C1 m13 outbox drain consumer (write half shipped at M0 via `m13_stcortex_writer/mod.rs:307–369` `outbox_path` + `outbox_lock`; drain absent) | Substrate frame Phase 2 audit §2 NA-GAP-06 row | v2 §2.5 C1 + Phase 3 staging + Phase 5 wires consumer via V1 RefusalToken-typed events | ~80-120 LOC (Phase 3 staging) + ~50-100 LOC (Phase 5 consumer wire) |
+
+### § 7.2 — Why the amendment now
+
+The Phase 2 audit (S1004115) §2 surfaced that the v0.1.0 closeout's "8 of 11 NA gaps closed" claim was not faithful to the shipped tree:
+
+- **3/8 genuinely code-backed:** NA-GAP-02, NA-GAP-03, NA-GAP-05.
+- **2/8 partial:** NA-GAP-06 (write done, drain absent → C1 in this amendment), NA-GAP-11 (type shipped, trait seam closed in Phase 6e).
+- **3/8 spec-only — claimed absorbed but had zero implementation:** NA-GAP-01 (RefusalToken — now V1 / W4 in this amendment), NA-GAP-04 (substrate back-pressure — now V2 / W5), NA-GAP-09 (CC-5 substrate-confirmable receipt — folded into M0 Phase 6f shipped `WorkflowRefused` + `RefusalReceipt` per CHANGELOG [v0.1.0] § Added).
+
+NA-GAP-09 was closed in M0 via Phase 6f. NA-GAP-01 + NA-GAP-04 + NA-GAP-06-drain remained spec-only at M0; this amendment registers them as **now-active v0.2.0 work-items** rather than letting "8/11 closed" persist as a silent over-claim. NA-GAP-07 / 08 / 10 deferrals from §§ 1.a-c are unchanged.
+
+### § 7.3 — Cascade across deferral-language doc surfaces (per C-8 step 2.5)
+
+Per the v0.2.0 Plan v2 conventional gap analysis C-8 finding, this amendment is a *language change* with downstream consequences. Every doc that references this ADR's deferral language must either update to "now-active v0.2.0 work-item" or add a cross-reference to this Amendment 1:
+
+| Doc | Language update needed | Cascade disposition |
+|-----|------------------------|---------------------|
+| `the-workflow-engine/CHANGELOG.md` `[v0.1.0]` § "Honest residuals — v0.2.0 candidates" | NA-GAP-01 / NA-GAP-04 / NA-GAP-06 still appropriately listed as v0.2.0 candidates (honest residual = v0.2.0 active work-item from M0 vantage) | NO EDIT — language was already "honest residuals" not "deferred indefinitely"; this Amendment 1 simply records that the candidates have been ratified into v0.2.0 active scope |
+| `the-workflow-engine/ai_specs/substrate-couplings/INDEX.md` and per-CC decomposition files (CC-5 / CC-4 / CC-7) | Reference to "this ADR defers" → "this ADR Amendment 1 (2026-05-23) registers as v0.2.0 active" | EDIT in Phase 2 substrate-enumeration audit (covers same surface) |
+| `the-workflow-engine/ai_specs/cross-cutting/refusal-taxonomy.md` | Reference to v0.2.0 RefusalToken as "future work" → "v0.2.0 V1 active per ADR D-S1002127-03 Amendment 1 + companion D-S1004XXX-04" | EDIT in Phase 5 V1 co-land (covers same surface) |
+| `the-workflow-engine/ai_specs/cross-cutting/substrate-drift.md` | NA-GAP-07 m16 module remains deferred per § 1.a (unchanged) | NO EDIT — original deferral still active per DX-V3 = own module Phase 9 |
+| `the-workflow-engine/ai_specs/BENCHMARK_SPEC.md` § "Substrate-side load benchmarks" | NA-GAP-04 reference: "v0.2.0 W2 candidate" → "v0.2.0 V2 active per ADR D-S1002127-03 Amendment 1" | EDIT in Phase 8 V2 implementation (covers same surface) |
+| `the-workflow-engine/ai_specs/modules/cluster-H/m42_stcortex_emit.md` § 5.1 | NA-GAP-06-drain "fire-and-forget contract — outbox consumer can choose..." → cross-reference Phase 3 C1 drain skeleton + Phase 5 V1-typed consumer wire | EDIT in Phase 3 C1 staging (covers same surface) |
+
+**Cascade discipline:** rather than landing a single Phase-1 cascade-sweep commit touching 4+ spec docs, the language updates are co-located with the implementation phases that actually deliver the new substance. This is honest-coupling per CLAUDE.md "Don't add features beyond what the task requires" — Phase 1's job is *registering* the language change; per-phase updates are where the language change materialises.
+
+### § 7.4 — Reversal cost
+
+Low. If a future v0.2.0 cycle decision (e.g., DX-DAW-1 swap to Tier-1-first) re-shapes V1/V2/C1, this amendment is amended-in-place again; the work-item registry is the source of truth, not the language placement.
+
+### § 7.5 — Acceptance discipline (Amendment 1)
+
+This Amendment 1 is accepted when:
+1. ✅ NA-GAP-01 / NA-GAP-04 / NA-GAP-06-drain have explicit v0.2.0 work-item rows in § 7.1 above.
+2. ✅ Companion ADR D-S1004XXX-04 (RefusalToken authorship-typing) is filed at `./2026-05-23-refusal-token-authorship-typing.md`.
+3. ✅ Cascade discipline named in § 7.3 — per-phase responsibility, not single Phase-1 sweep.
+4. ✅ Cross-references in v0.2.0 Plan v2 §2.5 + §2.6 + Phase 1 step 2 already point at this ADR amendment.
+5. ⏳ Phase 1 commit lands carrying this amendment + companion ADR D-S1004XXX-04 + Phase 1 done-evidence per D43.
+
+*Amendment 1 authored 2026-05-23 (S1004377) · Claude @ cortex · Plan v2 Phase 1 step 2 · workflow-trace v0.2.0 execution begin · in-session zen agent audit per D26.*

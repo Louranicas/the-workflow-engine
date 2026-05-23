@@ -11,6 +11,8 @@ authority: Luke @ node 0.A
 
 This vault holds the workflow-engine codebase's artefacts. **The codebase is implemented and the two binaries are real CLI programs** — G9 fired 2026-05-17, HOLD-v2 lifted; 26 modules, ~31k LOC, **1967 tests**, hardened end-to-end by the Hardening Fleet 2026-05-21 and the assessment-driven remediation S1003733 (2026-05-22). `wf-crystallise` and `wf-dispatch` are no longer stubs — both are wired over a new `workflow_core::orchestration` library module (commit `ae7d460`). Older "planning-only / HOLD-v2 / no code / stub binary" language in notes below is **superseded archaeology** — current authority is [[Assessment Remediation S1003733]], [[Hardening Fleet 2026-05-21]], `../CLAUDE.local.md`, `../GATE_STATE.md`, and git history.
 
+**Cross-service integration:** [[synthex-v2 Integration Map]] — workflow-engine ↔ synthex-v2 wire surface (W1 `m40_nexus_emit → POST :8092/v3/nexus/push` LIVE; W3 reverse direction unbuilt with m35k landing path). Cross-vault canonical map lives in the synthex-v2 vault.
+
 ---
 
 ## ✅ Assessment Remediation — S1003733 (2026-05-22) · COMPLETE

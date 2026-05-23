@@ -6,7 +6,118 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ---
 
-## [v0.2.0-WIP] — 2026-05-23/24 (S1004377) — Plan v2 Phase 1 + 2 + 3 + 5 (re-baseline + ADRs + audit + A2/C1 + Tier-2 wire-contracts W4/W1/W3 + A4 SD11 + V1 RefusalToken types)
+## [v0.2.0] — 2026-05-24 (S1004377) — Substrate-safety milestone SHIPPED
+
+Plan v2 v0.2.0 execution complete. All 12 phases shipped across **17
+commits** on `main` (39e71a7 → 69e72ce → this tag commit). **2048
+(v0.1.0 baseline) → 2163 tests (+115; 5.6 % growth)**, clippy +
+pedantic clean per sub-phase, all 4-stage gates green.
+
+### What v0.2.0 certifies (NA-10 + T-3 re-labelled honest sentence)
+
+**Engine-side substrate-participation readiness across 7 substrates**
+(atuin · stcortex · HABITAT-CONDUCTOR · CC-5 loop clocks · Luke +
+Watcher ☤ · RALPH · Cargo build graph) per NA-2 expansion. The engine
+has authorship-typed refusal channels (V1), per-substrate back-pressure
+receivers (V2), a substrate-drift canary (V3 KEYSTONE), substrate
+test fixtures (V4), and substrate-mediated trust hooks (V5) — all
+with the NA-5 audit-distinguishability primary check
+(`is_substrate_imagined_for`) preventing in-engine-receiver-only
+fallbacks from looking substrate-authored.
+
+It does **NOT** certify substrate-side schemas / daemons / consumer-trust
+tables exist in the substrate-side repos — post-v0.2.0 cross-habitat
+coordination per Plan v2 §11 + ADR D-S1004XXX-05.
+
+### Three stacked SemVer-breaks at v0.2.0 wire level
+
+`WorkflowProposal` lifts 6 fields → **12 fields** (W1 escape_surface +
+W3 cost + A4 lineage_chain/generation_index/parent_proposal_id/lift_p95).
+v0.1.0 proposals do NOT deserialise at v0.2.0; re-run `wf-crystallise`
+to regenerate v0.2.0-shape JSONL (no `--migrate` flag).
+
+### Phase commit chain
+
+`39e71a7` Phase 1 · `0023f44` Phase 2 · `b1aea21` Phase 3 A2 · `a4690f2`
+Phase 3 C1 · `9a15213` Phase 5 W4 · `39953df` Phase 5 W1 · `d776671`
+Phase 5 W3 · `a25540e` Phase 5 A4 · `f29dc5d` Phase 5 V1 · `91cbf9c`
+Phase 6 R1+R2+R3 · `b64bcc6` Phase 7 · `16cde46` Phase 8 V2 · `8757e50`
+Phase 9 KEYSTONE V3 m16 + Genesis v1.4 + Zen pair-file · `6ca7ae9`
+Phase 10 V4 fixtures · `77dc65c` Phase 11 V5 + ADR D-S1004XXX-05 ·
+`69e72ce` Phase 12 A1 SD8 Levenshtein + CLAUDE.local.md flip · (this
+tag commit) CHANGELOG [v0.2.0] entry + v0.2.0 tag.
+
+### New surfaces
+
+- 4 new modules: `src/refusal_token/` (V1) · `src/back_pressure/` (V2)
+  · `src/m16_substrate_drift_canary/` (V3 KEYSTONE) ·
+  `src/substrate_trust/` (V5).
+- 1 new test suite: `tests/substrate_fixtures.rs` (V4 catalogue).
+- Wire-contract upgrade: `WorkflowProposal` 6 → 12 fields.
+- Verifier upgrade: m33 R1 Security + R2 Cost + R3 Consistency all real
+  (M0 documented stubs all exited).
+- m22 `FeatureVector` newtype (A2) + `levenshtein_distance` algorithm
+  (A1).
+- m13 `drain_to_refusal_tokens` consumer wire (Phase 7).
+- m30 `BankSnapshot` + `CuratedBank::client_ref()` (W4).
+- 3 ADRs: `D-S1002127-03` Amendment 1 + `D-S1004XXX-04` RefusalToken
+  + `D-S1004XXX-05` SubstrateTrust cross-habitat.
+- Genesis Prompt v1.4 amendment (26 → 27 modules; m16 in Cluster E).
+
+### 21 §15 decisions ratified (S1004377 Phase 4 interview)
+
+DX-DAW-1 Tier-2-first · DX-W.a Retire (iii) · DX-W.b W1 wire-bump ·
+DX-W.c SemVer-break · DX-W3.src `variant.mutation` count · DX-V3
+own-module · DX-V3.b ship N=7d honest residual · DX-V5 full
+cross-habitat · DX-V5.b 3-variant `Unavailable` sub-tag · DX-2
+per-substrate enum · DX-1 4-variant · DX-5 full deterministic replicas
+· DX-A4-coupling Phase 5 · DX-CI Option A submodule · DX-MGB cap 4h ·
+DX-3 retain-prior · DX-4 steps-on-proposal · DX-R3 variant_id-only.
+Stated defaults: DX-Mut hold ≥96.3 % · DX-Soak 48h · DX-1-mech 4-variant.
+
+### Honest residuals → v0.3.0 / post-v0.2.0 (12 items, named not silenced)
+
+1. 65-occurrence `RefusalReason` call-site classification cascade
+2. A1 SD8 spec-compliant invocation (algorithm shipped; hash→steps
+   lookup post-v0.2.0)
+3. V4 detailed per-fixture-per-V1-variant test sweep (catalogue
+   shipped; expansion post-v0.2.0)
+4. V5 CH-1..CH-5 substrate-side primitives (engine consumer shipped;
+   substrate-side at OP-4)
+5. V3 m16 OP-6 Watcher heartbeat liveness assertion wire (closes NA-4)
+6. Production drain consumer wire (capability shipped; production
+   forwarding post-v0.2.0)
+7. V2 per-substrate cadence-modulation wire into m1/m13/m32 throttle
+8. m13 drain APIs `#[allow(dead_code)]` (production consumer post-v0.2.0)
+9. Zen G7 re-audit verdict on Genesis v1.4 (DX-V3.b 7-day cap fires
+   2026-05-31; ship stands per in-plan-locked cap if silent)
+10. DX-CI Option A submodule wire to `.github/workflows/ci.yml` +
+    `.gitlab-ci.yml`
+11. `cargo-mutants` scoped run per DX-Mut ≥96.3 % hold (DX-MGB 4h cap
+    defers)
+12. `wf-dispatch --execute` live-Conductor verification (OP-3
+    post-soak)
+
+### Operator hand-off (Plan v2 §16)
+
+- **OP-1** Conductor bring-up + 24h NoOp soak + flip
+  `CONDUCTOR_ENFORCEMENT_ENABLED=1`
+- **OP-2** directory rename `the-workflow-engine/` → `workflow-trace/`
+- **OP-3** post-v0.2.0 48h DX-Soak substrate soak (Watcher ☤ carries)
+- **OP-4** cross-habitat ADR D-S1004XXX-05 review post-v0.2.0
+  (per-substrate CH-1..CH-5 pair-files)
+- **OP-5** Master Plan v2 / Ember opportunity-cost reopen per Plan v2
+  D46
+- **OP-6** Watcher m16 heartbeat liveness integration (closes V3
+  self-canary loop per NA-4)
+
+### Tagged
+
+`v0.2.0` annotated tag lands at this commit.
+
+---
+
+## [v0.2.0-WIP] — DELETED at v0.2.0 ship (superseded by `[v0.2.0]` above; v0.2.0-WIP rolled forward through Phases 1-12; this tag is the canonical ship record)
 
 ### Phase 5 (2026-05-23/24 S1004377) — Tier 2 wire-contracts + A4 SD11 + V1 types
 

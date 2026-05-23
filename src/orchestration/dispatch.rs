@@ -501,11 +501,35 @@ impl Verifier for EmberVerifier {
     }
 }
 
+// rationale: Plan v2 §15 D9 — Cost verifier is a documented Approve-stub
+// for M0. WorkflowProposal carries no `cost` field on the wire (verified
+// Phase 2 audit, §1 wire-contract); a real Cost verifier would require
+// either a cross-binary wire-contract change (add a cost field with
+// per-step / per-mutation cost-table — ~150–250 LOC) or an out-of-band
+// budget projection (per D10 "step-count × mutation-weight" metric, if
+// ever wired). Per D9 the stub ships at M0; the gate is structurally
+// present (one Verifier per VerifierKind, deterministic Approve), and
+// the substitution to a real verifier is a one-impl change post-M0.
+struct CostVerifier;
+
+impl Verifier for CostVerifier {
+    fn kind(&self) -> VerifierKind {
+        VerifierKind::Cost
+    }
+
+    fn verify(&self, _workflow: &crate::m30_bank::AcceptedWorkflow) -> VerifierVerdict {
+        // Plan v2 §15 D9 — documented Approve-stub for M0; no cost field
+        // exists on the wire (Phase 2 wire-contract audit).
+        VerifierVerdict::Approve
+    }
+}
+
 /// Build the four-verifier set required by [`aggregate`] — exactly one
 /// [`Verifier`] per [`VerifierKind`]. Per Plan v2 § 15:
 /// - **Security** → [`SecurityVerifier`] (D5/D6/D7).
-/// - Consistency → [`ConservativeVerifier`] stub (D11).
-/// - Cost → [`ConservativeVerifier`] stub (D9).
+/// - Consistency → [`ConservativeVerifier`] stub (D11; replaced with a
+///   named [`ConsistencyVerifier`] in Phase 6d).
+/// - **Cost** → [`CostVerifier`] documented stub (D9).
 /// - **Ember** → [`EmberVerifier`] (D13/D14/D15/D16).
 fn build_verifiers(ack_ceiling: EscapeSurfaceProfile) -> Vec<Box<dyn Verifier>> {
     VerifierKind::VARIANTS
@@ -514,9 +538,8 @@ fn build_verifiers(ack_ceiling: EscapeSurfaceProfile) -> Vec<Box<dyn Verifier>> 
             match kind {
                 VerifierKind::Security => Box::new(SecurityVerifier::new(ack_ceiling)),
                 VerifierKind::Ember => Box::new(EmberVerifier),
-                VerifierKind::Consistency | VerifierKind::Cost => {
-                    Box::new(ConservativeVerifier { kind })
-                }
+                VerifierKind::Cost => Box::new(CostVerifier),
+                VerifierKind::Consistency => Box::new(ConservativeVerifier { kind }),
             }
         })
         .collect()
@@ -784,8 +807,8 @@ fn load_proposals(path: &Path) -> Result<Vec<WorkflowProposal>, OrchestrationErr
 mod tests {
     use super::{
         build_verifiers, ember_verdict, parse_args, render_workflow_artefact, security_verdict,
-        ArgError, Config, EmberVerifier, SecurityVerifier, Verifier, VerifierVerdict,
-        DEFAULT_TOP_K,
+        ArgError, Config, CostVerifier, EmberVerifier, SecurityVerifier, Verifier,
+        VerifierVerdict, DEFAULT_TOP_K,
     };
     use crate::m32_dispatcher::EscapeSurfaceProfile;
     use crate::m33_verifier::VerifierKind;
@@ -1065,6 +1088,36 @@ mod tests {
                 panic!("Rejected must map to Amend (D16), NOT Refuse")
             }
             VerifierVerdict::Approve => panic!("Rejected must map to Amend, not Approve"),
+        }
+    }
+
+    // rationale: Phase 6c — D9 Cost verifier is a documented Approve-stub.
+    // Sweep a small variety of synthetic AcceptedWorkflow shapes; every
+    // verdict must be Approve.
+    #[test]
+    fn cost_verifier_is_documented_approve_stub_per_d9() {
+        use crate::m14_lift::LiftSnapshot;
+        use crate::m20_prefixspan::{Pattern, StepToken};
+        use crate::m21_variant_builder::build_variants;
+        use crate::m23_proposer::build_proposal;
+        use crate::m30_bank::AcceptedWorkflow;
+        use std::time::SystemTime;
+
+        let pattern = Pattern::new(vec![StepToken(1), StepToken(2)], 25, (0, 0));
+        let variants = build_variants(&pattern).expect("variants");
+        let snapshot = LiftSnapshot {
+            lift: Some(0.5),
+            ci_half: Some(0.05),
+            n: 25,
+            latest_ts_ms: 0,
+            computed_at: SystemTime::now(),
+        };
+        let verifier = CostVerifier;
+        assert_eq!(verifier.kind(), VerifierKind::Cost);
+        for v in variants {
+            let proposal = build_proposal(v, &snapshot, None).expect("proposal");
+            let wf = AcceptedWorkflow::for_test(7, proposal, 0, i64::MAX, 1.0, None, 0);
+            assert_eq!(verifier.verify(&wf), VerifierVerdict::Approve);
         }
     }
 

@@ -531,13 +531,15 @@ where
     /// Borrow the outbox cursor sidecar path (`<outbox_path>.cursor`).
     ///
     /// C1 NA-GAP-06 drain skeleton (Plan v2 v0.2.0 §3 Phase 3 step 2).
-    /// The cursor sidecar persists the byte-offset already consumed by a
-    /// downstream drain consumer (none in v0.2.0 Phase 3; wired Phase 5
-    /// via V1 `RefusalToken::SubstrateAuthored Stcortex` consumer per
-    /// C-2 + ADR D-S1004XXX-04). When absent, the drain starts at
-    /// byte-offset 0 (read the entire outbox).
+    /// The cursor sidecar persists the byte-offset already consumed by
+    /// the V1 RefusalToken consumer (wired Phase 7 via
+    /// [`drain_to_refusal_tokens`]; ADR D-S1004XXX-04 §1.2 m13 row).
+    /// When absent, the drain starts at byte-offset 0 (read the entire
+    /// outbox).
+    ///
+    /// [`drain_to_refusal_tokens`]: StcortexWriter::drain_to_refusal_tokens
     #[must_use]
-    #[allow(dead_code)] // Phase 5 V1 consumer wires per ADR D-S1004XXX-04 §1.2 m13 row
+    #[allow(dead_code)] // production drain-consumer wire is post-v0.2.0 per §11
     pub(crate) fn outbox_cursor_path(&self) -> PathBuf {
         let mut p = self.outbox_path.clone();
         let mut s = p
@@ -574,7 +576,7 @@ where
     ///
     /// [`commit_drain_cursor`]: StcortexWriter::commit_drain_cursor
     /// [`outbox_cursor_path`]: StcortexWriter::outbox_cursor_path
-    #[allow(dead_code)] // Phase 5 V1 consumer wires per ADR D-S1004XXX-04 §1.2 m13 row
+    #[allow(dead_code)] // production drain-consumer wire is post-v0.2.0 per §11
     pub(crate) fn drain_outbox(&self) -> Result<DrainResult, StcortexWriterError> {
         use std::io::BufRead;
         // Cursor read: absent file == 0 offset (first drain).
@@ -642,7 +644,7 @@ where
     ///
     /// - [`StcortexWriterError::OutboxIo`] if the temp-write or atomic
     ///   rename fails.
-    #[allow(dead_code)] // Phase 5 V1 consumer wires per ADR D-S1004XXX-04 §1.2 m13 row
+    #[allow(dead_code)] // production drain-consumer wire is post-v0.2.0 per §11
     pub(crate) fn commit_drain_cursor(&self, new_cursor: u64) -> Result<(), StcortexWriterError> {
         let cursor_path = self.outbox_cursor_path();
         let mut tmp_path = cursor_path.clone();
@@ -659,6 +661,92 @@ where
         std::fs::rename(&tmp_path, &cursor_path)?;
         Ok(())
     }
+
+    /// Drain the outbox and convert each entry into a V1 `RefusalToken`
+    /// per ADR D-S1004XXX-04 §1.2 m13 row + Plan v2 v0.2.0 §3 Phase 7
+    /// (consumer wire that the Phase 3 C1 skeleton was designed for).
+    ///
+    /// Each deferred entry becomes a [`RefusalToken::SubstrateAuthored`]
+    /// with `substrate_id = SubstrateId::Stcortex` and a
+    /// `substrate_reason` derived from the deferred [`DeferReason`]:
+    /// - `LtpBelowFloor { density }` → `"ltp_below_floor:density={d}"`
+    /// - `OracUnreachable` → `"orac_unreachable"`
+    /// - `StcortexUnreachable` → `"stcortex_unreachable"`
+    ///
+    /// The cursor advances only on successful consumption (per
+    /// [`drain_outbox`]'s at-least-once contract); callers MUST call
+    /// [`commit_drain_cursor`] after persisting / forwarding the tokens
+    /// to honour idempotent-replay semantics.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`drain_outbox`]: [`StcortexWriterError::OutboxIo`] for
+    /// I/O; [`StcortexWriterError::OutboxSerde`] for malformed JSONL.
+    ///
+    /// [`drain_outbox`]: StcortexWriter::drain_outbox
+    /// [`commit_drain_cursor`]: StcortexWriter::commit_drain_cursor
+    #[allow(dead_code)] // production drain-consumer wire is post-v0.2.0 per §11
+    pub(crate) fn drain_to_refusal_tokens(
+        &self,
+    ) -> Result<TokenDrainResult, StcortexWriterError> {
+        let result = self.drain_outbox()?;
+        let tokens: Vec<crate::refusal_token::RefusalToken> = result
+            .entries
+            .iter()
+            .map(outbox_entry_to_refusal_token)
+            .collect();
+        Ok(TokenDrainResult {
+            tokens,
+            new_cursor: result.new_cursor,
+        })
+    }
+}
+
+/// Convert an OutboxEntry to a V1 RefusalToken per ADR D-S1004XXX-04 §1.2
+/// m13 row. Free function so tests can exercise without a live
+/// StcortexWriter.
+#[allow(dead_code)] // production drain-consumer wire is post-v0.2.0 per §11
+fn outbox_entry_to_refusal_token(
+    entry: &OutboxEntry,
+) -> crate::refusal_token::RefusalToken {
+    // Render the reason as a structured string. The reason was serialised
+    // as serde_json::Value at defer time (see defer_to_outbox at L478-488);
+    // we parse the tag-or-string shape here without re-typing.
+    let substrate_reason = if let Some(s) = entry.reason.as_str() {
+        // Tag-only forms: "OracUnreachable" / "StcortexUnreachable" →
+        // snake_case for substrate vocabulary consistency.
+        match s {
+            "OracUnreachable" => "orac_unreachable".to_owned(),
+            "StcortexUnreachable" => "stcortex_unreachable".to_owned(),
+            other => other.to_owned(),
+        }
+    } else if let Some(obj) = entry.reason.as_object() {
+        // Tagged form: {"LtpBelowFloor": {"density": <f64>}}.
+        if let Some(ltp) = obj.get("LtpBelowFloor").and_then(|v| v.get("density")) {
+            format!("ltp_below_floor:density={ltp}")
+        } else {
+            // Defensive fallback: emit the JSON serialised form.
+            entry.reason.to_string()
+        }
+    } else {
+        entry.reason.to_string()
+    };
+    crate::refusal_token::RefusalToken::substrate_authored(
+        crate::refusal_token::SubstrateId::Stcortex,
+        substrate_reason,
+    )
+}
+
+/// Result of [`StcortexWriter::drain_to_refusal_tokens`] — parallel to
+/// [`DrainResult`] but with V1 RefusalToken envelopes instead of raw
+/// OutboxEntries.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // production drain-consumer wire is post-v0.2.0 per §11
+pub(crate) struct TokenDrainResult {
+    /// V1 RefusalToken envelopes (one per drained outbox entry).
+    pub tokens: Vec<crate::refusal_token::RefusalToken>,
+    /// New cursor offset; pass to `commit_drain_cursor` after consuming.
+    pub new_cursor: u64,
 }
 
 /// Outbox entry deserialised from the JSONL stream produced by
@@ -668,7 +756,7 @@ where
 /// Mirrors the on-disk JSONL shape:
 /// `{"ts_ms": <int|null>, "memory": {...}, "reason": {...}, "clock_unavailable": bool?}`
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
-#[allow(dead_code)] // Phase 5 V1 consumer wires per ADR D-S1004XXX-04 §1.2 m13 row
+#[allow(dead_code)] // production drain-consumer wire is post-v0.2.0 per §11
 pub(crate) struct OutboxEntry {
     /// Wall-clock ms at defer-time; `None` when `now_ms()` returned `None`
     /// (clock fault — see write path at L472-499). Paired with
@@ -685,7 +773,7 @@ pub(crate) struct OutboxEntry {
 
 /// Result of [`StcortexWriter::drain_outbox`].
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)] // Phase 5 V1 consumer wires per ADR D-S1004XXX-04 §1.2 m13 row
+#[allow(dead_code)] // production drain-consumer wire is post-v0.2.0 per §11
 pub(crate) struct DrainResult {
     /// Entries read since the last committed cursor.
     pub entries: Vec<OutboxEntry>,
@@ -2077,6 +2165,139 @@ mod tests {
             !tmp_path.exists(),
             "atomic rename should not leave .tmp sidecar"
         );
+    }
+
+    // ========================================================================
+    // Phase 7 V1 drain wire — drain_to_refusal_tokens consumer tests
+    // (Plan v2 v0.2.0 §3 Phase 7 per ADR D-S1004XXX-04 §1.2 m13 row).
+    // ========================================================================
+
+    #[test]
+    fn drain_to_refusal_tokens_empty_outbox_returns_no_tokens() {
+        let w = writer(Some(0.20), false); // density above floor: no defers
+        let result = w.drain_to_refusal_tokens().expect("drain");
+        assert!(result.tokens.is_empty(), "no tokens when no outbox");
+    }
+
+    #[test]
+    fn drain_to_refusal_tokens_emits_substrate_authored_stcortex_per_entry() {
+        use crate::refusal_token::{RefusalToken, SubstrateId};
+
+        let w = writer(Some(0.001), false); // below floor: defers LtpBelowFloor
+        for _ in 0..3 {
+            let _ = w.promote_run(&run(), &canonical_ns()).expect("promote");
+        }
+        let result = w.drain_to_refusal_tokens().expect("drain");
+        assert_eq!(result.tokens.len(), 3, "3 deferred → 3 tokens");
+        for token in &result.tokens {
+            match token {
+                RefusalToken::SubstrateAuthored {
+                    substrate_id,
+                    substrate_reason,
+                    payload,
+                } => {
+                    assert_eq!(*substrate_id, SubstrateId::Stcortex);
+                    assert!(
+                        substrate_reason.starts_with("ltp_below_floor:density="),
+                        "expected ltp_below_floor reason; got {substrate_reason}"
+                    );
+                    assert!(payload.is_none(), "no payload at this drain depth");
+                }
+                other => panic!("expected SubstrateAuthored Stcortex; got {other:?}"),
+            }
+            assert!(token.is_substrate_authored());
+            assert!(!token.is_engine_imagined());
+            assert_eq!(token.substrate_id(), Some(SubstrateId::Stcortex));
+        }
+    }
+
+    #[test]
+    fn drain_to_refusal_tokens_handles_orac_unreachable_reason() {
+        use crate::refusal_token::RefusalToken;
+
+        // density=None forces OracUnreachable defer (per m13 LTP gate
+        // branch in defer_to_outbox).
+        let w = writer(None, false);
+        let _ = w.promote_run(&run(), &canonical_ns()).expect("promote");
+        let result = w.drain_to_refusal_tokens().expect("drain");
+        assert_eq!(result.tokens.len(), 1);
+        match &result.tokens[0] {
+            RefusalToken::SubstrateAuthored {
+                substrate_reason, ..
+            } => {
+                assert_eq!(substrate_reason, "orac_unreachable");
+            }
+            other => panic!("expected SubstrateAuthored; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn drain_to_refusal_tokens_replay_safe_when_cursor_not_committed() {
+        // Same idempotent-replay contract as drain_outbox: re-call
+        // without commit returns the same tokens.
+        let w = writer(Some(0.001), false);
+        let _ = w.promote_run(&run(), &canonical_ns()).expect("promote");
+        let _ = w.promote_run(&run(), &canonical_ns()).expect("promote");
+        let first = w.drain_to_refusal_tokens().expect("first");
+        let second = w.drain_to_refusal_tokens().expect("second");
+        assert_eq!(first.tokens.len(), second.tokens.len());
+        assert_eq!(first.new_cursor, second.new_cursor);
+        for (a, b) in first.tokens.iter().zip(second.tokens.iter()) {
+            assert_eq!(a, b, "replay tokens identical when cursor not committed");
+        }
+    }
+
+    #[test]
+    fn outbox_entry_to_refusal_token_renders_each_defer_reason_shape() {
+        use super::{outbox_entry_to_refusal_token, OutboxEntry};
+        use crate::refusal_token::{RefusalToken, SubstrateId};
+
+        let make = |reason_json: serde_json::Value| -> OutboxEntry {
+            let entry_json = serde_json::json!({
+                "ts_ms": 1_700_000_000_000_u64,
+                "memory": {
+                    "namespace": "workflow_trace_test",
+                    "memory_type": "semantic",
+                    "content": "{}",
+                    "relevance": 0.5_f32,
+                    "session_id": "S1",
+                    "source_tag": "m13",
+                    "tensor": null,
+                    "under_pressure": false,
+                },
+                "reason": reason_json,
+            });
+            serde_json::from_value(entry_json).expect("deser OutboxEntry")
+        };
+        // 1) LtpBelowFloor with density payload.
+        let e1 = make(serde_json::json!({"LtpBelowFloor": {"density": 0.001}}));
+        match outbox_entry_to_refusal_token(&e1) {
+            RefusalToken::SubstrateAuthored {
+                substrate_id,
+                substrate_reason,
+                ..
+            } => {
+                assert_eq!(substrate_id, SubstrateId::Stcortex);
+                assert_eq!(substrate_reason, "ltp_below_floor:density=0.001");
+            }
+            other => panic!("got {other:?}"),
+        }
+        // 2) OracUnreachable bare-tag.
+        let e2 = make(serde_json::json!("OracUnreachable"));
+        match outbox_entry_to_refusal_token(&e2) {
+            RefusalToken::SubstrateAuthored {
+                substrate_reason, ..
+            } => assert_eq!(substrate_reason, "orac_unreachable"),
+            other => panic!("got {other:?}"),
+        }
+        // 3) StcortexUnreachable bare-tag.
+        let e3 = make(serde_json::json!("StcortexUnreachable"));
+        match outbox_entry_to_refusal_token(&e3) {
+            RefusalToken::SubstrateAuthored {
+                substrate_reason, ..
+            } => assert_eq!(substrate_reason, "stcortex_unreachable"),
+            other => panic!("got {other:?}"),
+        }
     }
 
     #[test]

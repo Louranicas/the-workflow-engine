@@ -17,7 +17,7 @@
 | **T4-AP30** | OPEN — m42 anti-property grep misses child modules | **CLOSED** — m42 has only `mod.rs` (no child modules). `tests/m42_integration.rs:270` `m42_no_8125_port_literal_in_m42_source` covers the full surface | `ls src/m42_stcortex_emit/` + test |
 | **T4-LIB (chrono_now_ms)** | OPEN — unused outside module | **CLOSED** — `src/lib.rs:166` re-exports & consumes | `lib.rs:166` |
 | **m20 max_length=0 silent-coerce** | OPEN | **CLOSED** — `src/m20_prefixspan/mod.rs:199` returns `MinerError::MaxLengthZero` | `m20_prefixspan/mod.rs:171–200` |
-| **MUT-1** | OPEN — m11 `\|\|`→`&&` survivor in half-life guard | **CLOSED** — explicit NaN-half-life test path documented at `inputs.rs:215–234` (the discriminating input for `\|\|` vs `&&` mutation) | `inputs.rs:215–234` |
+| **MUT-1** | OPEN — m11 `\|\|`→`&&` survivor in half-life guard | **CLOSED** — explicit NaN-half-life test path documented at `src/m11_fitness_weighted_decay/inputs.rs:215–234` (the discriminating input for `\|\|` vs `&&` mutation) | `src/m11_fitness_weighted_decay/inputs.rs:215–234` |
 | **T4-SERDE** | CLOSED Wave-C1 | **CLOSED** (re-confirmed) | `CHANGELOG.md` |
 | **H9-rem** | OPEN (m12/m21/m22/m31 integration files missing) | **CLOSED** — 26/26 module integration coverage complete (Wave-D1 → Hardening-Fleet) | `tests/m*_integration.rs` |
 | **H8-rem CC-2 / CC-5** | OPEN | **CLOSED** Wave-D2 | `tests/cc*` |

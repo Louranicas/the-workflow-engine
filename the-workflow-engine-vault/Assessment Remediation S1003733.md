@@ -87,20 +87,24 @@ exercising `run()` against temp-SQLite fixtures in offline/dry-run mode. clippy 
 Post-remediation mutation verification (`cargo-mutants`, frozen tree) surfaced 15 surviving
 mutants. Wave G resolved all 15 — **honestly, not by inflation**:
 
-- **6 KILLED** by 3 new discriminating-input tests:
+- **5 KILLED** by 3 new discriminating-input tests:
   - m11 `consolidation.rs:335` (`< → <=`) — exact-prune-threshold-boundary test.
   - m22 `kmeans_plus_plus_seed:238` (`delete -`) — unary-minus seed-selection freeze test.
   - m22 `kmeans_plus_plus_seed:303` (`> → >=` / `> → ==` / `> → <`, ×3) — FNV-tiebreak
     resolution test sweeping both tiebreak branches.
-- **9 PROVEN EQUIVALENT** — all m21 `build_variants` loop-condition mutants. The Wave-D+
-  iteration-cap defense-in-depth (independent `MAX_LOOP_ITERATIONS` break + redundant
-  per-push `out.len()` guard) renders these mutations **output-equivalent**. Each line
+- **10 PROVEN EQUIVALENT** — 9 m21 `build_variants` loop-condition mutants (Wave-D+
+  iteration-cap defense-in-depth: independent `MAX_LOOP_ITERATIONS` break + redundant
+  per-push `out.len()` guard render these mutations **output-equivalent**) + 1 m22
+  `kmeans_plus_plus_seed:310` mutant (FNV-collision-required — only the (unreachable
+  for this input space) bit-identical FNV collision case could discriminate). Each line
   carries a `// mutant-equivalent:` proof comment in source. Not fake-killed — proven.
 
-The verified post-remediation mutation run (S1003733, frozen tree `@0cc7be3`): **324 mutants
-— 254 caught / 15 missed / 0 timeout / 55 unviable → 94.4 % kill rate** (254 of 269 viable).
-The S1003733 iteration-cap fix eliminated all 20 prior m21 `build_variants` *timeout* mutants
-(now scored; 0 timeout). After Wave G the 15 survivors are resolved: 6 killed + 9 proven-equivalent.
+The **final verified post-remediation mutation run** (S1003733, post-Wave-G + C22,
+frozen tree `@ce0d77b`): **324 mutants — 259 caught / 10 missed / 0 timeout / 55 unviable
+→ 96.3 % kill rate** (259 of 269 viable). The S1003733 iteration-cap fix eliminated all
+20 prior m21 `build_variants` *timeout* mutants (now scored; 0 timeout). After Wave G
+the 15 W4-close survivors are resolved: 5 killed + 10 proven-equivalent. *(W4 close
+was 254 / 94.4 % at `@0cc7be3` — superseded by Wave G + C22.)*
 
 ---
 
@@ -114,7 +118,7 @@ The S1003733 iteration-cap fix eliminated all 20 prior m21 `build_variants` *tim
 | **Documentation integrity** | W4 mutation over-claim ("412 mutants / 80.6%") not artifact-backed; "W4 in progress / 1835 tests" doc-drift; stale m11 comment | Corrected to artifact-backed numbers; charter + both `CLAUDE.local.md` reconciled; stale comment removed. |
 | **Synergy wiring** | CC-4 diversity cluster hardcoded `None`; CC-5 pathway id was a bare decimal | CC-4 threads the real m22 cluster index through `compose_proposals`; CC-5 uses canonical namespaced `workflow_pathway_id()`. |
 | **Structure / hygiene** | m32/m22 oversized modules; m13 duplicated test helpers; stale `GOLD_STANDARDS.md` rule | Test blocks extracted to `tests.rs` siblings; helpers deduplicated; `GOLD_STANDARDS.md` newtype convention added + stale "no cargo build" rule fixed. |
-| **Test rigour** | mutation kill-rate unverified post-remediation; binary `main()` seam unexercised | 94.4 % verified kill-rate; Wave G resolved all 15 survivors; C22 added 43 tests exercising the lib↔binary seam — **1967 total**. |
+| **Test rigour** | mutation kill-rate unverified post-remediation; binary `main()` seam unexercised | **96.3 % verified kill-rate** (post-Wave-G + S1003733-final; W4 close was 94.4 %); Wave G resolved all 15 W4-close survivors (5 killed + 10 proven-equivalent); C22 added 43 tests exercising the lib↔binary seam — **1967 total**. |
 
 ---
 
@@ -209,8 +213,10 @@ runs end-to-end. A down service never panics or aborts the run.
 ```bash
 cd /home/louranicas/claude-code-workspace/the-workflow-engine
 cargo mutants --in-place 2>&1 | tail -20   # scoped to m10/m11/m21/m22 per W4 config
-# Verified S1003733: 324 mutants — 254 caught / 15 missed / 0 timeout / 55 unviable
-# (94.4% kill rate). After Wave G: 6 of the 15 killed, 9 proven-equivalent.
+# Final verified S1003733 (post-Wave-G + C22, frozen tree @ce0d77b):
+# 324 mutants — 259 caught / 10 missed / 0 timeout / 55 unviable (96.3% kill rate).
+# After Wave G: 5 of the 15 W4-close survivors killed, 10 proven-equivalent
+# (9 m21 build_variants + 1 m22 kmeans_plus_plus_seed:310 FNV-collision).
 ```
 
 ### Git anchor

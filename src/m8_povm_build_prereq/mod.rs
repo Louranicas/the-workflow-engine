@@ -59,6 +59,36 @@ mod tests {
         assert_eq!(classify(0.10), BandClassification::InBand);
     }
 
+    // rationale: v0.1.1 R4 — M0 invariant lock for the KEEP-DORMANT
+    // architectural decision (S1003733, Plan v2 §15 R4 + ADR
+    // D-S1002127-01 m42 stcortex-only pivot).
+    //
+    // m8 is the floor of Cluster D's trust regime, but workflow-trace
+    // routes substrate feedback to stcortex only — there are ZERO POVM
+    // read sites in `src/`. The `build.rs` `rustc-cfg=povm_calibrated`
+    // flag is emitted ONLY when `POVM_CR2_DEPLOYED=1` is set in the
+    // build env. At M0 the cfg is OFF, the gate is dormant, and there
+    // is nothing for it to protect.
+    //
+    // This test fails LOUDLY if someone sets `POVM_CR2_DEPLOYED=1`
+    // without ratifying the re-introduction of a POVM coupling. If a
+    // POVM read site is ever re-introduced in workflow-trace, the
+    // ratification must update this assertion AND the m8 module
+    // docstring's KEEP-DORMANT block.
+    #[test]
+    fn m0_dormant_invariant_povm_calibrated_cfg_is_off() {
+        let calibrated = cfg!(povm_calibrated);
+        assert!(
+            !calibrated,
+            "M0 invariant breach: `povm_calibrated` cfg is ON. Per S1003733 \
+             KEEP-DORMANT (Plan v2 §15 R4) + ADR D-S1002127-01 (m42 stcortex-\
+             only pivot), m8's POVM gate is dormant — workflow-trace has zero \
+             POVM read sites. Either unset POVM_CR2_DEPLOYED in the build env, \
+             OR ratify POVM re-introduction by amending the m8 module docstring \
+             KEEP-DORMANT block and updating this assertion."
+        );
+    }
+
     #[test]
     fn reexports_band_constants() {
         // Constants must match the Hebbian v3 Phase 1 reconciliation thresholds

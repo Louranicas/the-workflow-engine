@@ -266,6 +266,70 @@ fn crystallise_writes_proposals_jsonl_that_reparses() {
     }
 }
 
+// rationale: v0.1.1 R3 — m22 K-means CLI batch-path distribution test.
+// The Phase 5 test below proves that ≥ 1 proposal carries Some(cluster);
+// R3 strengthens the contract to: across a multi-proposal batch on the
+// seeded fixture, the kmeans output distributes proposals across
+// MULTIPLE distinct cluster indices (≥ 2 when the recommended `k`
+// permits). This locks the "real kmeans is running, not collapsing to
+// one cluster" invariant per § 15 D17–D20 (5-dim feature vector +
+// adaptive k + diversity_cluster emitted).
+//
+// Honest fallback: if the fixture happens to yield a variant count
+// where `recommended_k_for_variant_count(n) == 1`, this test accepts
+// 1 distinct cluster (the degenerate-but-correct k=1 path). The
+// fixture in practice produces enough variants for k ≥ 2.
+#[test]
+fn crystallise_proposals_distribute_across_multiple_m22_clusters() {
+    use std::collections::HashSet;
+    use workflow_core::m7_workflow_runs::{insert_run, open_database};
+
+    let fx = Fixture::new();
+    {
+        let conn = open_database(&fx.runs_db).expect("open runs db");
+        for i in 0..25 {
+            insert_run(&conn, &format!("seed-{i}")).expect("seed run");
+        }
+    }
+    let report = run(&fx.offline_config()).expect("offline run");
+    assert!(
+        report.proposals_written >= 4,
+        "R3 needs ≥4 proposals to assert distribution; got {}",
+        report.proposals_written
+    );
+    let contents = fs::read_to_string(&fx.proposals_out).expect("read proposals");
+    let proposals: Vec<WorkflowProposal> = contents
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("proposal reparse"))
+        .collect();
+    let clusters: HashSet<usize> = proposals
+        .iter()
+        .filter_map(workflow_core::m23_proposer::WorkflowProposal::diversity_cluster)
+        .collect();
+    let recommended_k =
+        workflow_core::m22_kmeans::recommended_k_for_variant_count(proposals.len());
+    // If recommended_k allows ≥2 buckets AND we have ≥4 proposals, we
+    // expect ≥2 distinct clusters. Otherwise the degenerate k=1 case
+    // is the honest correct answer.
+    if recommended_k >= 2 {
+        assert!(
+            clusters.len() >= 2,
+            "recommended_k={recommended_k} on {} proposals — kmeans must distribute \
+             across ≥2 cluster indices, got {} distinct: {:?}",
+            proposals.len(),
+            clusters.len(),
+            clusters,
+        );
+    } else {
+        assert_eq!(
+            clusters.len(),
+            1,
+            "recommended_k=1 — exactly one cluster index expected, got {clusters:?}"
+        );
+    }
+}
+
 #[test]
 fn crystallise_proposals_carry_non_none_m22_diversity_cluster() {
     // rationale: R2 (Plan v2 §15 D17–D20) — verifies the m22 K-means wiring

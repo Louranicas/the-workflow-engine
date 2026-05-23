@@ -11,6 +11,81 @@
 
 ---
 
+## 🟢 v0.1.1 + v0.2.0 PREP — Post-M0 round (S1004115 continuation, 2026-05-23)
+
+> **Cold-start anchor:** if you are a fresh Claude context window resuming this project,
+> read THIS section FIRST. It supersedes the "v0.1.0 / M0 SHIPPED" block below as the
+> live state delta; that block remains the canonical M0 ship record.
+
+**Latest HEAD:** `7d16c2c` (v0.2.0 prep). v0.1.0 tag remains at `df00fd2`.
+
+### v0.1.1 hygiene round — CLOSED (4 commits on `main`, both remotes)
+
+| Task | Commit | Subject |
+|------|--------|---------|
+| T10 | `0f0ca8c` | T4-DEAD-ERR m5 BatternError 2 construction tests (W2/W3 already covered other ~13 variants; CLOSED) |
+| T11 | `a7c697f` | SD A/B spec doc amendments — 4 spec files (m9 m14 m15 m20) banner-amended pointing at PHASE9 reconciliation (D27 fold) |
+| T12+T13 | `d62ba80` | R3 m22 K-means CLI batch-path distribution test + R4 m8 KEEP-DORMANT cfg invariant lock test |
+| T14+T15+T16 | `0787ea6` | Hygiene batch — 15 stale worktrees removed; `target-mutants/` trashed + gitignored; Watcher journals git-rm-cached + gitignored (Zen Phase-1 hygiene-asymptotic CLOSED) |
+
+### v0.2.0 prep — CLOSED (1 commit on `main`, both remotes)
+
+| Task | Commit | Subject |
+|------|--------|---------|
+| T17 | `7d16c2c` | `ai_docs/WORKFLOW_TRACE_V020_PLAN_STUB_S1004115.md` (scope catalogue — 5 tiers; awaits node-0.A "start v0.2.0 planning" per §15 D40 invocation-only cadence) |
+| T18 | `7d16c2c` | Phase 5 zen A2 m31 caller wire — `diversity_score_from_proposal` consumes `proposal.diversity_cluster()` in `wf-dispatch::run`; behavioural-loop **CLOSED** |
+| T19 | `7d16c2c` | CI `spacetimedb-sdk` concrete recipe in `.github/workflows/ci.yml` + `.gitlab-ci.yml` (Options A submodule / B vendor / C crates.io); pinned upstream `fbec2761abbf65b90673130835c4cab6c016924c` |
+
+### State-at-save snapshot
+
+- **Tests:** 2048 passing, 0 failures (38 suites)
+- **Mutation kill-rate:** 96.3 % held (baseline `2096fd0`; not re-measured this round since no `src/m20-m23` / m9-m11 touch since `2096fd0`)
+- **Clippy:** default + pedantic clean
+- **Working tree:** clean (only `.obsidian/workspace.json` UI churn — discard each session)
+- **Cron jobs:** none (CronList = no scheduled jobs; v0.1.0 ship cancelled `dc3d06c8`)
+
+### Still STANDING for node 0.A (irreducibly Luke-only)
+
+| ID | Item | Why agent cannot close |
+|----|------|------------------------|
+| **OP-1** | Conductor bring-up + 24h NoOp soak + flip `CONDUCTOR_ENFORCEMENT_ENABLED=1` | `devenv start` forbidden per CLAUDE.md (sandbox reaps children) |
+| **OP-2** | Directory rename `the-workflow-engine/` → `workflow-trace/` (§15 D32) | Too cross-Habitat for safe agent execution (touches `~/projects/claude_code/` vault, every CLAUDE.md table across services) |
+| **v0.2.0** | Substrate-safety milestone full ratification (NA-GAP-01/04/07/08/10 + Tier-2 wire-contract + Tier-3 real verifiers + Tier-4 SD8/9/10/11) | Per §15 D40 invocation-only cadence; needs a v0.2.0 plan with own decision interview |
+
+### 4-surface persistence at this save
+
+| Surface | Anchor |
+|---------|--------|
+| ai_docs canonical | `ai_docs/WORKFLOW_TRACE_V020_PLAN_STUB_S1004115.md` + Plan v2 + PHASE 1/2/8/9 docs |
+| Obsidian vault | [`the-workflow-engine-vault/Session S1004115 — v0.1.1 + v0.2.0 Prep Save.md`](the-workflow-engine-vault/Session%20S1004115%20—%20v0.1.1%20+%20v0.2.0%20Prep%20Save.md) (NEW this save) + earlier Plan v2 + Hardening Fleet + Assessment Remediation vault notes |
+| stcortex | ns `workflow_trace_completion_s1004115` — **mem 18473** (this save) + 18442 (M0 ship) + 18383 (interview-locked) + 18376 (genesis); bidi pathway to `workflow_trace_hardening_2026_05_21` (mems 17939 + 18410) |
+| CLAUDE.local.md | this file (project session-state delta) — this block + § "v0.1.0 / M0 SHIPPED" below + earlier S1003733 + Plan v2 sections |
+| CHANGELOG | [`CHANGELOG.md`](CHANGELOG.md) `[v0.1.0]` entry (canonical release record) |
+| injection.db tracking | causal_chain id **116** `workflow_trace_v011_hygiene_plus_v020_prep_s1004115` (NEW this save) |
+| git tag | `v0.1.0` annotated at `df00fd2` |
+
+### Cold-start sequence for a fresh Claude window
+
+```bash
+cd /home/louranicas/claude-code-workspace/the-workflow-engine
+# 1. Read THIS section + the v0.1.0 / M0 block below
+$EDITOR CLAUDE.local.md
+# 2. Read the v0.2.0 scope catalogue (for next-milestone authorization)
+$EDITOR ai_docs/WORKFLOW_TRACE_V020_PLAN_STUB_S1004115.md
+# 3. Read the vault save note for state-at-save snapshot
+$EDITOR "the-workflow-engine-vault/Session S1004115 — v0.1.1 + v0.2.0 Prep Save.md"
+# 4. Read the CHANGELOG v0.1.0 honest residuals
+$EDITOR CHANGELOG.md
+# 5. Verify substrate
+~/.local/bin/stcortex inspect workflow_trace_completion_s1004115 --limit 5
+sqlite3 ~/.local/share/habitat/injection.db "SELECT id, label, resolved_session FROM causal_chain WHERE label LIKE 'workflow_trace%' ORDER BY id DESC LIMIT 5"
+# 6. Verify git anchor
+git log --oneline -1                # expected: 7d16c2c v0.2.0 prep
+git status -s -- .                  # expected: empty (only `.obsidian/workspace.json` UI churn)
+```
+
+---
+
 ## 🏷 v0.1.0 / M0 SHIPPED — Workflow-Trace Completion Plan v2 (S1004115, 2026-05-23)
 
 **Status:** **`v0.1.0` tagged** on `main` (final M0 ship per Plan v2 §3 Phase 10). All ten phases

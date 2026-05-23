@@ -219,6 +219,22 @@ pub struct Report {
     pub candidates: Vec<CandidateOutcome>,
     /// `true` once the pipeline reached the end without aborting.
     pub completed: bool,
+    /// Phase 6f — substrate-confirmable verdict receipts EMITTED on the
+    /// `workflow.refused` NexusEvent kind (one per blocking verdict in the
+    /// m33 gate's `Blocked.per_verifier` list). Counts only receipts
+    /// successfully *pushed* to synthex-v2; an unreachable nexus is
+    /// recorded in `nexus_refusal_emit_failures` instead.
+    ///
+    /// **Honesty boundary:** the receipt makes the refusal substrate-visible
+    /// (engine-legibility). It is NOT substrate-mediated trust — see the
+    /// docstring on [`crate::m40_nexus_emit::NexusEventKind::WorkflowRefused`].
+    pub refusal_receipts_emitted: usize,
+    /// Phase 6f — count of `workflow.refused` emit attempts that failed
+    /// (synthex-v2 unreachable, transport fault, 4xx/5xx). Tracked so the
+    /// operator can see — at the report level — that a refusal happened
+    /// AND that the substrate did not see it (a transient nexus outage
+    /// does not silently swallow the receipt).
+    pub nexus_refusal_emit_failures: usize,
 }
 
 impl Report {
@@ -233,6 +249,8 @@ impl Report {
             dry_run,
             candidates: Vec::new(),
             completed: false,
+            refusal_receipts_emitted: 0,
+            nexus_refusal_emit_failures: 0,
         }
     }
 }
@@ -254,6 +272,16 @@ impl fmt::Display for Report {
         )?;
         writeln!(f, "  verifier approved          : {}", self.verifier_approved)?;
         writeln!(f, "  dispatched                 : {}", self.dispatched)?;
+        writeln!(
+            f,
+            "  refusal receipts emitted   : {}",
+            self.refusal_receipts_emitted
+        )?;
+        writeln!(
+            f,
+            "  refusal emit failures      : {}",
+            self.nexus_refusal_emit_failures
+        )?;
         for c in &self.candidates {
             writeln!(
                 f,
@@ -689,6 +717,16 @@ pub fn run(config: &Config) -> Result<Report, OrchestrationError> {
     let http_client = HttpConductorClient::new(&config.conductor_url, CONDUCTOR_TIMEOUT);
     let dispatcher = ConductorDispatcher::new(http_client);
 
+    // Phase 6f — substrate-confirmable verdict receipt sink. The sink is
+    // a real `HttpNexusClient` (same pattern as `crystallise::emit_nexus_completion`)
+    // — an unreachable synthex-v2 degrades into a logged failure on the
+    // report, never a panic. The sink is constructed once per `run()` to
+    // amortise the reqwest client cost across multiple refusals.
+    let refusal_sink = crate::m40_nexus_emit::HttpNexusClient::new(
+        crate::m40_nexus_emit::DEFAULT_NEXUS_URL,
+        crate::m40_nexus_emit::DEFAULT_PUSH_TIMEOUT,
+    );
+
     for candidate in &candidates {
         let workflow = match bank.get(candidate.workflow_id) {
             Ok(w) => w,
@@ -700,12 +738,23 @@ pub fn run(config: &Config) -> Result<Report, OrchestrationError> {
         // m33 — run the 4-verifier gate.
         let verifier_refs: Vec<&dyn Verifier> =
             verifiers.iter().map(std::convert::AsRef::as_ref).collect();
-        let approved = matches!(
-            aggregate(&verifier_refs, &workflow),
-            Ok(AggregateVerdict::AllApprove)
-        );
+        let verdict = aggregate(&verifier_refs, &workflow);
+        let approved = matches!(verdict, Ok(AggregateVerdict::AllApprove));
         if approved {
             report.verifier_approved += 1;
+        } else if let Ok(AggregateVerdict::Blocked { ref per_verifier }) = verdict {
+            // Phase 6f — D8 + NA-GAP-09: emit one substrate-confirmable
+            // receipt per blocking verdict. This makes the refusal
+            // engine-legible to synthex-v2 (the substrate SEES the refusal
+            // and which verifier blocked it). It is NOT substrate-mediated
+            // trust — see the docstring on
+            // `crate::m40_nexus_emit::NexusEventKind::WorkflowRefused`.
+            emit_refusal_receipts(
+                &refusal_sink,
+                workflow.workflow_id(),
+                per_verifier,
+                &mut report,
+            );
         }
         let disposition = if !approved {
             "verifier-blocked".to_owned()
@@ -768,6 +817,82 @@ fn dispatch_one(
                 "m32 dispatch caller fault"
             );
             "refused".to_owned()
+        }
+    }
+}
+
+/// Phase 6f — emit one substrate-confirmable verdict receipt per blocking
+/// verdict in the m33 aggregate's `Blocked.per_verifier` list.
+///
+/// **What this does:** for every `(VerifierKind, VerifierVerdict)` pair
+/// whose verdict is `Refuse` or `Amend`, build a [`RefusalReceipt`] payload,
+/// wrap it in a `workflow.refused` [`NexusEvent`], and push it to synthex-v2
+/// via the supplied [`NexusClient`]. Bumps
+/// [`Report::refusal_receipts_emitted`] on each successful push and
+/// [`Report::nexus_refusal_emit_failures`] on each transport / non-2xx /
+/// body-shape rejection. `Approve` entries are filtered out at the
+/// per-verifier loop (they are not refusals; the substrate only learns
+/// from blocking verdicts in this phase).
+///
+/// **What this does NOT do (Phase 6f honesty boundary):** emitting a receipt
+/// is *engine-legibility* — the substrate (synthex-v2) SEES that the m33
+/// gate blocked a dispatch and which verifier blocked it. It is NOT
+/// substrate-mediated trust: the substrate is an observer of m33 outcomes,
+/// not a participant in the verification itself. Substrate-as-actor
+/// (NA-GAP-10) remains deferred to v0.2.0 per ADR D-S1002127-03 — there is
+/// no callback from synthex-v2 into the m33 gate, no veto, no consensus.
+///
+/// **Graceful degradation:** an unreachable synthex-v2 surfaces as a
+/// [`crate::m40_nexus_emit::NexusEmitError`] from `NexusClient::push`,
+/// which the helper folds into a `nexus_refusal_emit_failures` bump + a
+/// `tracing::warn!`. The pipeline NEVER aborts on a refusal-emit failure
+/// — the m33 verdict already blocked the dispatch internally, so a
+/// nexus-blind operator still gets the correct engine behaviour. The
+/// failure count surfaces in the report so the operator can SEE the
+/// substrate was not notified.
+fn emit_refusal_receipts<C: crate::m40_nexus_emit::NexusClient>(
+    sink: &C,
+    workflow_id: u64,
+    per_verifier: &[(VerifierKind, VerifierVerdict)],
+    report: &mut Report,
+) {
+    let ts_ms = chrono_now_ms().unwrap_or(0);
+    for (verifier_kind, verdict) in per_verifier {
+        let (verdict_kind, reason) = match verdict {
+            VerifierVerdict::Approve => continue, // not a refusal — skip.
+            VerifierVerdict::Refuse { reason } => ("refuse", reason.clone()),
+            VerifierVerdict::Amend { request } => ("amend", request.clone()),
+        };
+        let receipt = crate::m40_nexus_emit::RefusalReceipt {
+            workflow_id,
+            verifier_kind: verifier_kind.as_str().to_owned(),
+            verdict_kind: verdict_kind.to_owned(),
+            reason,
+        };
+        let event =
+            crate::m40_nexus_emit::build_refusal_event("wf-dispatch", &receipt, ts_ms);
+        match sink.push(&event) {
+            Ok(()) => {
+                report.refusal_receipts_emitted += 1;
+                tracing::info!(
+                    target: "wf_dispatch",
+                    workflow_id,
+                    verifier = verifier_kind.as_str(),
+                    verdict = verdict_kind,
+                    "m40 refusal receipt pushed to synthex-v2"
+                );
+            }
+            Err(e) => {
+                report.nexus_refusal_emit_failures += 1;
+                tracing::warn!(
+                    target: "wf_dispatch",
+                    workflow_id,
+                    verifier = verifier_kind.as_str(),
+                    verdict = verdict_kind,
+                    error = %e,
+                    "m40 refusal receipt emit failed — substrate did not see this refusal (engine behaviour unchanged)"
+                );
+            }
         }
     }
 }
@@ -1194,5 +1319,279 @@ mod tests {
             VerifierVerdict::Approve,
             "default technical artefact must pass m10's 7-trait rubric"
         );
+    }
+
+    // ====================================================================
+    // Phase 6f — substrate-confirmable verdict receipts (D8 + NA-GAP-09).
+    // Categories: Determinism · Anti-property · Boundary · Cross-module.
+    // Exercises the `emit_refusal_receipts` helper against an in-memory
+    // recording `NexusClient` (test isolation; no synthex-v2 contacted).
+    // ====================================================================
+
+    use crate::m40_nexus_emit::{
+        NexusClient, NexusEmitError, NexusEvent, NexusEventKind,
+    };
+
+    /// Recording NexusClient — captures every pushed event in memory.
+    /// Used by the Phase 6f tests below to assert on the substrate-visible
+    /// receipts without contacting a live synthex-v2.
+    struct RecordingNexusSink {
+        events: std::sync::Mutex<Vec<NexusEvent>>,
+    }
+
+    impl RecordingNexusSink {
+        fn new() -> Self {
+            Self {
+                events: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+        fn into_events(self) -> Vec<NexusEvent> {
+            self.events.into_inner().expect("poisoned")
+        }
+    }
+
+    impl NexusClient for RecordingNexusSink {
+        fn push(&self, event: &NexusEvent) -> Result<(), NexusEmitError> {
+            self.events.lock().expect("poisoned").push(event.clone());
+            Ok(())
+        }
+    }
+
+    /// Failing sink — every push returns a typed transport error. Used to
+    /// pin the "substrate did not see this refusal" failure-accounting
+    /// path on the report.
+    struct FailingNexusSink;
+    impl NexusClient for FailingNexusSink {
+        fn push(&self, _event: &NexusEvent) -> Result<(), NexusEmitError> {
+            Err(NexusEmitError::Transport("unreachable".into()))
+        }
+    }
+
+    fn new_test_report() -> super::Report {
+        super::Report::empty(true)
+    }
+
+    // rationale: Determinism — for a `Blocked` verdict with one `Refuse`
+    // entry, emit_refusal_receipts MUST push exactly one event, kind
+    // `workflow.refused`, carrying the canonical receipt payload.
+    #[test]
+    fn emit_refusal_receipts_pushes_one_event_per_refuse_verdict() {
+        // rationale: Determinism (one-event-per-blocking-verdict)
+        let sink = RecordingNexusSink::new();
+        let per_verifier = vec![(
+            VerifierKind::Security,
+            VerifierVerdict::Refuse {
+                reason: "AP30 ceiling exceeded".into(),
+            },
+        )];
+        let mut report = new_test_report();
+        super::emit_refusal_receipts(&sink, 42, &per_verifier, &mut report);
+        assert_eq!(report.refusal_receipts_emitted, 1);
+        assert_eq!(report.nexus_refusal_emit_failures, 0);
+        let events = sink.into_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, NexusEventKind::WorkflowRefused);
+        assert_eq!(events[0].source, "wf-dispatch");
+        assert_eq!(events[0].payload["workflow_id"].as_u64(), Some(42));
+        assert_eq!(events[0].payload["verifier_kind"].as_str(), Some("security"));
+        assert_eq!(events[0].payload["verdict_kind"].as_str(), Some("refuse"));
+        assert_eq!(
+            events[0].payload["reason"].as_str(),
+            Some("AP30 ceiling exceeded")
+        );
+    }
+
+    // rationale: Determinism — an `Amend` verdict is the second documented
+    // blocking class. Pin the same shape with verdict_kind = "amend" and
+    // the request text carried in `reason`.
+    #[test]
+    fn emit_refusal_receipts_pushes_amend_with_request_text_as_reason() {
+        // rationale: Determinism (amend → request → reason field)
+        let sink = RecordingNexusSink::new();
+        let per_verifier = vec![(
+            VerifierKind::Ember,
+            VerifierVerdict::Amend {
+                request: "soften the imperative phrasing".into(),
+            },
+        )];
+        let mut report = new_test_report();
+        super::emit_refusal_receipts(&sink, 9, &per_verifier, &mut report);
+        let events = sink.into_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].payload["verifier_kind"].as_str(), Some("ember"));
+        assert_eq!(events[0].payload["verdict_kind"].as_str(), Some("amend"));
+        assert_eq!(
+            events[0].payload["reason"].as_str(),
+            Some("soften the imperative phrasing")
+        );
+    }
+
+    // rationale: Anti-property — an `Approve` verdict in the per_verifier
+    // list is NOT a refusal; it MUST NOT be emitted as a `workflow.refused`
+    // receipt. Pins the filter-on-blocking invariant.
+    #[test]
+    fn emit_refusal_receipts_skips_approve_entries() {
+        // rationale: Anti-property (filter Approve at the per-verifier loop)
+        let sink = RecordingNexusSink::new();
+        let per_verifier = vec![
+            (
+                VerifierKind::Security,
+                VerifierVerdict::Refuse {
+                    reason: "blocked".into(),
+                },
+            ),
+            (VerifierKind::Cost, VerifierVerdict::Approve),
+            (
+                VerifierKind::Ember,
+                VerifierVerdict::Amend {
+                    request: "tweak".into(),
+                },
+            ),
+            (VerifierKind::Consistency, VerifierVerdict::Approve),
+        ];
+        let mut report = new_test_report();
+        super::emit_refusal_receipts(&sink, 7, &per_verifier, &mut report);
+        // 2 refusals (1 Refuse + 1 Amend), 2 Approves filtered.
+        assert_eq!(report.refusal_receipts_emitted, 2);
+        let events = sink.into_events();
+        assert_eq!(events.len(), 2);
+        let verifier_kinds: Vec<_> = events
+            .iter()
+            .map(|e| e.payload["verifier_kind"].as_str().unwrap().to_owned())
+            .collect();
+        assert!(verifier_kinds.contains(&"security".to_owned()));
+        assert!(verifier_kinds.contains(&"ember".to_owned()));
+        assert!(!verifier_kinds.contains(&"cost".to_owned()));
+        assert!(!verifier_kinds.contains(&"consistency".to_owned()));
+    }
+
+    // rationale: Anti-property — every blocking entry produces its own
+    // event (no merging across verifiers). Pins the one-receipt-per-blocking-
+    // verdict invariant — the substrate sees granular per-verifier signals,
+    // not a single aggregated "blocked" line.
+    #[test]
+    fn emit_refusal_receipts_emits_one_event_per_blocking_verdict() {
+        // rationale: Anti-property (no merging across verifiers)
+        let sink = RecordingNexusSink::new();
+        let per_verifier = vec![
+            (
+                VerifierKind::Security,
+                VerifierVerdict::Refuse {
+                    reason: "A".into(),
+                },
+            ),
+            (
+                VerifierKind::Consistency,
+                VerifierVerdict::Refuse {
+                    reason: "B".into(),
+                },
+            ),
+            (
+                VerifierKind::Cost,
+                VerifierVerdict::Amend {
+                    request: "C".into(),
+                },
+            ),
+            (
+                VerifierKind::Ember,
+                VerifierVerdict::Refuse {
+                    reason: "D".into(),
+                },
+            ),
+        ];
+        let mut report = new_test_report();
+        super::emit_refusal_receipts(&sink, 1, &per_verifier, &mut report);
+        assert_eq!(report.refusal_receipts_emitted, 4);
+        let events = sink.into_events();
+        assert_eq!(events.len(), 4);
+    }
+
+    // rationale: Boundary — when the synthex-v2 nexus is unreachable, the
+    // emit MUST NOT abort the pipeline; the failure surfaces on the report
+    // (`nexus_refusal_emit_failures`) and via tracing — engine behaviour
+    // is unchanged.
+    #[test]
+    fn emit_refusal_receipts_records_failure_on_unreachable_sink() {
+        // rationale: Boundary (graceful degradation accounting)
+        let sink = FailingNexusSink;
+        let per_verifier = vec![(
+            VerifierKind::Security,
+            VerifierVerdict::Refuse {
+                reason: "blocked".into(),
+            },
+        )];
+        let mut report = new_test_report();
+        super::emit_refusal_receipts(&sink, 42, &per_verifier, &mut report);
+        assert_eq!(report.refusal_receipts_emitted, 0);
+        assert_eq!(report.nexus_refusal_emit_failures, 1);
+    }
+
+    // rationale: Cross-module — the verifier_kind string emitted on the
+    // wire MUST match VerifierKind::as_str() for every variant. Drift here
+    // is a substrate-contract break (synthex-v2 indexes on these labels).
+    #[test]
+    fn emit_refusal_receipts_verifier_kind_strings_match_as_str() {
+        // rationale: Cross-module (verifier-kind label parity)
+        for kind in VerifierKind::VARIANTS {
+            let sink = RecordingNexusSink::new();
+            let per_verifier = vec![(
+                kind,
+                VerifierVerdict::Refuse {
+                    reason: "test".into(),
+                },
+            )];
+            let mut report = new_test_report();
+            super::emit_refusal_receipts(&sink, 0, &per_verifier, &mut report);
+            let events = sink.into_events();
+            assert_eq!(events.len(), 1, "expected 1 event for {kind:?}");
+            assert_eq!(
+                events[0].payload["verifier_kind"].as_str(),
+                Some(kind.as_str()),
+                "verifier_kind wire-label drift for {kind:?}"
+            );
+        }
+    }
+
+    // rationale: Boundary — an empty `per_verifier` list (defensively
+    // impossible — the m33 aggregator only constructs `Blocked` when at
+    // least one verifier blocks — but worth pinning) emits zero events
+    // and zero failures.
+    #[test]
+    fn emit_refusal_receipts_handles_empty_per_verifier_list() {
+        // rationale: Boundary (empty list = no-op)
+        let sink = RecordingNexusSink::new();
+        let per_verifier: Vec<(VerifierKind, VerifierVerdict)> = Vec::new();
+        let mut report = new_test_report();
+        super::emit_refusal_receipts(&sink, 42, &per_verifier, &mut report);
+        assert_eq!(report.refusal_receipts_emitted, 0);
+        assert_eq!(report.nexus_refusal_emit_failures, 0);
+        assert!(sink.into_events().is_empty());
+    }
+
+    // rationale: Boundary — Report::empty initialises both Phase 6f
+    // counters to zero. Drift detection if a future refactor changes the
+    // default semantics.
+    #[test]
+    fn report_empty_initialises_phase_6f_counters_to_zero() {
+        // rationale: Boundary (default-state pin)
+        let r = super::Report::empty(true);
+        assert_eq!(r.refusal_receipts_emitted, 0);
+        assert_eq!(r.nexus_refusal_emit_failures, 0);
+    }
+
+    // rationale: Cross-module — Report Display includes both Phase 6f
+    // counters; an operator reading the printed report SEES the receipt
+    // accounting line by line.
+    #[test]
+    fn report_display_includes_phase_6f_counters() {
+        // rationale: Cross-module (operator-facing report surface)
+        let mut r = super::Report::empty(true);
+        r.refusal_receipts_emitted = 3;
+        r.nexus_refusal_emit_failures = 1;
+        let s = r.to_string();
+        assert!(s.contains("refusal receipts emitted"));
+        assert!(s.contains("refusal emit failures"));
+        assert!(s.contains(": 3"));
+        assert!(s.contains(": 1"));
     }
 }

@@ -45,6 +45,27 @@ pub enum NexusEventKind {
     /// A workflow ran to completion (wire form: `workflow.completed`).
     #[serde(rename = "workflow.completed")]
     WorkflowCompleted,
+    /// A workflow was blocked by the m33 4-verifier gate — at least one
+    /// verifier returned `Refuse` or `Amend` (wire form: `workflow.refused`).
+    ///
+    /// **Phase 6f — substrate-confirmable verdict receipts (D8 + NA-GAP-09).**
+    ///
+    /// The wire form is the single dotted string `workflow.refused` for both
+    /// `Refuse` and `Amend` verdicts: the *kind tag* (`refuse` / `amend`) is
+    /// carried inside the [`NexusEvent::payload`] rather than the closed-enum
+    /// wire vocabulary. This keeps the `kind` cardinality at 3 (one per
+    /// outcome class — dispatched / completed / refused) while preserving the
+    /// per-verdict distinction the substrate needs to learn from.
+    ///
+    /// **Honest boundary (re-stated at the emit call-site in dispatch.rs):**
+    /// emitting this event makes the refusal *substrate-visible* — synthex-v2
+    /// can SEE that a dispatch was blocked and which verifier blocked it.
+    /// That is engine-legibility, not substrate-mediated trust: the substrate
+    /// is not yet a participant in the m33 verification, only an observer of
+    /// its outcomes. Substrate-as-actor (NA-GAP-10) remains deferred to
+    /// v0.2.0 per ADR D-S1002127-03.
+    #[serde(rename = "workflow.refused")]
+    WorkflowRefused,
 }
 
 /// A typed NexusEvent payload.
@@ -221,13 +242,88 @@ pub fn build_event(
     }
 }
 
+/// Refusal-receipt payload — the per-verdict body emitted by the m33 gate
+/// when a verifier returns `Refuse` or `Amend`.
+///
+/// **Phase 6f — substrate-confirmable verdict receipts (D8 + NA-GAP-09).**
+///
+/// The closed-enum `kind` on the wire is `workflow.refused` for *both*
+/// outcome classes; the [`RefusalReceipt::verdict_kind`] tag distinguishes
+/// them inside the payload. The keys are pinned (snake_case) so synthex-v2's
+/// `/v3/nexus/push` handler can filter without re-deriving them.
+///
+/// # Honesty boundary (mirrors the module doc on [`NexusEventKind::WorkflowRefused`])
+///
+/// Emitting this receipt makes the refusal substrate-visible. It is
+/// *engine-legibility*, not substrate-mediated trust: the substrate is an
+/// observer of m33 outcomes, not a participant in m33. Substrate-as-actor
+/// remains deferred (NA-GAP-10 / ADR D-S1002127-03).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RefusalReceipt {
+    /// Workflow identity (opaque u64 from m30 `AcceptedWorkflow::workflow_id`).
+    pub workflow_id: u64,
+    /// Which verifier produced the verdict — snake_case wire form
+    /// (`security` / `consistency` / `cost` / `ember`).
+    pub verifier_kind: String,
+    /// Verdict class — `refuse` or `amend`. `approve` is NEVER emitted as a
+    /// receipt (the gate only emits on blocking verdicts).
+    pub verdict_kind: String,
+    /// Operator-readable reason (the verifier's `Refuse{reason}` or
+    /// `Amend{request}` free-text payload).
+    pub reason: String,
+}
+
+/// Build a `workflow.refused` NexusEvent from a single blocking verdict.
+///
+/// Use this at the m33 aggregate site (one event per blocking verdict in the
+/// `AggregateVerdict::Blocked.per_verifier` list). An `Approve` verdict is
+/// rejected at the type layer: the function signature takes the
+/// [`RefusalReceipt`] payload directly, which only models `refuse` / `amend`.
+///
+/// The resulting [`NexusEvent`] carries:
+///
+/// - `source` — the binary name (e.g. `"wf-dispatch"`),
+/// - `kind` — [`NexusEventKind::WorkflowRefused`] (wire: `workflow.refused`),
+/// - `payload` — the [`RefusalReceipt`] serialised as a JSON object with the
+///   pinned keys `workflow_id` / `verifier_kind` / `verdict_kind` / `reason`,
+/// - `ts_ms` — caller-supplied wall-clock millis (or 0 on a clock fault, per
+///   the m40 fire-and-forget contract — see `chrono_now_ms` in m11 / m13 for
+///   the strict `Option<i64>` discipline used on writes; the wire emit is
+///   advisory and tolerates a sentinel).
+#[must_use]
+pub fn build_refusal_event(
+    source: impl Into<String>,
+    receipt: &RefusalReceipt,
+    ts_ms: i64,
+) -> NexusEvent {
+    let payload = serde_json::to_value(receipt).unwrap_or_else(|_| {
+        // serialising a fixed-shape struct of String / u64 fields cannot
+        // fail in practice; if it ever does, fall back to a structurally
+        // equivalent JSON object so the substrate still sees the refusal
+        // (the alternative — silently dropping the event — is exactly the
+        // NA-GAP-09 condition this primitive exists to close).
+        serde_json::json!({
+            "workflow_id": receipt.workflow_id,
+            "verifier_kind": receipt.verifier_kind,
+            "verdict_kind": receipt.verdict_kind,
+            "reason": receipt.reason,
+        })
+    });
+    NexusEvent {
+        source: source.into(),
+        kind: NexusEventKind::WorkflowRefused,
+        payload,
+        ts_ms,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
 
     use super::{
-        build_event, NexusClient, NexusEmitError, NexusEvent, NexusEventKind,
-        DEFAULT_NEXUS_URL, DEFAULT_PUSH_TIMEOUT,
+        build_event, build_refusal_event, NexusClient, NexusEmitError, NexusEvent,
+        NexusEventKind, RefusalReceipt, DEFAULT_NEXUS_URL, DEFAULT_PUSH_TIMEOUT,
     };
 
     #[test]
@@ -471,10 +567,13 @@ mod tests {
     // a wire-contract break against synthex-v2's /v3/nexus/push handler.
     #[test]
     fn nexus_event_kind_wire_form_stable() {
-        // rationale: Contract regression (closed-enum wire form round-trip)
+        // rationale: Contract regression (closed-enum wire form round-trip).
+        // Phase 6f added `WorkflowRefused` → `workflow.refused` for
+        // substrate-confirmable verdict receipts (D8 + NA-GAP-09).
         for (variant, wire) in [
             (NexusEventKind::WorkflowDispatched, "workflow.dispatched"),
             (NexusEventKind::WorkflowCompleted, "workflow.completed"),
+            (NexusEventKind::WorkflowRefused, "workflow.refused"),
         ] {
             // Serialize: variant -> exact dotted wire string.
             let json = serde_json::to_string(&variant).expect("ser kind");
@@ -1755,5 +1854,173 @@ mod tests {
             matches!(r, Err(NexusEmitError::Transport(_))),
             "size cap must reject before body-shape parse, got {r:?}"
         );
+    }
+
+    // ====================================================================
+    // Phase 6f — substrate-confirmable verdict receipts (D8 + NA-GAP-09).
+    // Categories: Contract regression · Determinism · Anti-property · Boundary.
+    // ====================================================================
+
+    // rationale: Contract regression — `WorkflowRefused` MUST serialise to
+    // the exact dotted string `workflow.refused`. A rename drift is a
+    // wire-contract break against synthex-v2's `/v3/nexus/push` handler.
+    #[test]
+    fn workflow_refused_kind_wire_form_pinned() {
+        // rationale: Contract regression (Phase 6f closed-enum wire pin)
+        let s =
+            serde_json::to_string(&NexusEventKind::WorkflowRefused).expect("ser");
+        assert_eq!(s, "\"workflow.refused\"");
+        let back: NexusEventKind =
+            serde_json::from_str("\"workflow.refused\"").expect("de");
+        assert_eq!(back, NexusEventKind::WorkflowRefused);
+    }
+
+    // rationale: Contract regression — `RefusalReceipt` JSON shape MUST
+    // remain exactly {workflow_id, verifier_kind, verdict_kind, reason}.
+    // Adding / renaming / removing a field is a contract break that
+    // propagates to synthex-v2 and any downstream consumer.
+    #[test]
+    fn refusal_receipt_json_shape_snapshot() {
+        // rationale: Contract regression (RefusalReceipt schema snapshot)
+        let r = RefusalReceipt {
+            workflow_id: 42,
+            verifier_kind: "security".into(),
+            verdict_kind: "refuse".into(),
+            reason: "AP30 ceiling exceeded".into(),
+        };
+        let v = serde_json::to_value(&r).expect("ser");
+        let obj = v.as_object().expect("object");
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["reason", "verdict_kind", "verifier_kind", "workflow_id"],
+            "RefusalReceipt JSON shape drift — substrate contract break"
+        );
+        assert_eq!(obj["workflow_id"].as_u64(), Some(42));
+        assert_eq!(obj["verifier_kind"].as_str(), Some("security"));
+        assert_eq!(obj["verdict_kind"].as_str(), Some("refuse"));
+        assert_eq!(obj["reason"].as_str(), Some("AP30 ceiling exceeded"));
+    }
+
+    // rationale: Determinism — `build_refusal_event` must produce a fully
+    // valid `NexusEvent` carrying the canonical kind + the receipt as the
+    // payload, and round-trip through serde unchanged.
+    #[test]
+    fn build_refusal_event_produces_canonical_event_and_round_trips() {
+        // rationale: Determinism (Phase 6f builder identity)
+        let receipt = RefusalReceipt {
+            workflow_id: 7,
+            verifier_kind: "ember".into(),
+            verdict_kind: "amend".into(),
+            reason: "wording: drop the imperative".into(),
+        };
+        let e = build_refusal_event("wf-dispatch", &receipt, 1_700_000_000_000);
+        assert_eq!(e.kind, NexusEventKind::WorkflowRefused);
+        assert_eq!(e.source, "wf-dispatch");
+        assert_eq!(e.ts_ms, 1_700_000_000_000);
+        // Payload carries the four canonical keys verbatim.
+        assert_eq!(e.payload["workflow_id"].as_u64(), Some(7));
+        assert_eq!(e.payload["verifier_kind"].as_str(), Some("ember"));
+        assert_eq!(e.payload["verdict_kind"].as_str(), Some("amend"));
+        assert_eq!(
+            e.payload["reason"].as_str(),
+            Some("wording: drop the imperative")
+        );
+        // Wire round-trip is stable.
+        let s = serde_json::to_string(&e).expect("ser");
+        assert!(s.contains("\"kind\":\"workflow.refused\""));
+        let back: NexusEvent = serde_json::from_str(&s).expect("de");
+        assert_eq!(back, e);
+    }
+
+    // rationale: Anti-property — the Refused payload's `verdict_kind` is
+    // free-form String (so callers can add future variants without a
+    // contract break), but the documented production values are EXACTLY
+    // `refuse` / `amend`. Pin both round-trips through `build_refusal_event`.
+    #[test]
+    fn build_refusal_event_accepts_both_documented_verdict_kinds() {
+        // rationale: Anti-property (verdict-kind tag wire pin)
+        for verdict in ["refuse", "amend"] {
+            let r = RefusalReceipt {
+                workflow_id: 1,
+                verifier_kind: "cost".into(),
+                verdict_kind: verdict.into(),
+                reason: format!("{verdict}-tag"),
+            };
+            let e = build_refusal_event("wf-dispatch", &r, 0);
+            assert_eq!(e.payload["verdict_kind"].as_str(), Some(verdict));
+        }
+    }
+
+    // rationale: Determinism — `build_refusal_event` accepts both `&str`
+    // and `String` for `source` (impl Into<String>); both produce equal
+    // events.
+    #[test]
+    fn build_refusal_event_source_arg_string_or_str_equivalent() {
+        // rationale: Determinism (constructor identity for source arg)
+        let r = RefusalReceipt {
+            workflow_id: 1,
+            verifier_kind: "consistency".into(),
+            verdict_kind: "refuse".into(),
+            reason: "duplicate of bank entry 0".into(),
+        };
+        let from_str = build_refusal_event("wf-dispatch", &r, 0);
+        let from_string = build_refusal_event(String::from("wf-dispatch"), &r, 0);
+        assert_eq!(from_str, from_string);
+    }
+
+    // rationale: Boundary — a 200 OK end-to-end push of a refusal event
+    // exercises the wire-form against an HTTP mock, proving the new kind
+    // does not break the canonical happy-path branch in `HttpNexusClient`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_succeeds_for_refusal_event_against_mock() {
+        // rationale: Boundary (Phase 6f end-to-end happy-path)
+        use wiremock::matchers::{body_string_contains, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/nexus/push"))
+            .and(body_string_contains("workflow.refused"))
+            .and(body_string_contains("verifier_kind"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v3/nexus/push", server.uri());
+        let r = tokio::task::spawn_blocking(move || {
+            let c = super::HttpNexusClient::new(url, std::time::Duration::from_secs(2));
+            let receipt = RefusalReceipt {
+                workflow_id: 9,
+                verifier_kind: "security".into(),
+                verdict_kind: "refuse".into(),
+                reason: "EscapeSurfaceProfile exceeded ack ceiling".into(),
+            };
+            let e = build_refusal_event("wf-dispatch", &receipt, 1_700_000_000_000);
+            c.push(&e)
+        })
+        .await
+        .expect("join");
+        assert!(r.is_ok(), "refusal-event push must succeed against 200 OK, got {r:?}");
+    }
+
+    // rationale: Determinism — `RefusalReceipt` Clone is a deep copy; the
+    // strings of a clone are independent of the original. Pins that no
+    // future Cow-ification silently shares storage with the source.
+    #[test]
+    fn refusal_receipt_clone_is_independent() {
+        // rationale: Determinism (deep clone)
+        let r = RefusalReceipt {
+            workflow_id: 1,
+            verifier_kind: "ember".into(),
+            verdict_kind: "amend".into(),
+            reason: "lowercase the directive".into(),
+        };
+        let mut c = r.clone();
+        c.verifier_kind = "consistency".into();
+        assert_eq!(r.verifier_kind, "ember");
+        assert_eq!(c.verifier_kind, "consistency");
     }
 }

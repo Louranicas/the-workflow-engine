@@ -417,22 +417,106 @@ impl Verifier for SecurityVerifier {
     }
 }
 
+// rationale: Plan v2 §15 D13–D16 — Ember verifier. Scores a rendered
+// proposal-artefact text against m10's 7-trait rubric (D15 reuses m10
+// machinery) and maps the rubric verdict per D16:
+//
+// - [`EmberStatus::Approved`] → [`VerifierVerdict::Approve`].
+// - [`EmberStatus::Held`] (confidence < 0.5) → [`VerifierVerdict::Amend`]
+//   — D16: below-bar verdict is Amend, NOT Refuse, so an operator can
+//   address the rubric note and re-attempt without a hard-block.
+// - [`EmberStatus::Rejected`] (confidence >= 0.5) → [`VerifierVerdict::Amend`]
+//   — same D16 mapping. Rubric Rejected is a quality-bar finding, not a
+//   security finding; m33 Security owns the hard-Refuse pathway.
+//
+// The "reduced M0 subset" of D13 (clarity + safe-naming + ambiguity) is
+// satisfied by reusing m10's full 7-trait rubric as-is (D15 "reuses
+// m10's Ember CI machinery where it fits"); the Day-1 proposal artefact
+// surface — a short technical summary — exercises only the
+// urgency/honesty/humility traits in practice. As future workflow
+// surfaces gain narrative content, the remaining traits start firing
+// without further wiring.
+struct EmberVerifier;
+
+/// Render the m33 Ember verifier's input — a short, deterministic
+/// human-readable summary of the workflow's proposal. Format is intentionally
+/// terse and operational; this is what the m10 rubric scores against.
+fn render_workflow_artefact(workflow: &crate::m30_bank::AcceptedWorkflow) -> String {
+    let proposal = workflow.proposal();
+    let variant = proposal.variant();
+    let mutation_kind = match variant.mutation {
+        crate::m21_variant_builder::MutationKind::Identity => "identity",
+        crate::m21_variant_builder::MutationKind::Swap { .. } => "swap",
+        crate::m21_variant_builder::MutationKind::Skip { .. } => "skip",
+    };
+    let cluster_repr = proposal
+        .diversity_cluster()
+        .map_or_else(|| "none".to_owned(), |c| c.to_string());
+    format!(
+        "Proposed workflow: id={id}, steps={steps}, mutation={mutation_kind}, \
+         evidence_n={n}, evidence_lift={lift:.4}, ci_half={ci:.4}, cluster={cluster_repr}",
+        id = proposal.proposal_id(),
+        steps = variant.steps.len(),
+        n = proposal.evidence_n(),
+        lift = proposal.evidence_lift(),
+        ci = proposal.evidence_ci_half(),
+    )
+}
+
+/// Map an m10 rubric verdict to the m33 Ember verifier verdict per D16.
+/// Extracted as a free fn so the mapping is tested independently of
+/// fixture construction.
+fn ember_verdict(status: crate::m10_ember_ci_gate::EmberStatus) -> VerifierVerdict {
+    match status {
+        crate::m10_ember_ci_gate::EmberStatus::Approved => VerifierVerdict::Approve,
+        crate::m10_ember_ci_gate::EmberStatus::Held {
+            trait_name,
+            reason,
+            confidence,
+        } => VerifierVerdict::Amend {
+            request: format!(
+                "Ember rubric Held on trait {trait_name:?} (confidence {confidence:.2}): \
+                 {reason}; m33 Ember below-bar Amend per Plan v2 §15 D16"
+            ),
+        },
+        crate::m10_ember_ci_gate::EmberStatus::Rejected { trait_name, reason } => {
+            VerifierVerdict::Amend {
+                request: format!(
+                    "Ember rubric Rejected on trait {trait_name:?}: {reason}; \
+                     m33 Ember below-bar Amend per Plan v2 §15 D16"
+                ),
+            }
+        }
+    }
+}
+
+impl Verifier for EmberVerifier {
+    fn kind(&self) -> VerifierKind {
+        VerifierKind::Ember
+    }
+
+    fn verify(&self, workflow: &crate::m30_bank::AcceptedWorkflow) -> VerifierVerdict {
+        let artefact = render_workflow_artefact(workflow);
+        ember_verdict(crate::m10_ember_ci_gate::score_against_rubric(&artefact))
+    }
+}
+
 /// Build the four-verifier set required by [`aggregate`] — exactly one
 /// [`Verifier`] per [`VerifierKind`]. Per Plan v2 § 15:
 /// - **Security** → [`SecurityVerifier`] (D5/D6/D7).
 /// - Consistency → [`ConservativeVerifier`] stub (D11).
 /// - Cost → [`ConservativeVerifier`] stub (D9).
-/// - Ember → [`ConservativeVerifier`] stub (D13; replaced with a real
-///   rubric-scoring verifier in Phase 6b).
+/// - **Ember** → [`EmberVerifier`] (D13/D14/D15/D16).
 fn build_verifiers(ack_ceiling: EscapeSurfaceProfile) -> Vec<Box<dyn Verifier>> {
     VerifierKind::VARIANTS
         .iter()
         .map(|&kind| -> Box<dyn Verifier> {
             match kind {
                 VerifierKind::Security => Box::new(SecurityVerifier::new(ack_ceiling)),
-                VerifierKind::Consistency
-                | VerifierKind::Cost
-                | VerifierKind::Ember => Box::new(ConservativeVerifier { kind }),
+                VerifierKind::Ember => Box::new(EmberVerifier),
+                VerifierKind::Consistency | VerifierKind::Cost => {
+                    Box::new(ConservativeVerifier { kind })
+                }
             }
         })
         .collect()
@@ -699,8 +783,9 @@ fn load_proposals(path: &Path) -> Result<Vec<WorkflowProposal>, OrchestrationErr
 #[cfg(test)]
 mod tests {
     use super::{
-        build_verifiers, parse_args, security_verdict, ArgError, Config, SecurityVerifier,
-        Verifier, VerifierVerdict, DEFAULT_TOP_K,
+        build_verifiers, ember_verdict, parse_args, render_workflow_artefact, security_verdict,
+        ArgError, Config, EmberVerifier, SecurityVerifier, Verifier, VerifierVerdict,
+        DEFAULT_TOP_K,
     };
     use crate::m32_dispatcher::EscapeSurfaceProfile;
     use crate::m33_verifier::VerifierKind;
@@ -929,5 +1014,101 @@ mod tests {
             assert_eq!(v.ack_ceiling(), p);
             assert_eq!(v.kind(), VerifierKind::Security);
         }
+    }
+
+    // rationale: Phase 6b — D16 verdict mapping. EmberStatus::Approved
+    // maps to VerifierVerdict::Approve.
+    #[test]
+    fn ember_verdict_approved_maps_to_approve() {
+        let v = ember_verdict(crate::m10_ember_ci_gate::EmberStatus::Approved);
+        assert_eq!(v, VerifierVerdict::Approve);
+    }
+
+    // rationale: Phase 6b — D16 verdict mapping. EmberStatus::Held
+    // (below-bar, confidence < 0.5) maps to VerifierVerdict::Amend (NOT
+    // Refuse — Refuse is reserved for m33 Security per D5).
+    #[test]
+    fn ember_verdict_held_maps_to_amend_with_d16_reference() {
+        let v = ember_verdict(crate::m10_ember_ci_gate::EmberStatus::Held {
+            trait_name: crate::m10_ember_ci_gate::TraitName::Equanimity,
+            reason: "test reason".to_owned(),
+            confidence: 0.3,
+        });
+        match v {
+            VerifierVerdict::Amend { request } => {
+                assert!(request.contains("Held"), "must name Held: {request}");
+                assert!(request.contains("Equanimity"), "must name trait: {request}");
+                assert!(request.contains("D16"), "must reference D16: {request}");
+            }
+            VerifierVerdict::Approve => panic!("Held must map to Amend, not Approve"),
+            VerifierVerdict::Refuse { .. } => panic!("Held must map to Amend, not Refuse"),
+        }
+    }
+
+    // rationale: Phase 6b — D16 verdict mapping. EmberStatus::Rejected
+    // (above-bar, confidence >= 0.5) ALSO maps to VerifierVerdict::Amend
+    // — m33 Ember is a quality-bar concern; security hard-Refuse is m33
+    // Security's exclusive responsibility.
+    #[test]
+    fn ember_verdict_rejected_maps_to_amend_not_refuse() {
+        let v = ember_verdict(crate::m10_ember_ci_gate::EmberStatus::Rejected {
+            trait_name: crate::m10_ember_ci_gate::TraitName::Honesty,
+            reason: "test reason".to_owned(),
+        });
+        match v {
+            VerifierVerdict::Amend { request } => {
+                assert!(request.contains("Rejected"), "must name Rejected: {request}");
+                assert!(request.contains("Honesty"), "must name trait: {request}");
+                assert!(request.contains("D16"), "must reference D16: {request}");
+            }
+            VerifierVerdict::Refuse { .. } => {
+                panic!("Rejected must map to Amend (D16), NOT Refuse")
+            }
+            VerifierVerdict::Approve => panic!("Rejected must map to Amend, not Approve"),
+        }
+    }
+
+    // rationale: Phase 6b — artefact rendering is deterministic and
+    // includes the load-bearing identifiers (proposal id, mutation kind,
+    // evidence_n, evidence_lift, ci_half, diversity_cluster).
+    #[test]
+    fn render_workflow_artefact_contains_load_bearing_fields() {
+        use crate::m14_lift::LiftSnapshot;
+        use crate::m20_prefixspan::{Pattern, StepToken};
+        use crate::m21_variant_builder::build_variants;
+        use crate::m23_proposer::build_proposal;
+        use crate::m30_bank::AcceptedWorkflow;
+        use std::time::SystemTime;
+
+        let pattern = Pattern::new(vec![StepToken(7), StepToken(11), StepToken(13)], 25, (0, 0));
+        let variants = build_variants(&pattern).expect("variants");
+        let identity_variant = variants
+            .iter()
+            .find(|v| matches!(v.mutation, crate::m21_variant_builder::MutationKind::Identity))
+            .expect("identity variant")
+            .clone();
+        let snapshot = LiftSnapshot {
+            lift: Some(0.5),
+            ci_half: Some(0.05),
+            n: 25,
+            latest_ts_ms: 0,
+            computed_at: SystemTime::now(),
+        };
+        let proposal = build_proposal(identity_variant, &snapshot, Some(3)).expect("proposal");
+        let workflow = AcceptedWorkflow::for_test(42, proposal, 0, i64::MAX, 1.0, None, 0);
+        let artefact = render_workflow_artefact(&workflow);
+        // Determinism: same workflow → same string.
+        assert_eq!(artefact, render_workflow_artefact(&workflow));
+        assert!(artefact.contains("mutation=identity"), "artefact: {artefact}");
+        assert!(artefact.contains("evidence_n=25"), "artefact: {artefact}");
+        assert!(artefact.contains("cluster=3"), "artefact: {artefact}");
+        // The default technical artefact does NOT contain rubric triggers
+        // (no all-caps, no flattery, no obvious-claim).
+        let v = EmberVerifier.verify(&workflow);
+        assert_eq!(
+            v,
+            VerifierVerdict::Approve,
+            "default technical artefact must pass m10's 7-trait rubric"
+        );
     }
 }

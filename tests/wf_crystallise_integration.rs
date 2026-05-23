@@ -254,6 +254,68 @@ fn crystallise_writes_proposals_jsonl_that_reparses() {
 }
 
 #[test]
+fn crystallise_proposals_carry_non_none_m22_diversity_cluster() {
+    // rationale: R2 (Plan v2 §15 D17–D20) — verifies the m22 K-means wiring
+    // on the `wf-crystallise` CLI path. Prior to Phase 5 (commit 97bb331..)
+    // `compose_proposals(&patterns, &snapshot, |_v| None)` hard-coded every
+    // proposal's `diversity_cluster` to `None`; the m22 signal never
+    // reached a proposal. The Phase 5 wiring pre-builds every variant,
+    // extracts 5-dim features (D17), runs K-means with adaptive `k`
+    // (D19), and threads the result via a real lookup closure — so at
+    // least one proposal on a fixture whose evidence_n clears the F2
+    // floor (PROPOSAL_F2_THRESHOLD = 20) must carry `Some(cluster)`
+    // (D20: emitted via the JSONL bridge to any downstream consumer —
+    // `m31_selector`/`wf-dispatch` included).
+    //
+    // Pattern mirrors `crystallise_lift_window_grows_with_prior_runs_in_
+    // persistent_db`: pre-seed 25 prior open runs into the persistent
+    // runs DB so the m14 lift snapshot's `n` exceeds F2 and m23 admits
+    // proposals (rather than refusing every one as below-threshold).
+    use workflow_core::m7_workflow_runs::{insert_run, open_database};
+
+    let fx = Fixture::new();
+    {
+        let conn = open_database(&fx.runs_db).expect("open runs db");
+        for i in 0..25 {
+            insert_run(&conn, &format!("seed-{i}")).expect("seed run");
+        }
+    }
+    let report = run(&fx.offline_config()).expect("offline run");
+    assert!(
+        report.proposals_written > 0,
+        "with 25 seeded runs evidence_n must clear F2 and produce proposals; got {}",
+        report.proposals_written
+    );
+    let contents = fs::read_to_string(&fx.proposals_out).expect("read proposals");
+    let proposals: Vec<WorkflowProposal> = contents
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("proposal reparse"))
+        .collect();
+    assert!(!proposals.is_empty(), "fixture must yield ≥ 1 proposal");
+    let with_cluster: Vec<_> = proposals
+        .iter()
+        .filter_map(workflow_core::m23_proposer::WorkflowProposal::diversity_cluster)
+        .collect();
+    assert!(
+        !with_cluster.is_empty(),
+        "Phase 5 wiring must produce ≥ 1 proposal with `Some(diversity_cluster)`; \
+         got {} proposals all with None — the m22 K-means signal regressed",
+        proposals.len()
+    );
+    // Cluster indices land in [0, k) where k = recommended_k_for_variant_count
+    // applied to the variant count. We don't pin the exact `k` (it varies
+    // with fixture mining results) but every cluster index must be
+    // < RECOMMENDED_K_MAX = 8.
+    for &c in &with_cluster {
+        assert!(
+            c < workflow_core::RECOMMENDED_K_MAX,
+            "cluster index {c} must be < RECOMMENDED_K_MAX (8)"
+        );
+    }
+}
+
+#[test]
 fn crystallise_creates_runs_db_when_absent() {
     // rationale: Boundary — --runs-db is created if absent; a fresh temp
     // path with no pre-existing file must end the run with a real SQLite

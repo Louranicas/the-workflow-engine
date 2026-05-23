@@ -1,4 +1,25 @@
-use super::{kmeans, KMeansConfig, KMeansError};
+use super::{
+    extract_variant_features, kmeans, recommended_k_for_variant_count, KMeansConfig,
+    KMeansError, FEATURE_LEVENSHTEIN_NORM, FEATURE_STEP_COUNT_NORM, RECOMMENDED_K_MAX,
+};
+use crate::m20_prefixspan::StepToken;
+use crate::m21_variant_builder::{MutationKind, WorkflowVariant};
+
+// rationale (R2 / Plan v2 §15 D17): WorkflowVariant constructor for tests.
+// `WorkflowVariant`'s fields are `pub`, so direct struct literals are valid;
+// the helper keeps test bodies focused on what's varied (mutation kind and
+// step count) rather than boilerplate field assembly.
+fn variant_with(steps_len: usize, mutation: MutationKind) -> WorkflowVariant {
+    let steps: Vec<StepToken> = (0..steps_len)
+        .map(|i| StepToken(u32::try_from(i).expect("test indices fit u32")))
+        .collect();
+    WorkflowVariant {
+        variant_id: 0,
+        steps,
+        mutation,
+        source_pattern_hash: 0,
+    }
+}
 
 fn pt(xs: &[f64]) -> Vec<f64> {
     xs.to_vec()
@@ -1731,4 +1752,159 @@ fn mutkill_303_tiebreak_comparison_resolves_exact_distance_ties() {
         "sweep hit the T2<T1 branch only {lesser_branch_hits}× — needed to \
          kill the :303:26 `>`→`>=` mutant",
     );
+}
+
+// =====================================================================
+// extract_variant_features + recommended_k_for_variant_count (R2 / D17 / D19)
+// =====================================================================
+
+// rationale: D17 — Identity variant features. Asserts the 5-dim shape and
+// each dimension's exact value for the canonical baseline. step_norm =
+// 3/20 = 0.15; mutation one-hot = [1, 0, 0]; lev_norm = 0 / 2 = 0.0.
+#[test]
+fn extract_variant_features_identity_yields_known_5d_vector() {
+    let v = variant_with(3, MutationKind::Identity);
+    let f = extract_variant_features(&v);
+    assert_eq!(f.len(), 5, "feature vector must be 5-dimensional");
+    assert!((f[0] - 0.15_f64).abs() < 1e-12, "step_norm = 3/20 = 0.15");
+    assert!((f[1] - 1.0_f64).abs() < 1e-12, "identity_hot = 1.0");
+    assert!((f[2] - 0.0_f64).abs() < 1e-12, "swap_hot = 0.0");
+    assert!((f[3] - 0.0_f64).abs() < 1e-12, "skip_hot = 0.0");
+    assert!((f[4] - 0.0_f64).abs() < 1e-12, "lev_norm = 0/2 = 0.0");
+}
+
+// rationale: D17 — Swap variant features. swap_hot = 1.0, lev_norm = 2/2 = 1.0
+// (Swap = two transpositions in the closed-form Levenshtein proxy).
+#[test]
+fn extract_variant_features_swap_yields_known_5d_vector() {
+    let v = variant_with(5, MutationKind::Swap { at: 1 });
+    let f = extract_variant_features(&v);
+    assert_eq!(f.len(), 5);
+    assert!((f[0] - 0.25_f64).abs() < 1e-12, "step_norm = 5/20 = 0.25");
+    assert!((f[1] - 0.0_f64).abs() < 1e-12, "identity_hot = 0.0");
+    assert!((f[2] - 1.0_f64).abs() < 1e-12, "swap_hot = 1.0");
+    assert!((f[3] - 0.0_f64).abs() < 1e-12, "skip_hot = 0.0");
+    assert!((f[4] - 1.0_f64).abs() < 1e-12, "lev_norm = 2/2 = 1.0 (Swap)");
+}
+
+// rationale: D17 — Skip variant features. skip_hot = 1.0, lev_norm = 1/2 = 0.5
+// (Skip = single deletion).
+#[test]
+fn extract_variant_features_skip_yields_known_5d_vector() {
+    let v = variant_with(4, MutationKind::Skip { at: 2 });
+    let f = extract_variant_features(&v);
+    assert_eq!(f.len(), 5);
+    assert!((f[0] - 0.2_f64).abs() < 1e-12, "step_norm = 4/20 = 0.2");
+    assert!((f[1] - 0.0_f64).abs() < 1e-12);
+    assert!((f[2] - 0.0_f64).abs() < 1e-12);
+    assert!((f[3] - 1.0_f64).abs() < 1e-12, "skip_hot = 1.0");
+    assert!((f[4] - 0.5_f64).abs() < 1e-12, "lev_norm = 1/2 = 0.5 (Skip)");
+}
+
+// rationale: D17 — step_norm saturation. step lengths above
+// FEATURE_STEP_COUNT_NORM (=20) clamp to 1.0 so a long outlier does not
+// dominate L2 distance.
+#[test]
+fn extract_variant_features_step_count_saturates_to_one() {
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "FEATURE_STEP_COUNT_NORM is a small positive constant (20.0); the cast is exact"
+    )]
+    let long = FEATURE_STEP_COUNT_NORM as usize + 5;
+    let v = variant_with(long, MutationKind::Identity);
+    let f = extract_variant_features(&v);
+    assert!(
+        (f[0] - 1.0_f64).abs() < 1e-12,
+        "step_norm must saturate at 1.0 for steps.len() > FEATURE_STEP_COUNT_NORM"
+    );
+}
+
+// rationale: D17 — every dim lands in [0,1]. Spot-check the four legal
+// (steps_len, MutationKind) shapes (Identity 0-step degenerate, max-step
+// Swap, max-step Skip, max-step Identity).
+#[test]
+fn extract_variant_features_all_dims_within_unit_interval() {
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "FEATURE_STEP_COUNT_NORM is a small positive constant (20.0); the cast is exact"
+    )]
+    let max_steps = FEATURE_STEP_COUNT_NORM as usize;
+    let cases = [
+        variant_with(0, MutationKind::Identity),
+        variant_with(max_steps, MutationKind::Swap { at: 0 }),
+        variant_with(max_steps, MutationKind::Skip { at: 0 }),
+        variant_with(max_steps, MutationKind::Identity),
+    ];
+    for (i, v) in cases.iter().enumerate() {
+        let f = extract_variant_features(v);
+        for (dim, &val) in f.iter().enumerate() {
+            assert!(
+                (0.0..=1.0).contains(&val),
+                "case {i} dim {dim}: value {val} not in [0,1]"
+            );
+        }
+    }
+    let _ = FEATURE_LEVENSHTEIN_NORM; // referenced in extract_variant_features doc
+}
+
+// rationale: D17 — determinism. Same input → bit-identical output across
+// repeated calls.
+#[test]
+fn extract_variant_features_is_deterministic() {
+    let v = variant_with(7, MutationKind::Swap { at: 3 });
+    let a = extract_variant_features(&v);
+    let b = extract_variant_features(&v);
+    assert_eq!(a, b, "deterministic feature extraction required");
+}
+
+// rationale: D19 — adaptive k. n=0 returns 1 (avoid kmeans Empty error),
+// small n stays small, large n saturates at RECOMMENDED_K_MAX.
+#[test]
+fn recommended_k_zero_variant_count_returns_one() {
+    assert_eq!(recommended_k_for_variant_count(0), 1);
+}
+
+#[test]
+fn recommended_k_grows_with_variant_count_and_saturates_at_max() {
+    // sqrt(n/2) rounded then clamped.
+    assert_eq!(recommended_k_for_variant_count(1), 1);
+    assert_eq!(recommended_k_for_variant_count(2), 1);
+    assert_eq!(recommended_k_for_variant_count(8), 2);
+    assert_eq!(recommended_k_for_variant_count(50), 5);
+    // saturation: any n ≥ 2 * RECOMMENDED_K_MAX^2 lands at the cap
+    // (sqrt(n/2) >= RECOMMENDED_K_MAX). E.g. n = 200 → sqrt(100)=10 → clamp 8.
+    assert_eq!(
+        recommended_k_for_variant_count(200),
+        RECOMMENDED_K_MAX,
+        "large n saturates at RECOMMENDED_K_MAX"
+    );
+    // also clamp by n itself: k <= n always (kmeans precondition).
+    assert!(
+        recommended_k_for_variant_count(3) <= 3,
+        "k must never exceed n"
+    );
+}
+
+// rationale: D19 — end-to-end: the recommended_k value is accepted by
+// `kmeans` for the variant count's feature points (kmeans precondition
+// `k <= points.len()` is honoured).
+#[test]
+fn recommended_k_feeds_kmeans_without_kexceedsn() {
+    let variants: Vec<WorkflowVariant> = (0..6)
+        .map(|i| variant_with(2 + i, MutationKind::Identity))
+        .collect();
+    let features: Vec<Vec<f64>> = variants.iter().map(extract_variant_features).collect();
+    let k = recommended_k_for_variant_count(features.len());
+    let cfg = KMeansConfig {
+        k,
+        ..KMeansConfig::default()
+    };
+    let (clustered, _centroids) =
+        kmeans(&features, &cfg).expect("recommended_k must yield a kmeans-compatible cfg");
+    assert_eq!(clustered.len(), features.len());
+    for c in &clustered {
+        assert!(c.cluster < k, "cluster index must be in [0, k)");
+    }
 }

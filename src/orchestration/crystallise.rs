@@ -31,6 +31,10 @@ use crate::m7_workflow_runs::{
 };
 use crate::m14_lift::{LiftAggregator, LiftAggregatorConfig, LiftError};
 use crate::m20_prefixspan::{mine_sequences, MaxGap, MinSupport, MinerError, StepToken};
+use crate::m21_variant_builder::{build_variants, WorkflowVariant};
+use crate::m22_kmeans::{
+    extract_variant_features, kmeans, recommended_k_for_variant_count, KMeansConfig,
+};
 use crate::m23_proposer::compose_proposals;
 
 /// Default proposals JSONL output path.
@@ -501,12 +505,13 @@ pub fn run(config: &Config) -> Result<Report, OrchestrationError> {
     let sequences = build_sequences(&atuin_rows);
     let patterns = mine_sequences(&sequences, min_support, max_gap, DEFAULT_MAX_PATTERN_LENGTH)?;
     report.patterns_mined = patterns.len();
-    // m23 — `|_| None` diversity closure: m22 K-means clustering is not
-    // wired into the crystallise CLI path (it needs feature vectors that
-    // the proposer batch path does not assemble); a documented conservative
-    // default of "no diversity cluster" is passed. This is honest: the m22
-    // signal is genuinely absent here, not faked.
-    let proposals = compose_proposals(&patterns, &snapshot, |_v| None);
+    // m22 K-means diversity clustering — Plan v2 § 15 D17–D20 (R2 wiring).
+    // See `build_variant_cluster_map` for the per-variant feature extraction,
+    // adaptive-`k`, and degraded-fallback contract.
+    let variant_to_cluster = build_variant_cluster_map(&patterns);
+    let proposals = compose_proposals(&patterns, &snapshot, |v| {
+        variant_to_cluster.get(&v.variant_id).copied()
+    });
 
     // Stage 7 — write proposals JSONL.
     report.proposals_written = write_proposals_jsonl(&config.proposals_out, &proposals)?;
@@ -526,6 +531,73 @@ pub fn run(config: &Config) -> Result<Report, OrchestrationError> {
 
     report.completed = true;
     Ok(report)
+}
+
+/// Assemble the `variant_id → cluster_index` map for the m23 diversity
+/// closure (Plan v2 § 15 D17–D20, R2 wiring).
+///
+/// Pre-builds every variant the m23 proposer would compose, extracts a
+/// 5-dimensional feature vector per variant (step-count-norm, mutation
+/// one-hot ×3, Levenshtein-from-identity-norm — per D17), runs K-means
+/// with `k` adaptive to variant count (D19), and returns the
+/// `variant_id → cluster_index` map. The `diversity_cluster:
+/// Option<usize>` field on each `WorkflowProposal` is then a real m22
+/// signal (D20: emitted via the proposals JSONL bridge —
+/// `WorkflowProposal::diversity_cluster` is `#[derive(serde::Serialize)]`-
+/// included — and forwarded through to substrate-side surfaces;
+/// `m31_selector` already accepts a `diversity_score` closure that
+/// downstream `wf-dispatch` callers can implement against
+/// `proposal.diversity_cluster()` per D18).
+///
+/// If `kmeans` returns an error (fewer viable points than `k`, dimension
+/// mismatch, non-finite input), the map stays empty and the m23 closure
+/// falls back to `None` for every variant — the path keeps running, the
+/// substrate signal is honestly absent rather than faked.
+/// `build_variants` is deterministic (variant ids are FNV-1a hashes of
+/// `(steps, mutation)`) so the variants re-derived inside
+/// `compose_proposals` carry the same ids as the ones this map was
+/// indexed by.
+fn build_variant_cluster_map(
+    patterns: &[crate::m20_prefixspan::Pattern],
+) -> std::collections::HashMap<u64, usize> {
+    let all_variants: Vec<WorkflowVariant> = patterns
+        .iter()
+        .flat_map(|p| build_variants(p).ok().into_iter().flatten())
+        .collect();
+    let mut variant_to_cluster: std::collections::HashMap<u64, usize> =
+        std::collections::HashMap::new();
+    if all_variants.is_empty() {
+        return variant_to_cluster;
+    }
+    let features: Vec<Vec<f64>> = all_variants.iter().map(extract_variant_features).collect();
+    let k = recommended_k_for_variant_count(all_variants.len());
+    let cfg = KMeansConfig {
+        k,
+        ..KMeansConfig::default()
+    };
+    match kmeans(&features, &cfg) {
+        Ok((clustered, _centroids)) => {
+            for (variant, point) in all_variants.iter().zip(clustered.iter()) {
+                variant_to_cluster.insert(variant.variant_id, point.cluster);
+            }
+            tracing::info!(
+                target: "wf_crystallise",
+                n_variants = all_variants.len(),
+                k,
+                "m22 K-means clustering assembled variant→cluster map"
+            );
+        }
+        Err(err) => {
+            tracing::debug!(
+                target: "wf_crystallise",
+                error = %err,
+                n_variants = all_variants.len(),
+                k,
+                "m22 K-means clustering skipped; diversity_cluster will be None for this run"
+            );
+        }
+    }
+    variant_to_cluster
 }
 
 /// Group atuin rows into per-session [`StepToken`] sequences.

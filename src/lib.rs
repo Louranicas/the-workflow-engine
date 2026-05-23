@@ -98,8 +98,9 @@ pub use m21_variant_builder::{
     MAX_VARIANTS_PER_PATTERN,
 };
 pub use m22_kmeans::{
-    kmeans, ClusteredPoint, KMeansConfig, KMeansError, DEFAULT_CONVERGENCE_EPSILON,
-    DEFAULT_MAX_ITERATIONS,
+    extract_variant_features, kmeans, recommended_k_for_variant_count, ClusteredPoint,
+    KMeansConfig, KMeansError, DEFAULT_CONVERGENCE_EPSILON, DEFAULT_MAX_ITERATIONS,
+    FEATURE_LEVENSHTEIN_NORM, FEATURE_STEP_COUNT_NORM, RECOMMENDED_K_MAX,
 };
 pub use m23_proposer::{
     build_proposal, compose_proposals, ProposerError, WorkflowProposal,

@@ -7,6 +7,7 @@
 
 use thiserror::Error;
 
+use crate::m21_variant_builder::{MutationKind, WorkflowVariant};
 use crate::m4_cascade::cluster_id::fnv1a_64;
 
 /// Default maximum iterations of Lloyd's algorithm.
@@ -146,6 +147,110 @@ pub fn kmeans(
         });
     }
     Ok((clustered, centroids))
+}
+
+/// Normalisation cap for step-count feature: pattern lengths above this saturate to 1.0.
+pub const FEATURE_STEP_COUNT_NORM: f64 = 20.0;
+
+/// Normalisation cap for the Levenshtein-from-identity proxy: the canonical max
+/// per-variant edit distance is 2.0 (Swap = two transpositions / pair of substitutions).
+pub const FEATURE_LEVENSHTEIN_NORM: f64 = 2.0;
+
+/// Soft maximum on `k` returned by [`recommended_k_for_variant_count`].
+pub const RECOMMENDED_K_MAX: usize = 8;
+
+/// Extract a 5-dimensional feature vector from a [`WorkflowVariant`] for K-means clustering.
+///
+/// Per Completion Plan v2 § 15 D17 (S1004115), the feature dimensions are:
+///
+/// - **dim 0** — `step-count-norm`: `min(steps.len() / FEATURE_STEP_COUNT_NORM, 1.0)`.
+///   Pattern lengths above [`FEATURE_STEP_COUNT_NORM`] saturate to `1.0` so an
+///   outlier long pattern does not dominate L2 distance.
+/// - **dims 1-3** — mutation kind as a one-hot triple `[identity_hot, swap_hot,
+///   skip_hot]` (exactly one is `1.0`, the other two are `0.0`).
+/// - **dim 4** — `levenshtein-from-identity-norm`: a deterministic closed-form
+///   proxy for the edit distance from the [`MutationKind::Identity`] baseline,
+///   divided by [`FEATURE_LEVENSHTEIN_NORM`] to land in `[0.0, 1.0]`:
+///   - `MutationKind::Identity` → `0.0` (the baseline)
+///   - `MutationKind::Skip { .. }` → `0.5` (one deletion = 1 edit / 2.0)
+///   - `MutationKind::Swap { .. }` → `1.0` (one swap ≈ two transpositions / 2.0)
+///
+/// All five dimensions land in `[0.0, 1.0]` so K-means' L2 distance is not
+/// dominated by any one axis. The function is **deterministic** (no PRNG, no
+/// floating-point equality on input) and totally defined for every
+/// `WorkflowVariant`.
+///
+/// # Why this proxy for Levenshtein
+///
+/// A true Levenshtein-from-Identity would require reconstructing the source
+/// pattern's step sequence to compare against, but `WorkflowVariant` carries
+/// only the `source_pattern_hash` (an opaque FNV-1a u64), not the steps. The
+/// closed-form proxy maps each [`MutationKind`] variant to its canonical
+/// minimum edit-distance cost (Identity = 0, Skip = 1 deletion, Swap = 2
+/// substitutions), preserving the ordering and adding finer separation on
+/// dim 4 than the mutation one-hot alone would.
+#[must_use]
+pub fn extract_variant_features(variant: &WorkflowVariant) -> Vec<f64> {
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "step lengths are tiny (<= MAX_STEPS_NORM expected ~ 20); precision loss \
+                  on the cast is below f64 mantissa range"
+    )]
+    let step_norm = (variant.steps.len() as f64 / FEATURE_STEP_COUNT_NORM).min(1.0);
+    let (identity_hot, swap_hot, skip_hot) = match variant.mutation {
+        MutationKind::Identity => (1.0_f64, 0.0_f64, 0.0_f64),
+        MutationKind::Swap { .. } => (0.0_f64, 1.0_f64, 0.0_f64),
+        MutationKind::Skip { .. } => (0.0_f64, 0.0_f64, 1.0_f64),
+    };
+    let levenshtein_proxy = match variant.mutation {
+        MutationKind::Identity => 0.0_f64,
+        MutationKind::Skip { .. } => 1.0_f64,
+        MutationKind::Swap { .. } => 2.0_f64,
+    };
+    let lev_norm = (levenshtein_proxy / FEATURE_LEVENSHTEIN_NORM).min(1.0);
+    vec![step_norm, identity_hot, swap_hot, skip_hot, lev_norm]
+}
+
+/// Adaptive choice of `k` (cluster count) for a given variant count.
+///
+/// Per Completion Plan v2 § 15 D19 (S1004115), `k` is derived from the variant
+/// count rather than configured externally. Heuristic:
+///
+/// ```text
+/// k = round(sqrt(n / 2.0)).clamp(1, RECOMMENDED_K_MAX).min(n)
+/// ```
+///
+/// Rationale: `sqrt(n / 2.0)` keeps clusters meaningfully populated (≥ 2
+/// points/cluster expected on uniform data) without degenerating to a single
+/// cluster for small N or to N clusters for large N. The clamp ensures `k`
+/// stays sane for outlier counts; the `min(n)` floor satisfies
+/// [`kmeans`]'s precondition `k <= points.len()`.
+///
+/// - `n == 0` returns `1` (never `0`, to avoid tripping [`KMeansError::Empty`]
+///   when the caller forwards into [`kmeans`]; the caller is expected to
+///   skip [`kmeans`] entirely when `n == 0`).
+/// - `n == 1` returns `1` (a degenerate single-cluster).
+/// - `n in [2..=4]` returns `1` or `2` per the sqrt rule.
+/// - large `n` saturates at [`RECOMMENDED_K_MAX`].
+#[must_use]
+pub fn recommended_k_for_variant_count(n: usize) -> usize {
+    if n == 0 {
+        return 1;
+    }
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "variant counts are bounded by MAX_VARIANTS_PER_PATTERN * pattern_count, \
+                  well within f64 mantissa precision for any realistic workflow-trace input"
+    )]
+    let raw_f = ((n as f64) / 2.0_f64).sqrt().round();
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "sqrt of a non-negative finite f64 is non-negative finite; round() is finite; \
+                  the clamp+min below caps the usize cast at RECOMMENDED_K_MAX which is tiny"
+    )]
+    let raw = raw_f as usize;
+    raw.clamp(1, RECOMMENDED_K_MAX).min(n)
 }
 
 fn nearest_centroid(p: &[f64], centroids: &[Vec<f64>]) -> usize {

@@ -424,5 +424,102 @@ fn kmeans_plus_plus_seed(points: &[Vec<f64>], k: usize, seed: u64) -> Vec<Vec<f6
     centroids
 }
 
+/// Typed feature vector wrapping `Vec<f64>` — A2 SD9 closure (Plan v2 v0.2.0
+/// Phase 3 step 1; locked DX-3 `retain-prior` for SD10 in §15 stands).
+///
+/// Cosmetic typed-newtype around `Vec<f64>`; the existing [`kmeans`] free
+/// function is unchanged for the v0.1.0 / M0 surface. The typed wrapper
+/// [`kmeans_typed`] is the v0.2.0 thin re-shape that accepts the named
+/// `FeatureVector` type per the SD9 spec; both functions share the same
+/// inner algorithm, so behaviour is identical.
+///
+/// The newtype carries the same invariants as the inner `Vec<f64>` (no
+/// added constraints): callers may construct via [`From`] or
+/// [`FeatureVector::new`]; access via [`Deref`] / [`AsRef<[f64]>`] /
+/// [`into_inner`]. Non-finite coordinates are still surfaced by [`kmeans`]
+/// / [`kmeans_typed`] as [`KMeansError::NonFiniteCoordinate`]; the type
+/// does not pre-validate.
+///
+/// [`into_inner`]: FeatureVector::into_inner
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FeatureVector(Vec<f64>);
+
+impl FeatureVector {
+    /// Wrap a `Vec<f64>` as a `FeatureVector`.
+    #[must_use]
+    pub fn new(coords: Vec<f64>) -> Self {
+        Self(coords)
+    }
+
+    /// Unwrap into the inner `Vec<f64>`.
+    #[must_use]
+    pub fn into_inner(self) -> Vec<f64> {
+        self.0
+    }
+
+    /// Borrow the inner slice (alias of `Deref::deref`).
+    #[must_use]
+    pub fn as_slice(&self) -> &[f64] {
+        &self.0
+    }
+
+    /// Dimensionality of the feature vector.
+    #[must_use]
+    pub fn dim(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl From<Vec<f64>> for FeatureVector {
+    fn from(v: Vec<f64>) -> Self {
+        Self(v)
+    }
+}
+
+impl From<FeatureVector> for Vec<f64> {
+    fn from(fv: FeatureVector) -> Self {
+        fv.0
+    }
+}
+
+impl AsRef<[f64]> for FeatureVector {
+    fn as_ref(&self) -> &[f64] {
+        &self.0
+    }
+}
+
+impl core::ops::Deref for FeatureVector {
+    type Target = [f64];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// Typed K-means entry point — thin re-shape of [`kmeans`] accepting the
+/// named [`FeatureVector`] type. A2 SD9 closure (Plan v2 v0.2.0 Phase 3
+/// step 1).
+///
+/// Behaviour is identical to [`kmeans`] (the points are unwrapped to
+/// `Vec<f64>` and the inner algorithm runs); the type is the only
+/// difference. Use this when call-sites want to spell the point type
+/// explicitly; use [`kmeans`] for the existing untyped surface.
+///
+/// # Errors
+///
+/// Same as [`kmeans`]: [`KMeansError::Empty`] / [`KMeansError::KExceedsN`]
+/// / [`KMeansError::DimMismatch`] / [`KMeansError::NonFiniteCoordinate`].
+pub fn kmeans_typed(
+    points: &[FeatureVector],
+    config: &KMeansConfig,
+) -> Result<(Vec<ClusteredPoint>, Vec<Vec<f64>>), KMeansError> {
+    // Cosmetic re-shape: the named type unwraps to the existing slice surface.
+    // We pass the inner `Vec<f64>` slice straight through to `kmeans`; the
+    // intermediate `Vec<Vec<f64>>` materialisation is unavoidable without
+    // changing `kmeans`'s signature, but is acceptable for the typed-API
+    // re-shape (call sites that care about throughput call `kmeans` directly).
+    let inner: Vec<Vec<f64>> = points.iter().map(|fv| fv.0.clone()).collect();
+    kmeans(&inner, config)
+}
+
 #[cfg(test)]
 mod tests;

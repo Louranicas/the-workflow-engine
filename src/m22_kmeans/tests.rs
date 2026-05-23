@@ -1908,3 +1908,96 @@ fn recommended_k_feeds_kmeans_without_kexceedsn() {
         assert!(c.cluster < k, "cluster index must be in [0, k)");
     }
 }
+
+// ============================================================================
+// A2 SD9 closure — `FeatureVector` newtype + `kmeans_typed` typed entry point
+// (Plan v2 v0.2.0 Phase 3 step 1).
+// ============================================================================
+
+#[test]
+fn featurevector_round_trips_through_from_and_into_inner() {
+    let raw = vec![1.0_f64, 2.0, 3.0];
+    let fv: super::FeatureVector = raw.clone().into();
+    assert_eq!(fv.dim(), 3);
+    assert_eq!(fv.as_slice(), &raw[..]);
+    let unwrapped: Vec<f64> = fv.into();
+    assert_eq!(unwrapped, raw);
+}
+
+#[test]
+fn featurevector_deref_and_asref_expose_inner_slice() {
+    let fv = super::FeatureVector::new(vec![0.5_f64, -1.5, 4.0]);
+    // Deref<Target=[f64]>: slice indexing, iter, len all work
+    assert_eq!(fv.len(), 3);
+    assert!((fv[0] - 0.5).abs() < f64::EPSILON);
+    let sum: f64 = fv.iter().sum();
+    assert!((sum - 3.0).abs() < f64::EPSILON);
+    // AsRef<[f64]>: generic borrowing (closure to avoid clippy items_after_statements)
+    let sum_via_asref = |r: &dyn AsRef<[f64]>| -> f64 { r.as_ref().iter().sum() };
+    assert!((sum_via_asref(&&fv) - 3.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn featurevector_default_is_empty_dim_zero() {
+    let fv = super::FeatureVector::default();
+    assert_eq!(fv.dim(), 0);
+    assert!(fv.is_empty()); // via Deref<Target=[f64]>
+}
+
+#[test]
+fn kmeans_typed_matches_kmeans_for_identical_inputs() {
+    // Behaviour parity: same input, same config, same output (point-by-point).
+    let raw: Vec<Vec<f64>> = vec![
+        vec![0.0, 0.0],
+        vec![10.0, 10.0],
+        vec![0.1, 0.1],
+        vec![9.9, 9.9],
+        vec![5.0, 5.0],
+    ];
+    let typed: Vec<super::FeatureVector> = raw.iter().map(|v| v.clone().into()).collect();
+    let cfg = KMeansConfig {
+        k: 2,
+        ..KMeansConfig::default()
+    };
+    let (clustered_untyped, centroids_untyped) =
+        kmeans(&raw, &cfg).expect("untyped kmeans clean");
+    let (clustered_typed, centroids_typed) =
+        super::kmeans_typed(&typed, &cfg).expect("typed kmeans clean");
+    assert_eq!(
+        clustered_typed.len(),
+        clustered_untyped.len(),
+        "typed result must have same point count"
+    );
+    for (t, u) in clustered_typed.iter().zip(clustered_untyped.iter()) {
+        assert_eq!(t.cluster, u.cluster, "cluster assignment parity");
+        assert_eq!(t.coords, u.coords, "coords parity");
+    }
+    assert_eq!(centroids_typed, centroids_untyped, "centroids parity");
+}
+
+#[test]
+fn kmeans_typed_surfaces_same_errors_as_kmeans() {
+    let cfg = KMeansConfig::default();
+    // Empty input → Empty error (both surfaces)
+    let empty: Vec<super::FeatureVector> = vec![];
+    let typed_err = super::kmeans_typed(&empty, &cfg).unwrap_err();
+    let untyped_err = kmeans(&[][..] as &[Vec<f64>], &cfg).unwrap_err();
+    assert!(matches!(typed_err, KMeansError::Empty));
+    assert!(matches!(untyped_err, KMeansError::Empty));
+
+    // Non-finite coord → NonFiniteCoordinate surface
+    let nan_input: Vec<super::FeatureVector> = vec![
+        vec![1.0, 2.0].into(),
+        vec![f64::NAN, 4.0].into(),
+        vec![5.0, 6.0].into(),
+    ];
+    let cfg2 = KMeansConfig {
+        k: 2,
+        ..KMeansConfig::default()
+    };
+    let err = super::kmeans_typed(&nan_input, &cfg2).unwrap_err();
+    assert!(matches!(
+        err,
+        KMeansError::NonFiniteCoordinate { point: 1, dim: 0 }
+    ));
+}

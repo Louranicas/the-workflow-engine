@@ -2001,3 +2001,80 @@ fn kmeans_typed_surfaces_same_errors_as_kmeans() {
         KMeansError::NonFiniteCoordinate { point: 1, dim: 0 }
     ));
 }
+
+// ========================================================================
+// A1 SD8 Levenshtein-distance algorithm tests (Plan v2 v0.2.0 §3 Phase 12).
+// ========================================================================
+
+#[test]
+fn levenshtein_distance_identity_is_zero() {
+    use crate::m20_prefixspan::StepToken;
+    let a = vec![StepToken(1), StepToken(2), StepToken(3)];
+    assert_eq!(super::levenshtein_distance(&a, &a), 0);
+}
+
+#[test]
+fn levenshtein_distance_empty_inputs_are_other_length() {
+    use crate::m20_prefixspan::StepToken;
+    let empty: Vec<StepToken> = vec![];
+    let three = vec![StepToken(1), StepToken(2), StepToken(3)];
+    assert_eq!(super::levenshtein_distance(&empty, &three), 3);
+    assert_eq!(super::levenshtein_distance(&three, &empty), 3);
+    assert_eq!(super::levenshtein_distance(&empty, &empty), 0);
+}
+
+#[test]
+fn levenshtein_distance_symmetric() {
+    use crate::m20_prefixspan::StepToken;
+    let a = vec![StepToken(1), StepToken(2), StepToken(3)];
+    let b = vec![StepToken(2), StepToken(3), StepToken(4), StepToken(5)];
+    assert_eq!(
+        super::levenshtein_distance(&a, &b),
+        super::levenshtein_distance(&b, &a)
+    );
+}
+
+#[test]
+fn levenshtein_distance_single_substitution_is_one() {
+    use crate::m20_prefixspan::StepToken;
+    let a = vec![StepToken(1), StepToken(2), StepToken(3)];
+    let b = vec![StepToken(1), StepToken(99), StepToken(3)];
+    assert_eq!(super::levenshtein_distance(&a, &b), 1);
+}
+
+#[test]
+fn levenshtein_distance_single_insertion_is_one() {
+    use crate::m20_prefixspan::StepToken;
+    let a = vec![StepToken(1), StepToken(2), StepToken(3)];
+    let b = vec![StepToken(1), StepToken(2), StepToken(3), StepToken(4)];
+    assert_eq!(super::levenshtein_distance(&a, &b), 1);
+}
+
+#[test]
+fn levenshtein_distance_single_deletion_is_one() {
+    use crate::m20_prefixspan::StepToken;
+    let a = vec![StepToken(1), StepToken(2), StepToken(3)];
+    let b = vec![StepToken(1), StepToken(3)];
+    assert_eq!(super::levenshtein_distance(&a, &b), 1);
+}
+
+#[test]
+fn levenshtein_distance_disjoint_sequences_is_max_length() {
+    use crate::m20_prefixspan::StepToken;
+    let a = vec![StepToken(1), StepToken(2), StepToken(3)];
+    let b = vec![StepToken(10), StepToken(20), StepToken(30)];
+    assert_eq!(super::levenshtein_distance(&a, &b), 3);
+}
+
+#[test]
+#[allow(clippy::similar_names)] // edge_{ab,bc,ac} is the canonical math notation
+fn levenshtein_distance_triangle_inequality_holds() {
+    use crate::m20_prefixspan::StepToken;
+    let a = vec![StepToken(1), StepToken(2), StepToken(3)];
+    let b = vec![StepToken(1), StepToken(2)];
+    let c = vec![StepToken(4), StepToken(5)];
+    let edge_ab = super::levenshtein_distance(&a, &b);
+    let edge_bc = super::levenshtein_distance(&b, &c);
+    let edge_ac = super::levenshtein_distance(&a, &c);
+    assert!(edge_ac <= edge_ab + edge_bc);
+}

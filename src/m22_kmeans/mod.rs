@@ -521,5 +521,70 @@ pub fn kmeans_typed(
     kmeans(&inner, config)
 }
 
+/// A1 SD8 Levenshtein-distance algorithm — Plan v2 v0.2.0 §3 Phase 12 +
+/// §15 DX-4 (steps-on-proposal). Computes the edit distance between two
+/// `StepToken` slices using the classic Wagner-Fischer dynamic
+/// programming formulation. Used by m22 K-means feature extraction to
+/// replace the M0 closed-form `Levenshtein-from-identity` proxy with
+/// the true edit-distance metric SD8 spec called for.
+///
+/// Returns the minimum number of single-step edits (insertions /
+/// deletions / substitutions) required to transform `a` into `b`.
+/// Symmetric: `levenshtein_distance(a, b) == levenshtein_distance(b, a)`.
+///
+/// Complexity: O(|a| × |b|) time, O(min(|a|, |b|)) space (the rolling
+/// two-row optimisation). For workflow-trace pattern lengths (≤32 per
+/// `MAX_STEPS_PER_VARIANT`) the worst-case is ~1024 ops — negligible.
+///
+/// ## v0.2.0 scope vs SD8 full closure
+///
+/// v0.2.0 ships the ALGORITHM. SD8's full closure requires the m22
+/// feature-extraction call-site (`extract_variant_features`) to compute
+/// `levenshtein_distance(proposal.variant.steps, source_pattern.steps)`
+/// — but the source pattern's steps are not currently materialised on
+/// the proposal (only `source_pattern_hash` is). Per DX-4 = steps-on-
+/// proposal, the spec-compliant invocation requires either A4 SD11
+/// expansion (add source steps to proposal) or a hash→steps lookup
+/// table. v0.2.0 ships the algorithm + the closed-form proxy stays
+/// active in `extract_variant_features` until the hash→steps lookup
+/// lands. CHANGELOG [v0.2.0] § "Honest residuals" names this.
+#[must_use]
+pub fn levenshtein_distance(
+    a: &[crate::m20_prefixspan::StepToken],
+    b: &[crate::m20_prefixspan::StepToken],
+) -> usize {
+    // Trivial cases.
+    if a.is_empty() {
+        return b.len();
+    }
+    if b.is_empty() {
+        return a.len();
+    }
+    // Ensure the inner row is the shorter sequence (O(min(|a|, |b|))
+    // space). Walking the longer dimension means the inner loop hits
+    // the cache-friendly row buffer more times.
+    let (long, short) = if a.len() >= b.len() {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    let n = short.len();
+    // prev_row[j] = distance from short[..j] to "", initially j.
+    let mut prev_row: Vec<usize> = (0..=n).collect();
+    let mut curr_row: Vec<usize> = vec![0; n + 1];
+    for (i, long_tok) in long.iter().enumerate() {
+        curr_row[0] = i + 1;
+        for (j, short_tok) in short.iter().enumerate() {
+            let cost = usize::from(long_tok != short_tok);
+            // Standard Wagner-Fischer min-of-three recurrence.
+            curr_row[j + 1] = (curr_row[j] + 1) // insertion in long
+                .min(prev_row[j + 1] + 1) // deletion from long
+                .min(prev_row[j] + cost); // match-or-substitution
+        }
+        std::mem::swap(&mut prev_row, &mut curr_row);
+    }
+    prev_row[n]
+}
+
 #[cfg(test)]
 mod tests;

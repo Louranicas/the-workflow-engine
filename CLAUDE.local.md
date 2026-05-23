@@ -1,7 +1,8 @@
 # the-workflow-engine — Local Session State (delta)
 
 > **Back to:** [CLAUDE.md](CLAUDE.md) — project charter (structural facts; do not duplicate here)
-> **🟢 v0.2.0 PLAN v2 RATIFIED — S1004377, 2026-05-23:** see the "v0.2.0 PLAN v2 RATIFIED" section directly below for cold-start anchor. **All 21 Phase 4 decisions locked; 4-surface persisted; single remaining gate = Luke @ node 0.A "start Phase 1" go per D48.**
+> **🟢 v0.2.0 SHIPPED — S1004377, 2026-05-24:** see the "v0.2.0 SHIPPED" section directly below for cold-start anchor. **All 12 phases shipped; 2048 → 2163 tests (+115); 17 commits on `main` from 39e71a7 through (this commit); tagged `v0.2.0`. Engine is now substrate-participation-ready across 7 substrates per NA-2 expansion.**
+> **🟢 v0.2.0 PLAN v2 RATIFIED — S1004377, 2026-05-23:** see the "v0.2.0 PLAN v2 RATIFIED" section further below for the ratification record.
 > **🟢 v0.1.0 / M0 SHIPPED 2026-05-23 (S1004115):** see the "v0.1.0 / M0 SHIPPED" section further below for the canonical M0 ship record.
 > **Vault home:** [the-workflow-engine-vault/HOME.md](the-workflow-engine-vault/HOME.md)
 > **God-tier synthesis:** [the-workflow-engine-vault/GOD_TIER_CONSOLIDATION_S1001982.md](the-workflow-engine-vault/GOD_TIER_CONSOLIDATION_S1001982.md)
@@ -9,6 +10,44 @@
 > **Workflow tracker:** [the-workflow-engine-vault/workflow-engine-code-base.md](the-workflow-engine-vault/workflow-engine-code-base.md) — 15 phases / 13 decisions / 13 open issues
 >
 > **Synergy with [CLAUDE.md](CLAUDE.md):** the charter holds the rules (how to behave, which protocols govern the fleet). This file holds the state those rules operate over — live workstream, pending decisions, persisted surfaces, cold-start pointers. **Charter answers _how_; this file answers _what the world looks like right now_.** Do NOT duplicate charter content here.
+
+---
+
+## 🟢 v0.2.0 SHIPPED — S1004377, 2026-05-24
+
+> **Cold-start anchor:** v0.2.0 has SHIPPED. Engine state is `v0.2.0`
+> tag; substrate-participation-ready across 7 substrates per NA-2.
+> See `CHANGELOG.md` `[v0.2.0]` for the full ship record.
+
+| Phase | Commit | Status |
+|-------|--------|--------|
+| 1 re-baseline + ADRs | `39e71a7` | ✅ |
+| 2 deep FP-verify + 7-substrate audit | `0023f44` | ✅ |
+| 3 A2 SD9 FeatureVector | `b1aea21` | ✅ |
+| 3 C1 m13 drain skeleton | `a4690f2` | ✅ |
+| 4 Phase 4 interview | (locked in §15 ratification) | ✅ |
+| 5 W4 CuratedBank::client_ref | `9a15213` | ✅ |
+| 5 W1 escape_surface SemVer-break | `39953df` | ✅ |
+| 5 W3 cost + mutation_weight_for | `d776671` | ✅ |
+| 5 A4 SD11 12-field | `a25540e` | ✅ |
+| 5 V1 RefusalToken envelope | `f29dc5d` | ✅ |
+| 6 R1+R2+R3 real verifiers | `91cbf9c` | ✅ |
+| 7 m13 drain consumer wire | `b64bcc6` | ✅ |
+| 8 V2 per-substrate back-pressure | `16cde46` | ✅ |
+| 9 V3 m16 KEYSTONE + Genesis v1.4 + Zen pair-file | `8757e50` | ✅ |
+| 10 V4 substrate fixture catalogue | `6ca7ae9` | ✅ |
+| 11 V5 SubstrateTrust + ADR D-S1004XXX-05 | `77dc65c` | ✅ |
+| 12 A1 SD8 Levenshtein + ship | (this commit) | ✅ |
+
+**Tests: 2048 (v0.1.0) → 2163 (v0.2.0).** +115 tests, +5.6 %. Clippy
++ pedantic clean per sub-phase. 4-stage gate green every commit.
+17 commits on `main` pushed both remotes.
+
+Operator hand-off (12 honest residuals + 6 OPs in CHANGELOG `[v0.2.0]`):
+**OP-1** Conductor bring-up · **OP-2** dir rename · **OP-3** 48h DX-Soak
+substrate soak · **OP-4** CH-1..CH-5 cross-habitat ADR review ·
+**OP-5** Master Plan v2 / Ember opportunity-cost reopen · **OP-6**
+Watcher m16 heartbeat liveness integration.
 
 ---
 

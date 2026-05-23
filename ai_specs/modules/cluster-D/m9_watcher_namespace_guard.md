@@ -21,6 +21,15 @@ co_owns: Gap 3 (Unified destructiveness / EscapeSurfaceProfile schema — namesp
 cardinality_amendment: "S1002127 — PrivilegeEscalation inserted at ordinal 30 (D-S1002127-02 ADR)"
 ---
 
+> **🏷 v0.1.0 — SD A/B reconciliation (S1004115 Phase 9 / § 15 D27):**
+> The shipped m9 implementation is canonical. **SD1** (ControlChar
+> surface) was a code-ahead-of-spec drift — see
+> `src/m9_watcher_namespace_guard/` for the authoritative behaviour.
+> Phase 6e added the `AcceptanceSignatureReader` trait seam +
+> `NamespaceViolation::CapabilityNotAcknowledged` typed refusal. Spec
+> amendments mirror the shipped surface; no behavioural divergence
+> remains. Full disposition: [`PHASE9_SD_RECONCILIATION_S1004115.md`](../../../ai_docs/PHASE9_SD_RECONCILIATION_S1004115.md).
+
 # m9 — `watcher_namespace_guard`
 
 > **Back to:** [`cluster-D/INDEX`](./) · [`ai_specs/INDEX`](../../INDEX.md) · [`MODULE_MATRIX`](../../MODULE_MATRIX.md) · vault [[cluster-D-trust-cross-cutting]] · [cluster-D plan](../../../ai_docs/optimisation-v7/MODULE_PLANS/cluster-D.md) · [phase-1](../../../the-workflow-engine-vault/deployment%20framework/phase-1-genesis-day-0-3.md) · [Genesis v1.3](../../../ai_docs/GENESIS_PROMPT_V1_3.md)

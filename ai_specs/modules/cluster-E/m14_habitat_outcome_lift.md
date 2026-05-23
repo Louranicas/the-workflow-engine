@@ -14,6 +14,14 @@ boilerplate_lift: ~25% (Cat 05 m39 fitness-tensor smoothing + Cat 06 nerve-cente
 authority: Command · workflow-trace V7 optimisation · v1.3 binding
 ---
 
+> **🏷 v0.1.0 — SD A/B reconciliation (S1004115 Phase 9 / § 15 D27):**
+> The shipped m14 implementation is canonical. **SD2** (LiftError
+> taxonomy rename + variant divergence), **SD3** (`cost_lift` returns
+> `Result`), **SD4** (window-eviction direction) were code-ahead-of-spec
+> drifts — see `src/m14_lift/` for the authoritative behaviour. Spec
+> amendments mirror the shipped surface; no behavioural divergence
+> remains. Full disposition: [`PHASE9_SD_RECONCILIATION_S1004115.md`](../../../ai_docs/PHASE9_SD_RECONCILIATION_S1004115.md).
+
 # m14 — `habitat_outcome_lift` · evidence aggregator
 
 > **Back to:** [`../../INDEX.md`](../../INDEX.md) · [`../../MODULE_MATRIX.md`](../../MODULE_MATRIX.md) · [`../../../CLAUDE.md`](../../../CLAUDE.md) · [`../../../CLAUDE.local.md`](../../../CLAUDE.local.md)

@@ -14,6 +14,17 @@ boilerplate_lift: ~30% (Cat 09 trap-classification + agent-cross-talk file-drop 
 authority: Command · workflow-trace V7 optimisation · v1.3 binding
 ---
 
+> **🏷 v0.1.0 — SD A/B reconciliation (S1004115 Phase 9 / § 15 D27):**
+> The shipped m15 implementation is canonical. **SD5** (CharterSection
+> variant names), **SD6** (`detected_at_ms` field), **SD7** (ms-since-epoch
+> wire-format chosen over pseudo_rfc3339) were code-ahead-of-spec drifts
+> — see `src/m15_pressure/` for the authoritative behaviour. Phase 7
+> added `read_pressure_level()` + `pressure_scalar_from_count()` + the
+> CC-7 wire to m23 (`compose_proposals_with_pressure`, additive-bounded
+> per § 15 D22). Spec amendments mirror the shipped surface; no
+> behavioural divergence remains. Full disposition:
+> [`PHASE9_SD_RECONCILIATION_S1004115.md`](../../../ai_docs/PHASE9_SD_RECONCILIATION_S1004115.md).
+
 # m15 — `pressure_register` · forbidden-verb pressure witness
 
 > **Back to:** [`../../INDEX.md`](../../INDEX.md) · [`../../MODULE_MATRIX.md`](../../MODULE_MATRIX.md) · [`../../../CLAUDE.md`](../../../CLAUDE.md) · [`../../../CLAUDE.local.md`](../../../CLAUDE.local.md)

@@ -19,6 +19,18 @@ kind: per-module spec
 decisions_applied: [D-A]
 ---
 
+> **🏷 v0.1.0 — SD A/B reconciliation (S1004115 Phase 9 / § 15 D27):**
+> The shipped m20 implementation is canonical. **SD12** (m20
+> stabilization gate absent) is load-bearing: the m23 F2 evidence floor
+> (`PROPOSAL_F2_THRESHOLD = 20`) is the actual stabilization mechanism
+> the spec's "stabilization" refers to. m20 emits patterns above
+> `min_support`; m23 is the F2 gatekeeper that refuses below-threshold
+> proposals. Hardening Fleet W2 rewrote `project_after_prefix` from a
+> greedy single-pass into a correct backtracking gap-bounded matcher
+> with failure memoisation (KEYSTONE bug fix). Spec amendments mirror
+> the shipped surface; no behavioural divergence remains. Full
+> disposition: [`PHASE9_SD_RECONCILIATION_S1004115.md`](../../../ai_docs/PHASE9_SD_RECONCILIATION_S1004115.md).
+
 # m20 — `prefixspan_miner`
 
 > **Sister modules (Cluster F):** [m20](m20_prefixspan_miner.md) · [m21](m21_variant_builder.md) · [m22](m22_kmeans_feature.md) · [m23](m23_workflow_proposer.md)

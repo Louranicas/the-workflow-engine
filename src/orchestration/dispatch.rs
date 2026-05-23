@@ -311,14 +311,10 @@ pub enum OrchestrationError {
 /// Conservative default verifier: approves every workflow.
 ///
 /// The m33 gate requires exactly one [`Verifier`] per [`VerifierKind`].
-/// Genuine per-kind verification logic (a real security scan, a real
-/// cost-bound check) is out of scope for the CLI wiring task — it would
-/// need policy inputs the binary does not receive. A documented
-/// **conservative default of "approve"** is supplied so the gate is
-/// structurally present and exercised end-to-end. This is flagged: the
-/// gate is wired and deterministic, but its verdict is currently a
-/// placeholder, not a real audit. Replace each verifier's `verify` body
-/// with real logic when the policy inputs are specified.
+/// At M0, three of the four kinds (Consistency, Cost, Ember) are wired
+/// as documented stubs per Plan v2 § 15 D9 (Cost stub), D11 (Consistency
+/// stub), and D13 (Ember reduced subset — pending Phase 6b real impl).
+/// The Security kind is wired via [`SecurityVerifier`], not this stub.
 struct ConservativeVerifier {
     kind: VerifierKind,
 }
@@ -330,17 +326,115 @@ impl Verifier for ConservativeVerifier {
 
     fn verify(&self, _workflow: &crate::m30_bank::AcceptedWorkflow) -> VerifierVerdict {
         // Conservative default — see the struct doc comment. The gate is
-        // real and runs; the verdict is a documented placeholder.
+        // real and runs; the verdict is a documented stub per § 15
+        // D9/D11/D13.
         VerifierVerdict::Approve
     }
 }
 
+// rationale: Plan v2 §15 D5 (Security verdict above ceiling = hard Refuse),
+// D6 (m33 gate is blocking), D7 (default ack_ceiling = Sandboxed).
+//
+// At M0 every workflow's escape surface is assumed [`EscapeSurfaceProfile::
+// Sandboxed`] (ord 0): the WorkflowProposal type does not carry a per-
+// workflow `escape_surface` field today (verified Phase 2 audit). A real
+// per-workflow surface determination — either (i) a wire-contract change
+// adding the field, or (ii) a StepToken → surface classification table —
+// is v0.2.0 work alongside NA-GAP-01 (`RefusalToken`). The Security
+// verifier's gate SHAPE is correct: when v0.2.0 supplies a real surface
+// per workflow, this verifier produces hard-Refuse on `surface.ordinal()
+// > ack_ceiling.ordinal()` without re-wiring. At M0 the gate always
+// Approves because `Sandboxed.ordinal() == 0 <= any.ordinal()`.
+//
+// The hard-Refuse SEMANTIC of D5 is preserved in two ways: this verifier
+// implements it for any future per-workflow surface input, AND m32's
+// existing monotone `HumanAcceptanceSignature::is_acknowledged_by` gate
+// (`src/m32_dispatcher/mod.rs::EscapeSurfaceProfile::is_acknowledged_by`)
+// enforces the same comparison at dispatch time against the actual
+// workflow surface m32 emits. Documented redundancy slot.
+struct SecurityVerifier {
+    ack_ceiling: EscapeSurfaceProfile,
+}
+
+impl SecurityVerifier {
+    /// Construct against an acknowledged ceiling.
+    #[must_use]
+    const fn new(ack_ceiling: EscapeSurfaceProfile) -> Self {
+        Self { ack_ceiling }
+    }
+
+    /// The ack ceiling this verifier is configured against (exposed for tests).
+    #[cfg(test)]
+    const fn ack_ceiling(&self) -> EscapeSurfaceProfile {
+        self.ack_ceiling
+    }
+
+    /// Determine the proposal's escape surface.
+    ///
+    /// M0 simplification: every workflow is assumed
+    /// [`EscapeSurfaceProfile::Sandboxed`] (the safest profile). Per the
+    /// Phase 2 audit a real per-workflow surface determination is
+    /// v0.2.0 work; the M0 default is the safest because it can never
+    /// trigger a false-Refuse against any reasonable ceiling.
+    const fn workflow_escape_surface(
+        _workflow: &crate::m30_bank::AcceptedWorkflow,
+    ) -> EscapeSurfaceProfile {
+        EscapeSurfaceProfile::Sandboxed
+    }
+}
+
+/// Render the Security verdict given the proposal's surface and the
+/// acknowledged ceiling. Extracted as a free fn so tests can exercise
+/// every (surface, ceiling) combination without needing a real
+/// `AcceptedWorkflow` for each.
+fn security_verdict(
+    workflow_surface: EscapeSurfaceProfile,
+    ack_ceiling: EscapeSurfaceProfile,
+) -> VerifierVerdict {
+    if workflow_surface.ordinal() <= ack_ceiling.ordinal() {
+        VerifierVerdict::Approve
+    } else {
+        VerifierVerdict::Refuse {
+            reason: format!(
+                "workflow escape surface {workflow_surface:?} (ord {}) exceeds \
+                 acknowledged ceiling {ack_ceiling:?} (ord {}); \
+                 m33 Security hard-Refuse per Plan v2 §15 D5",
+                workflow_surface.ordinal(),
+                ack_ceiling.ordinal(),
+            ),
+        }
+    }
+}
+
+impl Verifier for SecurityVerifier {
+    fn kind(&self) -> VerifierKind {
+        VerifierKind::Security
+    }
+
+    fn verify(&self, workflow: &crate::m30_bank::AcceptedWorkflow) -> VerifierVerdict {
+        let workflow_surface = Self::workflow_escape_surface(workflow);
+        security_verdict(workflow_surface, self.ack_ceiling)
+    }
+}
+
 /// Build the four-verifier set required by [`aggregate`] — exactly one
-/// [`Verifier`] per [`VerifierKind`].
-fn build_verifiers() -> Vec<Box<dyn Verifier>> {
+/// [`Verifier`] per [`VerifierKind`]. Per Plan v2 § 15:
+/// - **Security** → [`SecurityVerifier`] (D5/D6/D7).
+/// - Consistency → [`ConservativeVerifier`] stub (D11).
+/// - Cost → [`ConservativeVerifier`] stub (D9).
+/// - Ember → [`ConservativeVerifier`] stub (D13; replaced with a real
+///   rubric-scoring verifier in Phase 6b).
+fn build_verifiers(ack_ceiling: EscapeSurfaceProfile) -> Vec<Box<dyn Verifier>> {
     VerifierKind::VARIANTS
         .iter()
-        .map(|&kind| -> Box<dyn Verifier> { Box::new(ConservativeVerifier { kind }) })
+        .map(|&kind| -> Box<dyn Verifier> {
+            match kind {
+                VerifierKind::Security => Box::new(SecurityVerifier::new(ack_ceiling)),
+                VerifierKind::Consistency
+                | VerifierKind::Cost
+                | VerifierKind::Ember => Box::new(ConservativeVerifier { kind }),
+            }
+        })
         .collect()
 }
 
@@ -477,7 +571,7 @@ pub fn run(config: &Config) -> Result<Report, OrchestrationError> {
     report.candidates_selected = candidates.len();
 
     // Stage 4 — per-candidate m33 verify, then m32 dispatch under --execute.
-    let verifiers = build_verifiers();
+    let verifiers = build_verifiers(config.ack_ceiling);
     let signature = HumanAcceptanceSignature {
         // The operator acknowledges the ceiling supplied on the CLI. The
         // binary itself is the operator interface; the flag IS the
@@ -605,7 +699,8 @@ fn load_proposals(path: &Path) -> Result<Vec<WorkflowProposal>, OrchestrationErr
 #[cfg(test)]
 mod tests {
     use super::{
-        build_verifiers, parse_args, ArgError, Config, DEFAULT_TOP_K,
+        build_verifiers, parse_args, security_verdict, ArgError, Config, SecurityVerifier,
+        Verifier, VerifierVerdict, DEFAULT_TOP_K,
     };
     use crate::m32_dispatcher::EscapeSurfaceProfile;
     use crate::m33_verifier::VerifierKind;
@@ -743,7 +838,7 @@ mod tests {
     fn build_verifiers_yields_one_per_kind() {
         // rationale: Contract — the m33 gate requires exactly one Verifier
         // per VerifierKind; the builder must satisfy that precondition.
-        let verifiers = build_verifiers();
+        let verifiers = build_verifiers(EscapeSurfaceProfile::Sandboxed);
         assert_eq!(verifiers.len(), VerifierKind::VARIANTS.len());
         for &kind in &VerifierKind::VARIANTS {
             assert_eq!(
@@ -751,6 +846,88 @@ mod tests {
                 1,
                 "exactly one verifier for {kind:?}"
             );
+        }
+    }
+
+    // rationale: Phase 6a — Security verifier Approve path. With the M0
+    // simplification (workflow_escape_surface = Sandboxed, ord 0) the
+    // Security verdict is Approve for every ack_ceiling.
+    #[test]
+    fn security_verifier_approves_when_workflow_surface_is_at_or_below_ceiling() {
+        for &ceiling in &EscapeSurfaceProfile::VARIANTS {
+            let verdict = security_verdict(EscapeSurfaceProfile::Sandboxed, ceiling);
+            assert_eq!(
+                verdict,
+                VerifierVerdict::Approve,
+                "Sandboxed (ord 0) must Approve under ceiling {ceiling:?}"
+            );
+        }
+    }
+
+    // rationale: Phase 6a — Security verifier hard-Refuse path. Tests the
+    // SEMANTIC of D5 directly on `security_verdict` (exercises the
+    // workflow_surface > ack_ceiling branch that the M0 default of
+    // Sandboxed never reaches in practice). When a future per-workflow
+    // surface determination supplies a real value, this branch fires.
+    #[test]
+    fn security_verifier_refuses_when_workflow_surface_exceeds_ceiling() {
+        // Take every (workflow, ceiling) pair where ord(workflow) > ord(ceiling)
+        // and confirm Refuse with a substantive reason string.
+        let mut refuse_count = 0;
+        for &surface in &EscapeSurfaceProfile::VARIANTS {
+            for &ceiling in &EscapeSurfaceProfile::VARIANTS {
+                if surface.ordinal() > ceiling.ordinal() {
+                    let verdict = security_verdict(surface, ceiling);
+                    match verdict {
+                        VerifierVerdict::Refuse { reason } => {
+                            assert!(
+                                reason.contains("D5"),
+                                "Refuse reason must reference D5: {reason}"
+                            );
+                            assert!(
+                                reason.contains("exceeds acknowledged ceiling"),
+                                "Refuse reason must name the comparison: {reason}"
+                            );
+                            refuse_count += 1;
+                        }
+                        other => panic!(
+                            "surface {surface:?} > ceiling {ceiling:?} must Refuse, got {other:?}"
+                        ),
+                    }
+                }
+            }
+        }
+        // 7 surfaces × 7 ceilings = 49 pairs; 21 land in the strict-greater-than
+        // upper triangle (binomial(7, 2) = 21).
+        assert_eq!(
+            refuse_count, 21,
+            "expected 21 strict-greater-than pairs to all Refuse"
+        );
+    }
+
+    // rationale: Phase 6a — exact-ordinal-equal Approve. The comparison
+    // is `<=`, so a workflow whose surface equals the ceiling must Approve
+    // (D5 is "ABOVE ceiling = Refuse", not "AT-OR-ABOVE").
+    #[test]
+    fn security_verifier_approves_on_exact_ceiling_match() {
+        for &p in &EscapeSurfaceProfile::VARIANTS {
+            let verdict = security_verdict(p, p);
+            assert_eq!(
+                verdict,
+                VerifierVerdict::Approve,
+                "{p:?} == {p:?} must Approve (the comparison is `<=`, not `<`)"
+            );
+        }
+    }
+
+    // rationale: Phase 6a — accessor test for `ack_ceiling`. Confirms the
+    // verifier stores what it was constructed with (anti-stale-clone bug).
+    #[test]
+    fn security_verifier_stores_ceiling_at_construction() {
+        for &p in &EscapeSurfaceProfile::VARIANTS {
+            let v = SecurityVerifier::new(p);
+            assert_eq!(v.ack_ceiling(), p);
+            assert_eq!(v.kind(), VerifierKind::Security);
         }
     }
 }

@@ -1,7 +1,7 @@
 # the-workflow-engine — Local Session State (delta)
 
 > **Back to:** [CLAUDE.md](CLAUDE.md) — project charter (structural facts; do not duplicate here)
-> **🟡 v0.2.0 IN FLIGHT (PLANNING) — S1004377, 2026-05-23:** see the "v0.2.0 IN FLIGHT (PLANNING)" section directly below for cold-start anchor. **Plan v1 + dual-frame gap analyses landed; v2 fold-in + Phase 4 interview pending.**
+> **🟢 v0.2.0 PLAN v2 RATIFIED — S1004377, 2026-05-23:** see the "v0.2.0 PLAN v2 RATIFIED" section directly below for cold-start anchor. **All 21 Phase 4 decisions locked; 4-surface persisted; single remaining gate = Luke @ node 0.A "start Phase 1" go per D48.**
 > **🟢 v0.1.0 / M0 SHIPPED 2026-05-23 (S1004115):** see the "v0.1.0 / M0 SHIPPED" section further below for the canonical M0 ship record.
 > **Vault home:** [the-workflow-engine-vault/HOME.md](the-workflow-engine-vault/HOME.md)
 > **God-tier synthesis:** [the-workflow-engine-vault/GOD_TIER_CONSOLIDATION_S1001982.md](the-workflow-engine-vault/GOD_TIER_CONSOLIDATION_S1001982.md)
@@ -12,26 +12,26 @@
 
 ---
 
-## 🟡 v0.2.0 IN FLIGHT (PLANNING) — S1004377, 2026-05-23
+## 🟢 v0.2.0 PLAN v2 RATIFIED — S1004377, 2026-05-23
 
 > **Cold-start anchor:** if you are a fresh Claude context window resuming this project,
 > read THIS section FIRST. It supersedes the v0.1.1 + v0.2.0 PREP / v0.1.0 / M0 SHIPPED
 > blocks below as the live state delta; those remain the canonical M0 + post-M0 records.
 
-**State:** Plan v1 authored + dual-frame gap analyses returned. v2 fold-in pending (next discrete turn unit). Phase 4 decision interview not yet run. No source code touched; engine still at `v0.1.0` tag (`df00fd2`).
+**State:** Plan v2 RATIFIED. v1 DRAFT → dual-frame gap analyses (13 conv + 12 NA + 3 tensions + 4 convergents) → v2 with all 25 findings folded → Phase 4 interview LOCKED (21 decisions: 15 Round A + 3 Round B + 3 stated defaults) → 4-surface persisted. **Single remaining gate: Luke @ node 0.A "start Phase 1" go per D48** (execution gate separate from plan ratification). No source code touched; engine still at `v0.1.0` tag (`df00fd2`).
 
-### Authorisation chain
+### Authorisation chain (all gates closed except execution)
 
 | Gate | Status | Source |
 |------|--------|--------|
-| v0.2.0 plan-authoring invocation per §15 D40 | ✅ AUTHORISED by Luke @ node 0.A in S1004377 | this session, in-message "Start v0.2.0 planning" |
-| Draft anchor decisions DAW-1 + DAW-2 | ✅ LOCKED at v1 draft | Luke chose Tier 2 (wire-contracts) first + full Plan v2 mirror (all 5 Tiers) |
-| Conventional + NA gap analyses | ✅ COMPLETE | sibling docs (see below) |
-| v2 author with §12 disposition fold-in | ⏳ PENDING — next turn | follows Plan v2 precedent |
-| Phase 4 interview (12-round / ~16-20 questions) | ⏳ PENDING — after v2 | seed in v1 §15; expanded by gap-analysis findings |
-| §15 lock-in of v2 final decisions | ⏳ PENDING — after interview | mirrors Plan v2 §15 shape |
-| 4-surface persist of v2 | ⏳ PENDING — after lock-in | per Plan v2 §13 read-back-verify |
-| Luke @ node 0.A "start Phase 1" go | ⏳ PENDING — execution gate separate from plan ratification per D48 | |
+| v0.2.0 plan-authoring invocation per §15 D40 | ✅ AUTHORISED by Luke @ node 0.A in S1004377 | session in-message "Start v0.2.0 planning" |
+| Draft anchor decisions DAW-1 + DAW-2 | ✅ LOCKED at v1 draft | Luke chose Tier 2 (wire-contracts) first + full Plan v2 mirror |
+| Conventional + NA gap analyses | ✅ COMPLETE | sibling docs |
+| v2 author with §12 disposition fold-in | ✅ COMPLETE | 25 findings folded; 601 lines / 10,114 words / 71K |
+| Phase 4 interview (15 Round A + 3 Round B + 3 stated defaults = 21 decisions) | ✅ COMPLETE | 6 AskUserQuestion bundles answered by Luke this session |
+| §15 lock-in of v2 final decisions | ✅ COMPLETE | every "needs DX*" annotation answered |
+| 4-surface persist of v2 | ✅ COMPLETE this turn | **ai_docs canonical + Obsidian vault note + stcortex mem 18511 (READ-BACK VERIFIED per NA-6) with bidi pathways + this CLAUDE.local.md flip + injection.db causal_chain id 119** |
+| **Luke @ node 0.A "start Phase 1" go** | ⏳ **PENDING** — execution gate separate from plan ratification per D48 | |
 
 ### Artefacts at this save
 

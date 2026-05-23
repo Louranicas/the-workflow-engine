@@ -55,6 +55,26 @@ pub struct WorkflowProposal {
     /// W1 SemVer-break — v0.1.0 proposals lacking `cost` also fail to
     /// deserialise (no `#[serde(default)]`).
     cost: i64,
+    /// Provenance chain of proposal_ids from mining → variant → propose
+    /// — A4 SD11 12-field shape per Plan v2 v0.2.0 §3 Phase 5 step 4 +
+    /// DX-A4-coupling = Phase 5 (per C-6). Single-element chain at
+    /// genesis (= `[proposal_id]`); later re-proposals append. v0.3.0
+    /// candidate for Consistency verifier `lineage-chain-only` arm per
+    /// DX-R3.
+    lineage_chain: Vec<u64>,
+    /// RALPH generation index that produced this proposal — A4 SD11
+    /// 12-field shape. Default 0 at genesis; m11/RALPH wire bumps in
+    /// post-v0.2.0 work per §11 RALPH consent gradient.
+    generation_index: u64,
+    /// Parent proposal_id if this is a re-proposal / derivation — A4
+    /// SD11 12-field shape. `None` for fresh proposals; `Some(parent_id)`
+    /// when V1 RefusalToken-typed Amend feedback drives a new proposal.
+    parent_proposal_id: Option<u64>,
+    /// Wilson p95 upper-bound lift = `evidence_lift + evidence_ci_half`
+    /// — A4 SD11 12-field shape; pre-computed so consumers don't
+    /// re-derive each access. Consumed by Phase 6 R2 Cost + R3
+    /// Consistency verifiers for confidence-band thresholding.
+    lift_p95: f64,
 }
 
 impl WorkflowProposal {
@@ -70,7 +90,7 @@ impl WorkflowProposal {
     ///
     /// Returns [`ProposerError::EvidenceBelowThreshold`] if `evidence_n` is
     /// below [`PROPOSAL_F2_THRESHOLD`].
-    #[allow(clippy::too_many_arguments)] // 8 args reflects the v0.2.0 W1+W3 wire shape; refactor to builder would be a separate v0.3.0 design (W3 keeps the F2 invariant on the constructor)
+    #[allow(clippy::too_many_arguments)] // 12 args reflects the v0.2.0 W1+W3+A4 SD11 wire shape; a builder pattern is a v0.3.0 candidate (W3+A4 keep the F2 invariant on the constructor)
     pub fn new(
         proposal_id: u64,
         variant: WorkflowVariant,
@@ -80,6 +100,10 @@ impl WorkflowProposal {
         diversity_cluster: Option<usize>,
         escape_surface: EscapeSurfaceProfile,
         cost: i64,
+        lineage_chain: Vec<u64>,
+        generation_index: u64,
+        parent_proposal_id: Option<u64>,
+        lift_p95: f64,
     ) -> Result<Self, ProposerError> {
         if evidence_n < PROPOSAL_F2_THRESHOLD {
             return Err(ProposerError::EvidenceBelowThreshold {
@@ -96,6 +120,10 @@ impl WorkflowProposal {
             diversity_cluster,
             escape_surface,
             cost,
+            lineage_chain,
+            generation_index,
+            parent_proposal_id,
+            lift_p95,
         })
     }
 
@@ -151,6 +179,32 @@ impl WorkflowProposal {
     #[must_use]
     pub const fn cost(&self) -> i64 {
         self.cost
+    }
+
+    /// Provenance chain of proposal_ids — A4 SD11 12-field shape per
+    /// Plan v2 v0.2.0 §3 Phase 5 step 4. Single-element at genesis.
+    #[must_use]
+    pub fn lineage_chain(&self) -> &[u64] {
+        &self.lineage_chain
+    }
+
+    /// RALPH generation index — A4 SD11 12-field shape.
+    #[must_use]
+    pub const fn generation_index(&self) -> u64 {
+        self.generation_index
+    }
+
+    /// Parent proposal_id if a re-proposal — A4 SD11 12-field shape.
+    #[must_use]
+    pub const fn parent_proposal_id(&self) -> Option<u64> {
+        self.parent_proposal_id
+    }
+
+    /// Wilson p95 upper-bound lift = `evidence_lift + evidence_ci_half`
+    /// — A4 SD11 12-field shape.
+    #[must_use]
+    pub const fn lift_p95(&self) -> f64 {
+        self.lift_p95
     }
 }
 
@@ -276,6 +330,15 @@ pub fn build_proposal_with_escape_surface(
     // thresholds against `cost_ceiling`. The current classifier is the
     // v0.2.0 source-of-truth per DX-W3.src.
     let cost = project_cost(&variant);
+    // A4 SD11 12-field defaults at genesis (Plan v2 v0.2.0 §3 Phase 5
+    // step 4 + DX-A4-coupling): single-element lineage_chain (this
+    // proposal_id only); generation_index 0 (m11/RALPH bumps post-v0.2.0
+    // per §11 RALPH consent gradient); no parent (fresh proposal);
+    // lift_p95 = evidence_lift + evidence_ci_half (Wilson upper-bound).
+    let lineage_chain = vec![proposal_id];
+    let generation_index = 0_u64;
+    let parent_proposal_id: Option<u64> = None;
+    let lift_p95 = lift + ci_half;
     // Route through the F2-enforcing constructor. The `snapshot.n <
     // PROPOSAL_F2_THRESHOLD` check above already guarantees this succeeds;
     // `WorkflowProposal::new` re-checks the same floor so the invariant
@@ -289,6 +352,10 @@ pub fn build_proposal_with_escape_surface(
         diversity_cluster,
         escape_surface,
         cost,
+        lineage_chain,
+        generation_index,
+        parent_proposal_id,
+        lift_p95,
     )
 }
 
@@ -1511,5 +1578,114 @@ mod tests {
         let serialised = serde_json::to_string(&p).expect("ser");
         let restored: WorkflowProposal = serde_json::from_str(&serialised).expect("de");
         assert_eq!(restored.cost(), cost_before, "cost round-trips intact");
+    }
+
+    // ========================================================================
+    // A4 SD11 12-field proposal shape tests (Plan v2 v0.2.0 §3 Phase 5
+    // step 4 + DX-A4-coupling = Phase 5 per C-6). Verifies the four new
+    // fields land with sensible defaults at genesis + round-trip through
+    // serde + SemVer-break stacks (a v0.2.0+W1+W3-but-no-A4 JSONL fails
+    // to deserialise).
+    // ========================================================================
+
+    #[test]
+    fn a4_lineage_chain_at_genesis_is_single_element_proposal_id() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let p = build_proposal(sample_variant(), &s, None).expect("ok");
+        assert_eq!(
+            p.lineage_chain(),
+            &[p.proposal_id()],
+            "genesis proposal lineage_chain == [proposal_id]"
+        );
+    }
+
+    #[test]
+    fn a4_generation_index_at_genesis_is_zero() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let p = build_proposal(sample_variant(), &s, None).expect("ok");
+        assert_eq!(
+            p.generation_index(),
+            0,
+            "genesis proposal generation_index == 0 (m11/RALPH bumps post-v0.2.0)"
+        );
+    }
+
+    #[test]
+    fn a4_parent_proposal_id_at_genesis_is_none() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let p = build_proposal(sample_variant(), &s, None).expect("ok");
+        assert_eq!(
+            p.parent_proposal_id(),
+            None,
+            "genesis proposal has no parent (re-proposals will set Some(parent_id))"
+        );
+    }
+
+    #[test]
+    fn a4_lift_p95_at_genesis_is_lift_plus_ci_half() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let p = build_proposal(sample_variant(), &s, None).expect("ok");
+        let expected_p95 = p.evidence_lift() + p.evidence_ci_half();
+        assert!(
+            (p.lift_p95() - expected_p95).abs() < f64::EPSILON,
+            "lift_p95 ({}) == evidence_lift ({}) + evidence_ci_half ({}) = {}",
+            p.lift_p95(),
+            p.evidence_lift(),
+            p.evidence_ci_half(),
+            expected_p95
+        );
+    }
+
+    #[test]
+    fn semver_break_v0_2_0_w1_w3_jsonl_missing_a4_fields_fails_to_deserialise() {
+        // Stacks the W1 + W3 SemVer-breaks: a JSONL line that has W1
+        // (escape_surface) + W3 (cost) but NOT the A4 fields
+        // (lineage_chain / generation_index / parent_proposal_id /
+        // lift_p95) MUST fail to deserialise. No `#[serde(default)]` on
+        // the A4 fields — the absence is the SemVer-break contract
+        // stacking per DX-W.c.
+        let w1_w3_only_shape = serde_json::json!({
+            "proposal_id": 12345_u64,
+            "variant": {
+                "variant_id": 42_u64,
+                "steps": [],
+                "mutation": "identity",
+                "source_pattern_hash": 7_u64,
+            },
+            "evidence_n": 30_usize,
+            "evidence_lift": 0.5_f64,
+            "evidence_ci_half": 0.05_f64,
+            "diversity_cluster": null,
+            "escape_surface": "sandboxed",
+            "cost": 0_i64,
+            // NOTE: A4 fields intentionally absent.
+        });
+        let s = w1_w3_only_shape.to_string();
+        let result: Result<WorkflowProposal, _> = serde_json::from_str(&s);
+        assert!(
+            result.is_err(),
+            "v0.2.0+W1+W3-only proposals lacking A4 fields MUST fail to deserialise (SemVer-break stack per DX-W.c + A4)"
+        );
+    }
+
+    #[test]
+    fn a4_full_12_field_round_trips_through_serde() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let p = build_proposal_with_escape_surface(
+            sample_variant(),
+            &s,
+            Some(2),
+            EscapeSurfaceProfile::FileWrite,
+        )
+        .expect("build");
+        let serialised = serde_json::to_string(&p).expect("ser");
+        let restored: WorkflowProposal = serde_json::from_str(&serialised).expect("de");
+        // Full 12-field identity check.
+        assert_eq!(p, restored, "12-field round-trip identity");
+        // Field-by-field A4 spot-checks.
+        assert_eq!(restored.lineage_chain(), p.lineage_chain());
+        assert_eq!(restored.generation_index(), p.generation_index());
+        assert_eq!(restored.parent_proposal_id(), p.parent_proposal_id());
+        assert!((restored.lift_p95() - p.lift_p95()).abs() < f64::EPSILON);
     }
 }

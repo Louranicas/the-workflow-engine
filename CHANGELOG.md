@@ -6,7 +6,126 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ---
 
-## [v0.2.0-WIP] — 2026-05-23 (S1004377) — Plan v2 Phase 1 + Phase 2 + Phase 3 (re-baseline + ADR cascade + deep FP-verify + 7-substrate audit + A2 SD9 FeatureVector + C1 m13 drain skeleton)
+## [v0.2.0-WIP] — 2026-05-23/24 (S1004377) — Plan v2 Phase 1 + 2 + 3 + 5 (re-baseline + ADRs + audit + A2/C1 + Tier-2 wire-contracts W4/W1/W3 + A4 SD11 + V1 RefusalToken types)
+
+### Phase 5 (2026-05-23/24 S1004377) — Tier 2 wire-contracts + A4 SD11 + V1 types
+
+Five sub-phase commits per D44 (W4 → W1 → W3 → A4 → V1). The WorkflowProposal
+wire-shape lifts from 6 fields (v0.1.0) → 12 fields (v0.2.0 W1+W3+A4).
+v0.1.0 proposals do NOT deserialise at v0.2.0 — three stacked SemVer-breaks
+(W1 escape_surface + W3 cost + A4 lineage_chain/generation_index/parent/lift_p95).
+V1 lands the authorship-typed RefusalToken envelope; call-site
+classification cascade (65 RefusalReason occurrences) deferred to Phase 7
+audit per ADR D-S1004XXX-04 §1.2 + C-2 lean co-land discipline.
+
+#### Added (Phase 5 W4)
+
+- **`src/m30_bank/mod.rs` BankSnapshot + CuratedBank::client_ref()** (+75
+  src LOC + ~110 test LOC + 4 tests). Read-only snapshot exposing
+  `workflow_ids` + `variant_ids` for Phase 6 R3 Consistency real
+  verifier per DX-R3 variant_id-only conflict semantic.
+
+#### Added (Phase 5 W1)
+
+- **`src/m23_proposer/mod.rs` WorkflowProposal::escape_surface SemVer-break
+  wire-bump** (+~135 src+test LOC + 4 tests). Field added; no
+  `#[serde(default)]` (the absence IS the SemVer-break contract per
+  DX-W.c). Lean strategy: keep 3-arg `build_proposal` defaulting to
+  `Sandboxed` per D7 fail-safe + new 4-arg
+  `build_proposal_with_escape_surface` for explicit. 17 existing
+  call-sites untouched. Wire SemVer-break verified by
+  `semver_break_v0_1_0_jsonl_missing_escape_surface_fails_to_deserialise`.
+
+#### Added (Phase 5 W3)
+
+- **`src/m23_proposer/mod.rs` WorkflowProposal::cost + mutation_weight_for
+  classifier** (+~165 src+test LOC + 5 tests). D10 metric source =
+  variant.mutation (MutationKind enum). Cost-frame classifier: Identity=1,
+  Swap=2, Skip=4 (inverse of mutation_safety_weight). Saturating i64
+  arithmetic via u128 intermediate. Stacks the W1 SemVer-break.
+
+#### Added (Phase 5 A4)
+
+- **`src/m23_proposer/mod.rs` WorkflowProposal 12-field SD11 shape**
+  (+~180 src+test LOC + 6 tests). Four new fields: `lineage_chain:
+  Vec<u64>` (genesis = single-element [proposal_id]), `generation_index:
+  u64` (genesis = 0; m11/RALPH bumps post-v0.2.0), `parent_proposal_id:
+  Option<u64>` (genesis = None), `lift_p95: f64` (Wilson upper-bound =
+  lift + ci_half). Closes SD11 Class-C drift. Stacks the W1+W3
+  SemVer-break.
+
+#### Added (Phase 5 V1)
+
+- **NEW module `src/refusal_token/mod.rs` + tests.rs** (+~280 src LOC +
+  ~310 test LOC + 14 tests). Authorship-typed refusal envelope per ADR
+  D-S1004XXX-04:
+  - `RefusalToken` 4-variant outer enum (SubstrateAuthored /
+    EngineAuthored / OperatorAuthored / Unavailable) per DX-1.
+  - `UnavailableReason` 3-variant sub-tag (EngineImagined /
+    SubstrateUnreachable / SubstrateAuthored) per DX-V5.b + NA-5 — the
+    critical audit-distinguishability contract preventing
+    in-engine-receiver-only V5 fallback from looking substrate-authored.
+  - `SubstrateId` (10 substrates: 7 NA-2 expansion + LCM + SynthexV2 +
+    HabitatInjection).
+  - `ModuleId` (7 modules: m9 / m13 / m32 / m33 / m40 / m41 / m42).
+  - `OperatorRefusalReason` (3 variants per NA-3 operator-refusal
+    vocabulary: Malformed / NotNow / RequestReframing).
+  - `RefusalPayload` (typed envelope: AcceptableEscapeSurface couples to
+    D-S1002127-02; VerifierContext; SuggestedReframing; Freeform escape).
+  - `EngineRefusalReason` = alias of v0.1.0 `m32::RefusalReason`
+    (preserves existing 65-occurrence call-site surface; Phase 7 audit
+    wraps each site).
+  - Constructors: `substrate_authored`, `engine_authored`,
+    `operator_authored`, `unavailable_engine_imagined`,
+    `unavailable_substrate_unreachable`, `unavailable_substrate_authored`.
+  - Accessors: `substrate_id() -> Option<SubstrateId>`,
+    `is_substrate_authored() -> bool`, `is_engine_imagined() -> bool` —
+    the NA-5 audit-distinguishability primary checks.
+- **`src/lib.rs` pub mod refusal_token** (+1 line).
+
+##### Phase 5 V1 deferred to Phase 7 per C-2 lean co-land discipline
+
+- Call-site classification audit (65 RefusalReason occurrences across
+  7 files) — Phase 7 step 2 per ADR D-S1004XXX-04 §1.2 table.
+- m13 drain skeleton consumer wire (will use the new
+  `RefusalToken::SubstrateAuthored Stcortex` envelope per ADR §1.2
+  m13 row).
+- RefusalReceipt shape update (adds optional `token: Option<RefusalToken>`
+  field; v0.1.0 receipts deserialise with None fallback).
+- m32 RefusalReason removal (it stays as the v0.1.0 surface; v0.2.0 wraps
+  via `RefusalToken::EngineAuthored`).
+
+#### Phase 5 done-evidence (per Plan v2 §15 D43)
+
+- **Gate (4-stage, all green) per sub-phase commit:**
+  - W4: cargo check + clippy + pedantic + test ✅ (commit `9a15213`)
+  - W1: cargo check + clippy + pedantic + test ✅ (commit `39953df`)
+  - W3: cargo check + clippy + pedantic + test ✅ (commit `d776671`)
+  - A4: cargo check + clippy + pedantic + test ✅ (commit `a25540e`)
+  - V1: cargo check + clippy + pedantic + test ✅ (this commit)
+- **Test-count delta (Phase 5):** 2059 (Phase 3 baseline) → 2092 (Phase
+  5 close). **+33 tests in Phase 5** (W4 +4 + W1 +4 + W3 +5 + A4 +6 +
+  V1 +14).
+- **Cumulative v0.2.0 delta:** 2048 (v0.1.0 baseline) → 2092
+  (Phase 5 close). **+44 tests v0.1.0 → Phase 5 close.**
+- **Cargo-mutants:** end-of-Phase-5 scoped run deferred to Phase 6
+  start (after R1/R2/R3 verifiers land; combined scoped run for all
+  Phase 5+6 wire-contract + verifier surfaces).
+
+#### Three stacked SemVer-breaks at v0.2.0 wire level
+
+| Break | Field added | Test that asserts the break |
+|-------|-------------|------------------------------|
+| W1 | `escape_surface: EscapeSurfaceProfile` | `semver_break_v0_1_0_jsonl_missing_escape_surface_fails_to_deserialise` |
+| W3 | `cost: i64` | `semver_break_v0_2_0_jsonl_missing_cost_fails_to_deserialise` |
+| A4 | `lineage_chain` + `generation_index` + `parent_proposal_id` + `lift_p95` | `semver_break_v0_2_0_w1_w3_jsonl_missing_a4_fields_fails_to_deserialise` |
+
+The CHANGELOG v0.2.0 § "Changed" migration note will document: v0.1.0
+`proposals.jsonl` files on disk (e.g., developer-local artefacts) fail
+to deserialise at v0.2.0. No `--migrate` flag — re-run `wf-crystallise`
+to regenerate the v0.2.0 wire-shape.
+
+### Phase 3 (2026-05-23 S1004377) — first Rust code phase
 
 ### Phase 3 (2026-05-23 S1004377) — first Rust code phase
 

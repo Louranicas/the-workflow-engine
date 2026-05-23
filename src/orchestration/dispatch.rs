@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::m11_fitness_weighted_decay::chrono_now_ms;
+use crate::m22_kmeans::RECOMMENDED_K_MAX;
 use crate::m23_proposer::WorkflowProposal;
 use crate::m30_bank::{BankError, CuratedBank};
 use crate::m31_selector::{select_top_k, SelectorConfig, SelectorError};
@@ -475,6 +476,39 @@ fn render_workflow_artefact(workflow: &crate::m30_bank::AcceptedWorkflow) -> Str
     )
 }
 
+/// Compute the m31 diversity score for an [`AcceptedWorkflow`] from its
+/// proposal's `diversity_cluster`.
+///
+/// Closes Phase 5 zen APPROVE-WITH-NITS A2 (v0.2.0 / Plan v2 §15 D18):
+/// the m22 K-means clustering signal populated by `wf-crystallise` is
+/// now consumed by the `wf-dispatch::run` `select_top_k` caller. Per
+/// D18 "diversity cluster influences m31 selection".
+///
+/// Mapping (each `Some(cluster_idx)` lands in `(0, 1]`; different cluster
+/// indices map to different score values, so m31's `δ · diversity` term
+/// prefers spreading the top-K across clusters — exactly the substrate-side
+/// contract D18 names):
+///
+/// - `Some(cluster_idx)` → `(idx + 1) / (RECOMMENDED_K_MAX + 1)`.
+/// - `None` → `0.5` (neutral mid-band; m22 clustering was skipped).
+///
+/// Bounded in `[0, 1]` per `select_top_k`'s `diversity_score` contract;
+/// `sanitise(value)` in m31 will clamp non-finite values to 0 (this
+/// function never produces non-finite output by construction).
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "cluster_idx + 1 is bounded by RECOMMENDED_K_MAX + 1 = 9; the cast is exact"
+)]
+fn diversity_score_from_proposal(workflow: &crate::m30_bank::AcceptedWorkflow) -> f64 {
+    match workflow.proposal().diversity_cluster() {
+        Some(cluster_idx) => {
+            let max_norm = RECOMMENDED_K_MAX as f64 + 1.0;
+            (cluster_idx as f64 + 1.0) / max_norm
+        }
+        None => 0.5,
+    }
+}
+
 /// Map an m10 rubric verdict to the m33 Ember verifier verdict per D16.
 /// Extracted as a free fn so the mapping is tested independently of
 /// fixture construction.
@@ -726,10 +760,31 @@ pub fn run(config: &Config) -> Result<Report, OrchestrationError> {
     // Stage 3 — m31 select top-K from the bank's active set.
     let actives = bank.active(now_ms, 0.0);
     let selector_cfg = SelectorConfig::default();
-    // `|_| 0.0` diversity closure: m22 K-means clustering is not wired into
-    // the dispatch CLI path; a documented conservative default of "no
-    // diversity contribution" is passed (honest: the signal is absent).
-    let candidates = select_top_k(&actives, &selector_cfg, |_w| 0.0, now_ms, config.top_k)?;
+    // Diversity closure — closes Phase 5 zen APPROVE-WITH-NITS A2
+    // (v0.2.0 follow-up in Plan v2). Each proposal's
+    // `diversity_cluster` (populated by `wf-crystallise`'s m22 K-means
+    // pipeline per Phase 5 / § 15 D17–D20) is now consumed here, so
+    // the m22 substrate-side signal reaches m31 ranking. Per D18:
+    // "diversity cluster influences m31 selection" — the behavioural
+    // loop is closed.
+    //
+    // Mapping: `Some(cluster_idx) → (idx + 1) / (RECOMMENDED_K_MAX + 1)`
+    // (a value in `(0, 1]` that gives different clusters different
+    // diversity weights, encouraging the selector to spread its
+    // top-K choice across clusters); `None → 0.5` (a neutral mid-band
+    // value used when m22 clustering was skipped for this proposal).
+    //
+    // `select_top_k`'s `diversity_score` enters via the `δ * diversity`
+    // term in m31's composite score (`α·fitness + β·recency + γ·frequency
+    // + δ·diversity`), so this is the additive-bounded influence shape
+    // §15 D18 + D22 specifies.
+    let candidates = select_top_k(
+        &actives,
+        &selector_cfg,
+        diversity_score_from_proposal,
+        now_ms,
+        config.top_k,
+    )?;
     report.candidates_selected = candidates.len();
 
     // Stage 4 — per-candidate m33 verify, then m32 dispatch under --execute.

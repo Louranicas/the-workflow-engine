@@ -2,16 +2,37 @@
 #
 # Runs the canonical 4-stage quality gate on every push to `main` and on every PR.
 # Uses NO user-controlled inputs in run: commands — all cargo invocations are static
-# strings, no ${{ github.event.* }} expansion (per
-# https://github.blog/security/vulnerability-research/how-to-catch-github-actions-workflow-injections-before-attackers-do/).
+# strings, no ${{ github.event.* }} expansion.
 #
-# Known M0 limitation: the `spacetimedb-sdk = { path = "../spacetimedb/sdks/rust" }`
-# dependency in `Cargo.toml` references a sibling-of-this-repo directory. When
-# checking out this repo standalone (without the parent habitat workspace),
-# `../spacetimedb` does not exist and the build fails. Resolutions on the v0.2.0
-# roadmap: vendor spacetimedb-sdk OR make spacetimedb a submodule OR consume the
-# published crates.io spacetimedb-sdk. Until one of those lands, this CI pipeline
-# ships but its "spacetimedb path resolves" precondition is owned by the operator.
+# ## Known M0 limitation — `spacetimedb-sdk` sibling-path dep
+#
+# The engine `Cargo.toml` references `spacetimedb-sdk = { path = "../spacetimedb/sdks/rust" }`.
+# This path resolves when the engine is checked out alongside its parent habitat workspace,
+# but FAILS in standalone CI checkout of this repo.
+#
+# **Recipe to resolve (operator-pickable, post-M0):**
+#
+# Option A — Workspace-root submodule (recommended; matches the canonical sibling layout):
+#     cd <workspace-root>
+#     # Move the existing sibling out of the way first:
+#     mv spacetimedb spacetimedb.local-backup
+#     git submodule add -b master https://github.com/clockworklabs/SpacetimeDB.git spacetimedb
+#     # Pin to the known-good commit:
+#     cd spacetimedb && git checkout fbec2761abbf65b90673130835c4cab6c016924c && cd -
+#     git add .gitmodules spacetimedb && git commit -m "deps(workspace): pin spacetimedb-sdk via submodule"
+#
+# Option B — Vendor into the engine repo (self-contained, +~MB):
+#     cp -r ../spacetimedb the-workflow-engine/vendor-spacetimedb
+#     # Edit the-workflow-engine/Cargo.toml:
+#     #   spacetimedb-sdk = { path = "vendor-spacetimedb/sdks/rust" }
+#
+# Option C — Use the published crates.io spacetimedb-sdk:
+#     # Edit the-workflow-engine/Cargo.toml:
+#     #   spacetimedb-sdk = "X.Y.Z"  # verify wire-compat with vendor pin first
+#
+# Until one of the above lands, CI runs only when checked out alongside the parent
+# habitat workspace (Option A is then default; the `submodules: recursive` step below
+# handles it). Pinned upstream: https://github.com/clockworklabs/SpacetimeDB.git @ fbec2761.
 
 name: workflow-trace 4-stage gate
 
@@ -32,7 +53,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: recursive  # honours `.gitmodules` if present (Option A above)
 
       - name: Toolchain
         uses: dtolnay/rust-toolchain@stable

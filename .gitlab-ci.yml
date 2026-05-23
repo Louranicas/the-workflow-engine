@@ -2,21 +2,19 @@
 #
 # Runs the canonical 4-stage quality gate on every push to `main` and on every MR.
 #
-# **Known M0 limitation:** the `spacetimedb-sdk = { path = "../spacetimedb/sdks/rust" }`
-# dependency in `Cargo.toml` references a sibling-of-this-repo directory. When checking
-# out this repo standalone (i.e. without the parent habitat workspace), `../spacetimedb`
-# does not exist and the build fails. Resolutions on the v0.2.0 roadmap:
-# (a) vendor `spacetimedb-sdk` into this repo, OR
-# (b) make `spacetimedb` a git submodule, OR
-# (c) consume the published `spacetimedb-sdk` from crates.io.
-# Until one of those lands, this CI pipeline ships but its "spacetimedb path resolves"
-# precondition is owned by the operator. Documented here, not silenced.
+# ## Known M0 limitation — `spacetimedb-sdk` sibling-path dep
+#
+# See `.github/workflows/ci.yml` for the full recipe (Options A/B/C). The same
+# resolutions apply here; GitLab's submodule support matches GitHub's
+# `submodules: recursive`. Pinned upstream:
+# https://github.com/clockworklabs/SpacetimeDB.git @ fbec2761abbf65b90673130835c4cab6c016924c.
 
 image: rust:latest
 
 variables:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
+  GIT_SUBMODULE_STRATEGY: recursive   # honours .gitmodules (Option A in ci.yml)
 
 stages:
   - gate

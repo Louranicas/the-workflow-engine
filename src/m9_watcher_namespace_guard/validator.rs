@@ -166,15 +166,123 @@ pub fn munge_hyphen_slug(input: &str) -> String {
     input.replace('-', "_")
 }
 
-// TODO(m30/m32 — Cluster G, post-Wave-3): wire the EscapeSurfaceProfile
-// 7-variant capability table per m9 spec § 2 (D-S1002127-02 ADR at
-// ai_docs/optimisation-v7/decisions/2026-05-17-escape-surface-cardinality-7-privilege-escalation.md).
-// The m32 acknowledgement gate is monotone (C10): a dispatch at profile X is
-// permitted iff `X.ordinal() <= HumanAcceptanceSignature.acknowledged_ceiling.ordinal()`.
-// So PrivilegeEscalation (ordinal 30) requires an acknowledged ceiling of at
-// least PrivilegeEscalation, and DataExfil (ordinal 60) one of at least DataExfil.
-// The signature struct lives in m32; m9 will read it via a trait abstraction
-// once that module ships. Day-1 scope = prefix + munge + 4 base variants.
+// Phase 6e — m9 ↔ m32 EscapeSurfaceProfile seam (gap C-8 / NA-GAP-11 fold).
+// Closes the TODO that previously occupied this site. The m9 spec § 2
+// 7-variant capability table (D-S1002127-02 ADR at
+// ai_docs/optimisation-v7/decisions/2026-05-17-escape-surface-cardinality-7-privilege-escalation.md)
+// is wired below via the single shared
+// [`crate::m32_dispatcher::AcceptanceSignatureReader`] trait. m9 reads only
+// `acknowledged_ceiling()` — the minimum slice of the signature surface the
+// monotone gate needs — so we share m32's contract without coupling to the
+// rest of `HumanAcceptanceSignature`'s layout.
+//
+// Monotonicity (mirrors m32's
+// [`EscapeSurfaceProfile::is_acknowledged_by`]): a write at profile X is
+// permitted iff `X.ordinal() <= reader.acknowledged_ceiling().ordinal()`.
+// PrivilegeEscalation (ord 30) demands a ceiling ≥ PrivilegeEscalation;
+// DataExfil (ord 60) one ≥ DataExfil. All 7 variants are covered by the
+// same single comparison — there is no per-variant special case here.
+//
+// The function is a pure validator: a single ordinal comparison + (on
+// refusal) a `tracing::error!` event in the same shape as the rest of the
+// validator surface. No allocation on the happy path.
+
+use crate::m32_dispatcher::{AcceptanceSignatureReader, EscapeSurfaceProfile};
+
+/// Capability table per m9 spec § 2 — the minimum
+/// [`EscapeSurfaceProfile`] ceiling an acceptance signature must
+/// acknowledge for a write at the given `required` profile to be admitted
+/// at the m9 application layer.
+///
+/// The mapping is the **identity** function: the m32 monotone destructiveness
+/// ladder is single-axis, so the minimum ceiling for a write at profile X is
+/// exactly X. Implementations of the table that introduce slack (e.g.
+/// "`SandboxEscape` requires only `Sandboxed`") would silently widen the
+/// gate — by exposing the table as a `const fn` we make the lift visible to
+/// every caller and locked at the type system.
+///
+/// Used by [`assert_namespace_capability`]; exposed publicly so callers can
+/// preflight the gate without raising a refusal event.
+#[must_use]
+#[allow(
+    clippy::needless_match,
+    reason = "Explicit per-variant arms force any future EscapeSurfaceProfile \
+              cardinality bump (8th variant) to visit this site and audit the \
+              capability table; collapsing to `required` would silently \
+              inherit identity for unseen variants, defeating the m9 ↔ m32 \
+              seam discipline (Phase 6e, gap C-8)."
+)]
+pub const fn required_signature_ceiling(required: EscapeSurfaceProfile) -> EscapeSurfaceProfile {
+    // Identity (single-axis monotone ladder). All 7 variants enumerated
+    // explicitly so a future cardinality bump (8th variant) is forced to
+    // visit this site rather than silently inheriting a wildcard default.
+    match required {
+        EscapeSurfaceProfile::Sandboxed => EscapeSurfaceProfile::Sandboxed,
+        EscapeSurfaceProfile::SandboxEscape => EscapeSurfaceProfile::SandboxEscape,
+        EscapeSurfaceProfile::ProcessMutate => EscapeSurfaceProfile::ProcessMutate,
+        EscapeSurfaceProfile::PrivilegeEscalation => EscapeSurfaceProfile::PrivilegeEscalation,
+        EscapeSurfaceProfile::FileWrite => EscapeSurfaceProfile::FileWrite,
+        EscapeSurfaceProfile::NetworkEgress => EscapeSurfaceProfile::NetworkEgress,
+        EscapeSurfaceProfile::DataExfil => EscapeSurfaceProfile::DataExfil,
+    }
+}
+
+/// Assert that the operator's acknowledged ceiling, as exposed by any
+/// [`AcceptanceSignatureReader`], covers a write at the given `required`
+/// [`EscapeSurfaceProfile`].
+///
+/// This is the m9 application-layer mirror of m32's monotone
+/// dispatch-time gate ([`EscapeSurfaceProfile::is_acknowledged_by`] /
+/// [`EscapeSurfaceProfile::is_acknowledged_by_reader`]). m9 surfaces the
+/// gate **before the substrate write** so a write at `PrivilegeEscalation`
+/// shape (ord 30) or `DataExfil` shape (ord 60) cannot leak past the
+/// namespace guard while the operator has only acknowledged a lower
+/// ceiling.
+///
+/// The function is pure beyond a single `tracing::error!` on refusal: no
+/// allocation on the happy path, single comparison, returns a typed
+/// [`NamespaceViolation::CapabilityNotAcknowledged`] on violation.
+///
+/// Phase 6e — m9 ↔ m32 EscapeSurfaceProfile seam (gap C-8 / NA-GAP-11
+/// fold). The shared trait is defined ONCE in
+/// [`crate::m32_dispatcher`]; m9 imports it (read-only) and consumes only
+/// `acknowledged_ceiling()`.
+///
+/// # Errors
+///
+/// Returns [`NamespaceViolation::CapabilityNotAcknowledged`] when the
+/// signature reader's `acknowledged_ceiling()` ordinal is strictly less
+/// than the `required` profile's ordinal.
+pub fn assert_namespace_capability<R>(
+    required: EscapeSurfaceProfile,
+    signature: &R,
+) -> Result<(), NamespaceViolation>
+where
+    R: AcceptanceSignatureReader + ?Sized,
+{
+    let acknowledged = signature.acknowledged_ceiling();
+    // Use the shared trait-generic gate on EscapeSurfaceProfile to keep the
+    // m9 ↔ m32 check the SAME comparison — one ordinal, one direction. Any
+    // future divergence between m32's dispatch gate and m9's namespace gate
+    // would force a change here.
+    if required.is_acknowledged_by_reader(signature) {
+        return Ok(());
+    }
+    tracing::error!(
+        target: "m9.validator",
+        required = ?required,
+        required_ord = required.ordinal(),
+        acknowledged = ?acknowledged,
+        acknowledged_ord = acknowledged.ordinal(),
+        "stcortex write blocked: EscapeSurfaceProfile capability gate"
+    );
+    Err(NamespaceViolation::CapabilityNotAcknowledged {
+        required,
+        required_ord: required.ordinal(),
+        acknowledged,
+        acknowledged_ord: acknowledged.ordinal(),
+    })
+}
 
 #[cfg(test)]
 mod tests {
@@ -756,5 +864,275 @@ mod tests {
         // the UTF-8-encoded input — NOT at a midpoint inside the CJK char.
         assert_eq!(byte_offset, "workflow_trace测".len(),
             "byte_offset must land on a UTF-8 boundary, got {byte_offset}");
+    }
+
+    // ====================================================================
+    // Phase 6e — m9 ↔ m32 EscapeSurfaceProfile seam (gap C-8 / NA-GAP-11).
+    //
+    // The new `assert_namespace_capability` function closes the prior
+    // TODO at the bottom of `validator.rs` by wiring the m9 spec § 2
+    // capability table to m32's monotone destructiveness ladder via the
+    // shared `AcceptanceSignatureReader` trait. Tests below exercise:
+    //   - the identity capability table (all 7 variants),
+    //   - the trait-generic gate across every (required, ceiling) pair,
+    //   - the boundary at-or-below-ceiling Approve / above-ceiling
+    //     Refuse semantics,
+    //   - the typed `CapabilityNotAcknowledged` shape,
+    //   - the trait blanket impl on references,
+    //   - a custom test-only `AcceptanceSignatureReader` impl confirming
+    //     the trait — not the concrete struct — is the contract,
+    //   - the m9 ↔ m32 cross-consistency invariant (the same comparison
+    //     runs through both `is_acknowledged_by_reader` and
+    //     `assert_namespace_capability`).
+    // ====================================================================
+
+    use super::{assert_namespace_capability, required_signature_ceiling};
+    use crate::m32_dispatcher::{
+        AcceptanceSignatureReader, EscapeSurfaceProfile, HumanAcceptanceSignature,
+    };
+
+    /// Test-only [`AcceptanceSignatureReader`] that carries ONLY the
+    /// minimum data point — proves the m9 ↔ m32 seam contracts on the
+    /// trait, not on the concrete [`HumanAcceptanceSignature`] layout.
+    struct CeilingOnly(EscapeSurfaceProfile);
+
+    impl AcceptanceSignatureReader for CeilingOnly {
+        fn acknowledged_ceiling(&self) -> EscapeSurfaceProfile {
+            self.0
+        }
+    }
+
+    // rationale: Capability-table contract — m9 spec § 2 lifts to identity
+    // on the single-axis monotone ladder. Any per-variant slack would
+    // silently widen the gate; this test pins all 7 mappings.
+    #[test]
+    fn required_signature_ceiling_is_identity_on_all_seven_variants() {
+        for &p in &EscapeSurfaceProfile::VARIANTS {
+            assert_eq!(
+                required_signature_ceiling(p),
+                p,
+                "capability table must be identity for {p:?} (single-axis monotone ladder)"
+            );
+        }
+    }
+
+    // rationale: Happy path — when ceiling ≥ required, the m9 capability
+    // gate Approves. Exercises every (required, ceiling) pair in the
+    // upper triangle + the diagonal (7 × 7 = 49 pairs, 28 satisfy the
+    // gate).
+    #[test]
+    fn capability_gate_approves_when_ceiling_meets_or_exceeds_required() {
+        let mut ok_count = 0;
+        for &required in &EscapeSurfaceProfile::VARIANTS {
+            for &ceiling in &EscapeSurfaceProfile::VARIANTS {
+                let sig = HumanAcceptanceSignature {
+                    interactive_terminal: true,
+                    acknowledged_ceiling: ceiling,
+                };
+                let result = assert_namespace_capability(required, &sig);
+                if required.ordinal() <= ceiling.ordinal() {
+                    assert!(
+                        result.is_ok(),
+                        "required={required:?} ceiling={ceiling:?} must Approve, got {result:?}"
+                    );
+                    ok_count += 1;
+                } else {
+                    assert!(
+                        result.is_err(),
+                        "required={required:?} ceiling={ceiling:?} must Refuse, got Ok"
+                    );
+                }
+            }
+        }
+        // binomial(7, 2) + 7 = 21 + 7 = 28 (lower-or-equal triangle including diagonal).
+        assert_eq!(ok_count, 28, "expected 28 at-or-below-ceiling pairs to Approve");
+    }
+
+    // rationale: Anti-property — when ceiling < required, the m9
+    // capability gate refuses with the typed
+    // `CapabilityNotAcknowledged` variant carrying both ordinals AND
+    // both profile enums. Operator triage relies on the structured
+    // error, not just the tracing event.
+    #[test]
+    fn capability_gate_refuses_with_typed_error_above_ceiling() {
+        let mut refuse_count = 0;
+        for &required in &EscapeSurfaceProfile::VARIANTS {
+            for &ceiling in &EscapeSurfaceProfile::VARIANTS {
+                if required.ordinal() <= ceiling.ordinal() {
+                    continue;
+                }
+                let sig = HumanAcceptanceSignature {
+                    interactive_terminal: true,
+                    acknowledged_ceiling: ceiling,
+                };
+                let err = assert_namespace_capability(required, &sig).unwrap_err();
+                let NamespaceViolation::CapabilityNotAcknowledged {
+                    required: r,
+                    required_ord,
+                    acknowledged,
+                    acknowledged_ord,
+                } = err
+                else {
+                    panic!(
+                        "expected CapabilityNotAcknowledged for required={required:?} \
+                         ceiling={ceiling:?}, got {err:?}"
+                    );
+                };
+                assert_eq!(r, required);
+                assert_eq!(required_ord, required.ordinal());
+                assert_eq!(acknowledged, ceiling);
+                assert_eq!(acknowledged_ord, ceiling.ordinal());
+                refuse_count += 1;
+            }
+        }
+        // binomial(7, 2) = 21 strict-greater-than pairs.
+        assert_eq!(refuse_count, 21, "expected 21 above-ceiling pairs to Refuse");
+    }
+
+    // rationale: Boundary — equal ordinals Approve (the comparison is
+    // `<=` not `<`; a write at exactly the ceiling is acknowledged).
+    #[test]
+    fn capability_gate_approves_on_exact_ceiling_match() {
+        for &p in &EscapeSurfaceProfile::VARIANTS {
+            let sig = HumanAcceptanceSignature {
+                interactive_terminal: true,
+                acknowledged_ceiling: p,
+            };
+            assert!(
+                assert_namespace_capability(p, &sig).is_ok(),
+                "required={p:?} ceiling={p:?} must Approve (gate is <=, not <)"
+            );
+        }
+    }
+
+    // rationale: m9 ↔ m32 cross-consistency. The same monotone comparison
+    // must drive m32's `is_acknowledged_by`, m32's
+    // `is_acknowledged_by_reader`, AND m9's `assert_namespace_capability`
+    // — if any of the three drifts, this test fires.
+    #[test]
+    fn capability_gate_matches_m32_dispatch_gate_on_every_pair() {
+        for &required in &EscapeSurfaceProfile::VARIANTS {
+            for &ceiling in &EscapeSurfaceProfile::VARIANTS {
+                let sig = HumanAcceptanceSignature {
+                    interactive_terminal: true,
+                    acknowledged_ceiling: ceiling,
+                };
+                let m32_concrete = required.is_acknowledged_by(&sig);
+                let m32_trait = required.is_acknowledged_by_reader(&sig);
+                let m9_gate = assert_namespace_capability(required, &sig).is_ok();
+                assert_eq!(
+                    m32_concrete, m32_trait,
+                    "m32 concrete vs trait gate diverge at required={required:?} \
+                     ceiling={ceiling:?}"
+                );
+                assert_eq!(
+                    m32_concrete, m9_gate,
+                    "m9 vs m32 gates diverge at required={required:?} ceiling={ceiling:?} \
+                     — m9 ↔ m32 single-source-of-truth invariant breached"
+                );
+            }
+        }
+    }
+
+    // rationale: Trait-abstraction contract. m9 must depend on the
+    // `AcceptanceSignatureReader` trait, NOT the concrete
+    // `HumanAcceptanceSignature`. A test-only reader that exposes only
+    // the ceiling (no `interactive_terminal`, no other fields) must
+    // drive the gate identically.
+    #[test]
+    fn capability_gate_consumes_trait_not_concrete_struct() {
+        for &required in &EscapeSurfaceProfile::VARIANTS {
+            for &ceiling in &EscapeSurfaceProfile::VARIANTS {
+                let reader = CeilingOnly(ceiling);
+                let result = assert_namespace_capability(required, &reader);
+                if required.ordinal() <= ceiling.ordinal() {
+                    assert!(result.is_ok(), "CeilingOnly Approve for ({required:?}, {ceiling:?})");
+                } else {
+                    assert!(result.is_err(), "CeilingOnly Refuse for ({required:?}, {ceiling:?})");
+                }
+            }
+        }
+    }
+
+    // rationale: Trait blanket impl over references — `&R` where
+    // `R: AcceptanceSignatureReader` must forward the call. This
+    // guarantees callers can hand m9 either `sig` or `&sig` without
+    // changing the gate semantics.
+    #[test]
+    fn capability_gate_accepts_reference_to_reader() {
+        let sig = HumanAcceptanceSignature {
+            interactive_terminal: true,
+            acknowledged_ceiling: EscapeSurfaceProfile::FileWrite,
+        };
+        // `&sig` (already an `&HumanAcceptanceSignature`) is one level of
+        // reference; `&&sig` exercises the blanket impl for `&R`.
+        let r1 = assert_namespace_capability(EscapeSurfaceProfile::FileWrite, &sig);
+        let outer: &HumanAcceptanceSignature = &sig;
+        let r2 = assert_namespace_capability(EscapeSurfaceProfile::FileWrite, &outer);
+        assert!(r1.is_ok());
+        assert!(r2.is_ok());
+        // Above-ceiling case via the blanket impl on a borrowed reader.
+        let refuse = assert_namespace_capability(EscapeSurfaceProfile::DataExfil, &outer);
+        assert!(matches!(
+            refuse,
+            Err(NamespaceViolation::CapabilityNotAcknowledged { .. })
+        ));
+    }
+
+    // rationale: Error Display surface — the `CapabilityNotAcknowledged`
+    // message must name both profiles, both ordinals, and the Phase 6e
+    // seam tag so an operator triaging from logs alone can identify the
+    // gate.
+    #[test]
+    fn capability_not_acknowledged_display_names_required_and_acknowledged_and_seam() {
+        let sig = HumanAcceptanceSignature {
+            interactive_terminal: true,
+            acknowledged_ceiling: EscapeSurfaceProfile::Sandboxed,
+        };
+        let err =
+            assert_namespace_capability(EscapeSurfaceProfile::PrivilegeEscalation, &sig)
+                .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("PrivilegeEscalation"), "missing required: {msg}");
+        assert!(msg.contains("Sandboxed"), "missing acknowledged: {msg}");
+        assert!(msg.contains("ord 30"), "missing required_ord: {msg}");
+        assert!(msg.contains("ord 0"), "missing acknowledged_ord: {msg}");
+        assert!(msg.contains("Phase 6e"), "missing seam tag: {msg}");
+        assert!(msg.contains("m9"), "missing m9 layer tag: {msg}");
+    }
+
+    // rationale: Default-signature behaviour — `HumanAcceptanceSignature`
+    // defaults to `Sandboxed` ceiling; m9's gate must therefore refuse
+    // any required profile above `Sandboxed` under the default.
+    #[test]
+    fn capability_gate_refuses_above_sandboxed_under_default_signature() {
+        let sig = HumanAcceptanceSignature::default();
+        assert_eq!(sig.acknowledged_ceiling, EscapeSurfaceProfile::Sandboxed);
+        for &required in &EscapeSurfaceProfile::VARIANTS {
+            let result = assert_namespace_capability(required, &sig);
+            if required.ordinal() == 0 {
+                assert!(result.is_ok(), "Sandboxed required must Approve under default sig");
+            } else {
+                assert!(
+                    matches!(result, Err(NamespaceViolation::CapabilityNotAcknowledged { .. })),
+                    "{required:?} required must Refuse under default Sandboxed sig"
+                );
+            }
+        }
+    }
+
+    // rationale: Determinism — repeated calls return identical results
+    // (no internal mutation; pure validator beyond tracing).
+    #[test]
+    fn capability_gate_is_deterministic() {
+        let sig = HumanAcceptanceSignature {
+            interactive_terminal: true,
+            acknowledged_ceiling: EscapeSurfaceProfile::FileWrite,
+        };
+        let first = assert_namespace_capability(EscapeSurfaceProfile::DataExfil, &sig);
+        for _ in 0..100_u32 {
+            let again = assert_namespace_capability(EscapeSurfaceProfile::DataExfil, &sig);
+            assert_eq!(format!("{first:?}"), format!("{again:?}"));
+        }
     }
 }

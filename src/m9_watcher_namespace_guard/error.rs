@@ -3,11 +3,12 @@
 //! Per m9 spec § 4 — error-band assignment per
 //! `ERROR_TAXONOMY.md § E3xxx` (Trust-layer violations):
 //!
-//! - [`NamespaceViolation::WrongPrefix`]       = `E3101`
-//! - [`NamespaceViolation::Empty`]             = `E3102`
-//! - [`NamespaceViolation::Whitespace`]        = `E3103`
-//! - [`NamespaceViolation::ScratchForbidden`]  = `E3104`
-//! - [`NamespaceViolation::ControlChar`]       = `E3105`
+//! - [`NamespaceViolation::WrongPrefix`]                     = `E3101`
+//! - [`NamespaceViolation::Empty`]                           = `E3102`
+//! - [`NamespaceViolation::Whitespace`]                      = `E3103`
+//! - [`NamespaceViolation::ScratchForbidden`]                = `E3104`
+//! - [`NamespaceViolation::ControlChar`]                     = `E3105`
+//! - [`NamespaceViolation::CapabilityNotAcknowledged`]       = `E3106`
 //!
 //! Every variant Display text names the violated invariant and (where
 //! applicable) the offending input and the expected prefix so operators can
@@ -82,6 +83,41 @@ pub enum NamespaceViolation {
         codepoint: u32,
         /// Byte offset within the input string.
         byte_offset: usize,
+    },
+
+    /// The required [`EscapeSurfaceProfile`] for this write exceeds the
+    /// operator's acknowledged ceiling (monotone destructiveness gate).
+    ///
+    /// This is the m9 application-layer mirror of m32's
+    /// [`RefusalReason::EscapeSurfaceNotAcknowledged`]: the same
+    /// monotone ladder is enforced at the namespace-write boundary so
+    /// that a `PrivilegeEscalation`-shaped or `DataExfil`-shaped write
+    /// cannot leak past m9 while the operator has only acknowledged
+    /// `Sandboxed`. Phase 6e — m9 ↔ m32 seam (gap C-8 / NA-GAP-11
+    /// fold).
+    ///
+    /// Carries the required profile and the actually-acknowledged
+    /// ceiling for operator triage; both are
+    /// [`EscapeSurfaceProfile`] values so the wire round-trip is
+    /// closed-set and serde-stable.
+    ///
+    /// [`EscapeSurfaceProfile`]: crate::m32_dispatcher::EscapeSurfaceProfile
+    /// [`RefusalReason::EscapeSurfaceNotAcknowledged`]: crate::m32_dispatcher::RefusalReason::EscapeSurfaceNotAcknowledged
+    #[error(
+        "stcortex write blocked: required EscapeSurfaceProfile {required:?} \
+         (ord {required_ord}) exceeds operator's acknowledged ceiling \
+         {acknowledged:?} (ord {acknowledged_ord}) — m9 application-layer \
+         capability gate (Phase 6e seam, mirrors m32 monotone gate)"
+    )]
+    CapabilityNotAcknowledged {
+        /// The [`crate::m32_dispatcher::EscapeSurfaceProfile`] the write requires.
+        required: crate::m32_dispatcher::EscapeSurfaceProfile,
+        /// Ordinal of `required` (denormalised for the operator log).
+        required_ord: u8,
+        /// The ceiling the operator has acknowledged.
+        acknowledged: crate::m32_dispatcher::EscapeSurfaceProfile,
+        /// Ordinal of `acknowledged` (denormalised for the operator log).
+        acknowledged_ord: u8,
     },
 }
 
@@ -197,9 +233,9 @@ mod tests {
     #[test]
     fn day_1_variant_set_is_exhaustively_matched() {
         // Per m9 spec § 2 capability table the EscapeSurfaceProfile-aware
-        // variants (PrivilegeEscalation / DataExfil acknowledgement) land
-        // with m30 (HumanAcceptanceSignature). The Day-1 variant set is the
-        // five below — adding a new variant breaks this test, prompting an
+        // capability gate landed Phase 6e (gap C-8 / NA-GAP-11 fold) as
+        // `CapabilityNotAcknowledged`. The full variant set is the six
+        // below — adding a new variant breaks this test, prompting an
         // explicit spec amendment.
         let err = NamespaceViolation::Empty;
         match err {
@@ -207,7 +243,8 @@ mod tests {
             | NamespaceViolation::WrongPrefix { .. }
             | NamespaceViolation::Whitespace { .. }
             | NamespaceViolation::ScratchForbidden
-            | NamespaceViolation::ControlChar { .. } => {}
+            | NamespaceViolation::ControlChar { .. }
+            | NamespaceViolation::CapabilityNotAcknowledged { .. } => {}
         }
     }
 

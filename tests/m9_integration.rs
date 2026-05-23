@@ -267,16 +267,20 @@ fn day_1_validator_signature_unchanged() {
 
 #[test]
 fn day_1_error_variant_set_is_exactly_five() {
-    // F-Regression contract: the five base variants are the entire
-    // Day-1 surface. Adding a new variant requires a coordinated spec
-    // amendment + Zen audit. `ControlChar` was added 2026-05-18 to close
-    // the NUL/BOM/control-char silent bypass.
+    // F-Regression contract: the variant surface is the entire current
+    // m9 application-layer refusal set. Adding a new variant requires a
+    // coordinated spec amendment + Zen audit. `ControlChar` was added
+    // 2026-05-18 to close the NUL/BOM/control-char silent bypass;
+    // `CapabilityNotAcknowledged` was added 2026-05-23 (Phase 6e) to
+    // wire the m9 ↔ m32 EscapeSurfaceProfile seam (gap C-8 / NA-GAP-11
+    // fold).
     let err = NamespaceViolation::Empty;
     match err {
         NamespaceViolation::Empty
         | NamespaceViolation::WrongPrefix { .. }
         | NamespaceViolation::Whitespace { .. }
         | NamespaceViolation::ScratchForbidden
-        | NamespaceViolation::ControlChar { .. } => {}
+        | NamespaceViolation::ControlChar { .. }
+        | NamespaceViolation::CapabilityNotAcknowledged { .. } => {}
     }
 }

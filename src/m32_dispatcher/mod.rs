@@ -97,6 +97,71 @@ impl EscapeSurfaceProfile {
     pub const fn is_acknowledged_by(self, signature: &HumanAcceptanceSignature) -> bool {
         self.ordinal() <= signature.acknowledged_ceiling.ordinal()
     }
+
+    /// `true` if dispatching this profile is covered by the
+    /// `acknowledged_ceiling` exposed by any
+    /// [`AcceptanceSignatureReader`]. Trait-generic counterpart of
+    /// [`Self::is_acknowledged_by`].
+    ///
+    /// The monotone destructiveness gate is identical: a profile at ordinal
+    /// X is permitted iff the reader-supplied ceiling has ordinal ≥ X. The
+    /// dedicated trait-generic method exists so callers that hold an
+    /// arbitrary `&impl AcceptanceSignatureReader` (e.g. the m9 namespace
+    /// guard, which must not depend on the concrete
+    /// [`HumanAcceptanceSignature`] layout) can perform the gate check
+    /// without an explicit `signature.acknowledged_ceiling.ordinal()` poke.
+    ///
+    /// Phase 6e — m9 ↔ m32 EscapeSurfaceProfile seam (gap C-8 fold).
+    #[must_use]
+    pub fn is_acknowledged_by_reader<R: AcceptanceSignatureReader + ?Sized>(
+        self,
+        reader: &R,
+    ) -> bool {
+        self.ordinal() <= reader.acknowledged_ceiling().ordinal()
+    }
+}
+
+/// Read the operator's acknowledged
+/// [`EscapeSurfaceProfile`] ceiling from any acceptance-signature carrier.
+///
+/// The trait is the **single shared seam** between m32's dispatch-time
+/// acknowledgement gate and m9's write-time namespace-capability gate
+/// (Phase 6e, gap C-8 / NA-GAP-11 fold). It is implemented for
+/// [`HumanAcceptanceSignature`] here at its definition site and consumed
+/// by [`EscapeSurfaceProfile::is_acknowledged_by_reader`] (m32) and
+/// [`crate::m9_watcher_namespace_guard::assert_namespace_capability`]
+/// (m9). Defining the trait ONCE — and implementing it ONCE on the
+/// canonical [`HumanAcceptanceSignature`] — keeps the m9 ↔ m32 contract a
+/// single source of truth.
+///
+/// # Monotonicity
+///
+/// The destructiveness ladder is monotone: an operator who has acknowledged
+/// a higher rung (e.g. [`EscapeSurfaceProfile::DataExfil`], ordinal 60)
+/// implicitly covers every lower rung. The trait surfaces exactly the
+/// minimum data point that gate check needs — the highest ordinal the
+/// operator has explicitly accepted — so neither implementor nor consumer
+/// must agree on any other field of the underlying signature struct.
+pub trait AcceptanceSignatureReader {
+    /// The highest [`EscapeSurfaceProfile`] the operator has acknowledged.
+    /// Dispatch / write of any profile at or below this severity is
+    /// permitted.
+    fn acknowledged_ceiling(&self) -> EscapeSurfaceProfile;
+}
+
+impl AcceptanceSignatureReader for HumanAcceptanceSignature {
+    fn acknowledged_ceiling(&self) -> EscapeSurfaceProfile {
+        self.acknowledged_ceiling
+    }
+}
+
+impl<T> AcceptanceSignatureReader for &T
+where
+    T: AcceptanceSignatureReader + ?Sized,
+{
+    fn acknowledged_ceiling(&self) -> EscapeSurfaceProfile {
+        (**self).acknowledged_ceiling()
+    }
 }
 
 // Compile-time cardinality enforcement (D-S1002127-02): the variant count

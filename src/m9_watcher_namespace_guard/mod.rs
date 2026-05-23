@@ -29,14 +29,21 @@
 //! m32). The 7-variant `EscapeSurfaceProfile` capability table per spec § 2
 //! is integrated post-Cluster-G build (see TODO in `validator.rs`).
 //!
-//! # Public surface (Day-1)
+//! # Public surface
 //!
 //! - [`WORKFLOW_TRACE_NS_PREFIX`] — single source of truth for the prefix.
 //! - [`assert_workflow_trace_namespace`] — validator + munge + typed refusal.
 //! - [`munge_hyphen_slug`] — hyphen → underscore helper (idempotent).
+//! - [`assert_namespace_capability`] — Phase 6e m9 ↔ m32 capability gate
+//!   (monotone [`crate::m32_dispatcher::EscapeSurfaceProfile`] ladder, read
+//!   via the shared [`crate::m32_dispatcher::AcceptanceSignatureReader`]
+//!   trait).
+//! - [`required_signature_ceiling`] — m9 spec § 2 capability table; identity
+//!   on the single-axis monotone ladder.
 //! - [`ValidatedNamespace`] — newtype evidence consumed by m13 / m42 writers.
-//! - [`NamespaceViolation`] — 5-variant error enum (`WrongPrefix` / `Empty`
-//!   / `Whitespace` / `ScratchForbidden` / `ControlChar`).
+//! - [`NamespaceViolation`] — 6-variant error enum (`WrongPrefix` / `Empty`
+//!   / `Whitespace` / `ScratchForbidden` / `ControlChar` /
+//!   `CapabilityNotAcknowledged`).
 
 pub mod error;
 pub mod evidence;
@@ -45,7 +52,8 @@ pub mod validator;
 pub use error::NamespaceViolation;
 pub use evidence::ValidatedNamespace;
 pub use validator::{
-    assert_workflow_trace_namespace, munge_hyphen_slug, WORKFLOW_TRACE_NS_PREFIX,
+    assert_namespace_capability, assert_workflow_trace_namespace, munge_hyphen_slug,
+    required_signature_ceiling, WORKFLOW_TRACE_NS_PREFIX,
 };
 
 #[cfg(test)]

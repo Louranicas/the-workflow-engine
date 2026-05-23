@@ -92,6 +92,7 @@ impl Fixture {
             conductor_url: "http://127.0.0.1:8141".to_owned(),
             dry_run: true,
             ack_ceiling: EscapeSurfaceProfile::Sandboxed,
+            cost_ceiling: i64::MAX,
             show_help: false,
             show_version: false,
         }

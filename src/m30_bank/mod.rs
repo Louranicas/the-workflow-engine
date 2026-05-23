@@ -259,6 +259,69 @@ pub enum BankError {
     SunsetOverflow(i64),
 }
 
+/// Read-only snapshot of the bank state — W4 client_ref support type
+/// (Plan v2 v0.2.0 §3 Phase 5 step 1).
+///
+/// Held cloned `workflow_ids` + `variant_ids` (parallel `Vec<u64>`s; the
+/// indices align). Returned by [`CuratedBank::client_ref`]. The bank's
+/// internal `Mutex` is NOT held while the snapshot is alive.
+///
+/// Phase 6 R3 Consistency real verifier consumes this per DX-R3
+/// variant_id-only conflict semantic (default): an incoming proposal
+/// whose `variant().variant_id` already appears in `variant_ids()` is
+/// Refused.
+///
+/// `lineage-chain-only` / `both with precedence` semantics (per DX-R3
+/// non-default arms) would extend this snapshot with `lineage_chains`
+/// after Phase 5 A4 SD11 lands the 12-field proposal shape; v0.2.0 ships
+/// the variant_id-only default per §15.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BankSnapshot {
+    workflow_ids: Vec<u64>,
+    variant_ids: Vec<u64>,
+}
+
+impl BankSnapshot {
+    /// Borrow the workflow_ids slice (FNV-1a hashes of `"workflow:{proposal_id}"`).
+    #[must_use]
+    pub fn workflow_ids(&self) -> &[u64] {
+        &self.workflow_ids
+    }
+
+    /// Borrow the variant_ids slice (FNV-1a hashes from `WorkflowVariant::variant_id`).
+    #[must_use]
+    pub fn variant_ids(&self) -> &[u64] {
+        &self.variant_ids
+    }
+
+    /// True when the snapshot contains no entries.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.workflow_ids.is_empty()
+    }
+
+    /// Number of entries in the snapshot.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.workflow_ids.len()
+    }
+
+    /// True when `variant_id` already appears in the snapshot — R3
+    /// Consistency primary check per DX-R3 = variant_id-only.
+    #[must_use]
+    pub fn contains_variant_id(&self, variant_id: u64) -> bool {
+        self.variant_ids.contains(&variant_id)
+    }
+
+    /// True when `workflow_id` already appears in the snapshot — useful
+    /// for diagnostic / debug paths (R3 conflict semantic uses
+    /// `contains_variant_id` per DX-R3).
+    #[must_use]
+    pub fn contains_workflow_id(&self, workflow_id: u64) -> bool {
+        self.workflow_ids.contains(&workflow_id)
+    }
+}
+
 /// The curated bank.
 pub struct CuratedBank {
     inner: Mutex<BTreeMap<u64, AcceptedWorkflow>>,
@@ -329,6 +392,41 @@ impl CuratedBank {
         );
         guard.insert(workflow_id, entry);
         Ok(workflow_id)
+    }
+
+    /// Read-only snapshot of the bank for downstream verifier consumption.
+    ///
+    /// W4 client_ref accessor seam — Plan v2 v0.2.0 §3 Phase 5 step 1
+    /// (un-blocks D11/R3 Consistency real verifier per §15 D12 on-demand
+    /// discipline + DX-R3 variant_id-only conflict semantic).
+    ///
+    /// Returns a [`BankSnapshot`] holding cloned `workflow_ids` and
+    /// `variant_ids` vectors. The bank lock is held only for the duration
+    /// of the snapshot copy (O(n) where n = bank size); the returned
+    /// snapshot is owned and outlives any subsequent bank-state mutation.
+    ///
+    /// Phase 6 R3 Consistency verifier calls `client_ref()` per dispatch
+    /// to compare an incoming proposal's `variant().variant_id` against
+    /// the snapshot's `variant_ids` (DX-R3 = variant_id-only Refuse).
+    ///
+    /// Poisoned-mutex recovery: `PoisonError::into_inner` matches the
+    /// rest of the bank API — the `BTreeMap` is structurally valid even
+    /// after a prior panic.
+    #[must_use]
+    pub fn client_ref(&self) -> BankSnapshot {
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let workflow_ids: Vec<u64> = guard.keys().copied().collect();
+        let variant_ids: Vec<u64> = guard
+            .values()
+            .map(|a| a.proposal().variant().variant_id)
+            .collect();
+        BankSnapshot {
+            workflow_ids,
+            variant_ids,
+        }
     }
 
     /// Look up a workflow.
@@ -1483,5 +1581,113 @@ mod tests {
         // Zero-padded lowercase hex: 16 hex digits after the fixed prefix.
         assert_eq!(lo, "workflow_trace_pathway_0000000000000000");
         assert_eq!(hi, "workflow_trace_pathway_ffffffffffffffff");
+    }
+
+    // ========================================================================
+    // W4 client_ref accessor seam tests (Plan v2 v0.2.0 §3 Phase 5 step 1).
+    // The accessor un-blocks D11/R3 Consistency real verifier per §15 D12
+    // on-demand discipline + DX-R3 variant_id-only conflict semantic.
+    // ========================================================================
+
+    #[test]
+    fn client_ref_on_empty_bank_returns_empty_snapshot() {
+        let bank = CuratedBank::new();
+        let snap = bank.client_ref();
+        assert!(snap.is_empty(), "fresh bank snapshot must be empty");
+        assert_eq!(snap.len(), 0, "len 0");
+        assert!(snap.workflow_ids().is_empty(), "workflow_ids slice empty");
+        assert!(snap.variant_ids().is_empty(), "variant_ids slice empty");
+        assert!(
+            !snap.contains_variant_id(0),
+            "empty snapshot must not contain any variant_id"
+        );
+        assert!(
+            !snap.contains_workflow_id(0),
+            "empty snapshot must not contain any workflow_id"
+        );
+    }
+
+    #[test]
+    fn client_ref_reflects_accepted_workflow_ids_and_variant_ids() {
+        let bank = CuratedBank::new();
+        let p1 = sample_proposal_with_seed(11);
+        let p2 = sample_proposal_with_seed(22);
+        let p1_variant_id = p1.variant().variant_id;
+        let p2_variant_id = p2.variant().variant_id;
+        let wf1 = bank.accept(p1, 1_000).expect("accept p1");
+        let wf2 = bank.accept(p2, 2_000).expect("accept p2");
+        let snap = bank.client_ref();
+        assert_eq!(snap.len(), 2, "two accepted entries");
+        assert!(snap.contains_workflow_id(wf1));
+        assert!(snap.contains_workflow_id(wf2));
+        assert!(snap.contains_variant_id(p1_variant_id));
+        assert!(snap.contains_variant_id(p2_variant_id));
+        // Unaccepted variant_id must not be present.
+        let p3_variant_id = sample_proposal_with_seed(33).variant().variant_id;
+        assert!(
+            !snap.contains_variant_id(p3_variant_id),
+            "unaccepted variant_id is absent"
+        );
+    }
+
+    #[test]
+    fn client_ref_snapshot_outlives_bank_mutation() {
+        // The snapshot is owned data — accepting a new workflow after
+        // calling client_ref() must NOT mutate the prior snapshot.
+        let bank = CuratedBank::new();
+        let _ = bank
+            .accept(sample_proposal_with_seed(101), 1_000)
+            .expect("accept");
+        let snap = bank.client_ref();
+        assert_eq!(snap.len(), 1, "snapshot took 1 entry");
+        // Mutate the bank.
+        let _ = bank
+            .accept(sample_proposal_with_seed(202), 2_000)
+            .expect("accept second");
+        // Snapshot is unchanged.
+        assert_eq!(
+            snap.len(),
+            1,
+            "snapshot len is frozen at the moment client_ref() was called"
+        );
+        // A fresh snapshot picks up the new entry.
+        let snap2 = bank.client_ref();
+        assert_eq!(snap2.len(), 2, "fresh snapshot reflects both entries");
+    }
+
+    #[test]
+    fn client_ref_workflow_ids_and_variant_ids_index_alignment() {
+        // For each (workflow_id, variant_id) pair, the indices must align
+        // — workflow_ids[i] is the id under which variant_ids[i] was
+        // accepted. R3 Consistency verifier may walk both in parallel
+        // for richer-than-default conflict semantics (lineage-chain
+        // post-A4).
+        let bank = CuratedBank::new();
+        let p1 = sample_proposal_with_seed(7);
+        let p2 = sample_proposal_with_seed(8);
+        let v1 = p1.variant().variant_id;
+        let v2 = p2.variant().variant_id;
+        let wf1 = bank.accept(p1, 1_000).expect("a");
+        let wf2 = bank.accept(p2, 2_000).expect("b");
+        let snap = bank.client_ref();
+        // BTreeMap-backed bank returns entries in key-sorted order; the
+        // two parallel Vec<u64>s are guaranteed to align position-by-position.
+        let wf_ids: std::collections::HashSet<u64> = snap.workflow_ids().iter().copied().collect();
+        let v_ids: std::collections::HashSet<u64> = snap.variant_ids().iter().copied().collect();
+        assert!(wf_ids.contains(&wf1));
+        assert!(wf_ids.contains(&wf2));
+        assert!(v_ids.contains(&v1));
+        assert!(v_ids.contains(&v2));
+        // Index alignment: walking both vectors in lockstep must produce
+        // matching (workflow_id, variant_id) tuples that originated from
+        // the same accept() call.
+        for (i, wf) in snap.workflow_ids().iter().enumerate() {
+            let aw = bank.get(*wf).expect("get accepted by workflow_id");
+            assert_eq!(
+                aw.proposal().variant().variant_id,
+                snap.variant_ids()[i],
+                "snapshot index alignment: variant_ids[{i}] matches workflow_ids[{i}]'s proposal"
+            );
+        }
     }
 }

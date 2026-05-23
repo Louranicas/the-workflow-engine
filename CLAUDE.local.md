@@ -33,7 +33,8 @@
 | 4-surface persist of v2 | ✅ COMPLETE this turn | **ai_docs canonical + Obsidian vault note + stcortex mem 18511 (READ-BACK VERIFIED per NA-6) with bidi pathways + this CLAUDE.local.md flip + injection.db causal_chain id 119** |
 | **Luke @ node 0.A "start Phase 1" go** | ✅ **FIRED 2026-05-23 (S1004377)** — Luke "begin V2" | execution gate per D48 |
 | Phase 1 (re-baseline + ADR cascade + file:line re-verify + mutation-weight pin + RefusalToken ADR) | ✅ **COMPLETE** commit `39e71a7` 2026-05-23 pushed both remotes | 4-stage gate green; 2048 tests; +0 delta; stcortex mem 18517 read-back-verified |
-| Phase 2 (deep FP-verify + Tier 2 W1 sizing + 7-substrate audit + V3 Genesis v1.4 pre-flight) | ⏳ **IN PROGRESS** — audit doc + Phase 2 stcortex memory; commit forthcoming | Plan v2 §3 Phase 2 + this session; canonical at `ai_docs/WORKFLOW_TRACE_V020_PHASE2_AUDIT_S1004377.md` |
+| Phase 2 (deep FP-verify + Tier 2 W1 sizing + 7-substrate audit + V3 Genesis v1.4 pre-flight) | ✅ **COMPLETE** commit `0023f44` 2026-05-23 pushed both remotes | gate carried clean from Phase 1; 2048 tests; +0 delta; stcortex mem 18526 read-back-verified; audit at `ai_docs/WORKFLOW_TRACE_V020_PHASE2_AUDIT_S1004377.md` |
+| Phase 3 (A2 SD9 FeatureVector newtype + C1 m13 outbox drain skeleton) | ✅ **COMPLETE** A2 `b1aea21` + C1 (this commit) 2026-05-23 pushed both remotes | 4-stage gate green per sub-phase; A2 +5 tests → 2053; C1 +6 tests → 2059 (total Phase 3 +11); stcortex mem 18526 → 18517 → Phase 3 mem (read-back-verified on land) |
 
 ### Artefacts at this save
 

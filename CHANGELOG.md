@@ -6,7 +6,81 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ---
 
-## [v0.2.0-WIP] — 2026-05-23 (S1004377) — Plan v2 Phase 1 + Phase 2 (re-baseline + ADR cascade + deep FP-verify + 7-substrate audit)
+## [v0.2.0-WIP] — 2026-05-23 (S1004377) — Plan v2 Phase 1 + Phase 2 + Phase 3 (re-baseline + ADR cascade + deep FP-verify + 7-substrate audit + A2 SD9 FeatureVector + C1 m13 drain skeleton)
+
+### Phase 3 (2026-05-23 S1004377) — first Rust code phase
+
+Decision-free per Plan v2 §3 Phase 3. Two sub-phase commits per D44.
+A2 cosmetic typed-newtype + C1 outbox drain skeleton (private API).
+
+#### Added (Phase 3 A2)
+
+- **`src/m22_kmeans/mod.rs` (+120 LOC):** `FeatureVector(Vec<f64>)` newtype
+  with `Default + Clone + Debug + PartialEq` derives + `From / Into / AsRef
+  / Deref` impls + `new / into_inner / as_slice / dim` accessors.
+  `kmeans_typed(&[FeatureVector], &KMeansConfig)` thin typed-API re-shape
+  delegating to existing `kmeans` (behaviour parity guaranteed by
+  construction).
+- **`src/m22_kmeans/tests.rs` (+5 tests; +~110 LOC):** round-trip /
+  deref / default / parity / error-surface. ≥50-tests-per-module bar
+  comfortably preserved (m22 was at ~89).
+
+#### Added (Phase 3 C1)
+
+- **`src/m13_stcortex_writer/mod.rs` (+~145 LOC):**
+  `StcortexWriter::drain_outbox()` + `commit_drain_cursor(u64)` +
+  `outbox_cursor_path()` (all `pub(crate)`; not yet a consumer per Phase
+  5 V1 wire). `OutboxEntry` deserialise type + `DrainResult { entries,
+  new_cursor }`. Idempotent at-least-once semantics: cursor sidecar at
+  `<outbox_path>.cursor`; atomic-rename via `.tmp` write-then-rename;
+  drain re-returns same entries when cursor not committed. Outbox lock
+  reused on the drain read path (poison-recovery discipline matches
+  write path). Defensive cursor-past-EOF reset.
+- **`src/m13_stcortex_writer/mod.rs` (+6 tests; +~155 LOC):**
+  `drain_outbox_empty_when_outbox_absent_returns_zero_entries_cursor_zero` /
+  `drain_outbox_reads_all_entries_when_no_cursor_persisted` /
+  `drain_replay_returns_same_entries_when_cursor_not_committed` (the
+  idempotent-replay contract) /
+  `drain_after_commit_returns_only_new_entries` (delta-only behaviour) /
+  `commit_drain_cursor_persists_atomically_via_temp_rename` (no .tmp
+  sidecar left over) /
+  `drain_reset_to_zero_when_outbox_shorter_than_persisted_cursor`
+  (defensive truncation/rotation handling).
+
+#### Changed (Phase 3 C1)
+
+- **`CorrelationMemory` gains `PartialEq` derive** — required by the
+  drain replay tests asserting `entries == entries`. All fields already
+  implement `PartialEq` so the derive is safe.
+
+#### Phase 3 done-evidence (per Plan v2 §15 D43)
+
+- **Gate (4-stage, all green):**
+  - cargo check --all-targets --all-features ✅
+  - cargo clippy --all-targets --all-features -- -D warnings ✅
+  - cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic ✅
+  - cargo test --all-targets --all-features --release ✅
+- **Test-count delta:** 2048 → 2053 (A2 +5) → 2059 (C1 +6). **Total +11.**
+- **Cargo-mutants:** deferred to Phase 5 scoped run per Plan v2 §15 D28.
+  A2 surface is behaviour-parity-guaranteed-by-construction; C1 is
+  skeleton-only (the algorithm is byte-offset bookkeeping, not numerical
+  decision logic — mutation kill-rate sensitivity is low).
+- **Commits:** `b1aea21` (A2) + (this commit, C1).
+- **Stcortex:** Phase 3 progress memory + read-back will land with this
+  commit per NA-6 discipline.
+
+#### Honest notes on C1 scope
+
+The drain functions are `pub(crate)` and gated `#[allow(dead_code)]`
+with explicit "Phase 5 V1 consumer wires per ADR D-S1004XXX-04 §1.2 m13
+row" pointers. This is the honest shape: the skeleton lands now (Phase
+3 decision-free), the consumer wires when V1 RefusalToken is defined
+(Phase 5 step 5 per C-2 co-land). No external API surface yet; no
+backwards-compat concern. The `serde_json::Value` shape for
+`OutboxEntry.reason` is deliberately untyped at Phase 3 — Phase 5
+strongly-types it via the V1 RefusalToken envelope once the type exists.
+
+### Phase 2 (2026-05-23 S1004377)
 
 ### Phase 2 (2026-05-23 S1004377)
 

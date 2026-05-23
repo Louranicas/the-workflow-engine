@@ -79,7 +79,7 @@ pub enum StcortexWriterError {
 }
 
 /// One memory payload promoted to stcortex.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CorrelationMemory {
     /// Validated namespace (always `workflow_trace_*`).
     pub namespace: String,
@@ -527,6 +527,172 @@ where
     pub fn outbox_path(&self) -> &PathBuf {
         &self.outbox_path
     }
+
+    /// Borrow the outbox cursor sidecar path (`<outbox_path>.cursor`).
+    ///
+    /// C1 NA-GAP-06 drain skeleton (Plan v2 v0.2.0 §3 Phase 3 step 2).
+    /// The cursor sidecar persists the byte-offset already consumed by a
+    /// downstream drain consumer (none in v0.2.0 Phase 3; wired Phase 5
+    /// via V1 `RefusalToken::SubstrateAuthored Stcortex` consumer per
+    /// C-2 + ADR D-S1004XXX-04). When absent, the drain starts at
+    /// byte-offset 0 (read the entire outbox).
+    #[must_use]
+    #[allow(dead_code)] // Phase 5 V1 consumer wires per ADR D-S1004XXX-04 §1.2 m13 row
+    pub(crate) fn outbox_cursor_path(&self) -> PathBuf {
+        let mut p = self.outbox_path.clone();
+        let mut s = p
+            .file_name()
+            .map(|os| os.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        s.push_str(".cursor");
+        p.set_file_name(s);
+        p
+    }
+
+    /// Drain the outbox starting from the persisted cursor position.
+    ///
+    /// C1 NA-GAP-06 drain skeleton (Plan v2 v0.2.0 §3 Phase 3 step 2).
+    /// Private API (`pub(crate)`) — the external consumer is V1
+    /// RefusalToken-typed and wired in Phase 5 per ADR D-S1004XXX-04
+    /// §1.2; this skeleton stops short of consumer-side delivery.
+    ///
+    /// Idempotent at-least-once semantics: the caller persists the cursor
+    /// via [`commit_drain_cursor`] **only after** successfully consuming
+    /// the returned entries. A failed or absent commit leaves the cursor
+    /// unchanged, so re-running [`drain_outbox`] re-returns the same
+    /// entries (replay-safe). The cursor sidecar lives at
+    /// [`outbox_cursor_path`] (`<outbox_path>.cursor`).
+    ///
+    /// # Errors
+    ///
+    /// - [`StcortexWriterError::OutboxIo`] if the outbox file or cursor
+    ///   sidecar I/O fails (read, seek, or open).
+    /// - [`StcortexWriterError::OutboxSerde`] if a JSONL line fails to
+    ///   parse as a valid [`OutboxEntry`] — the drain is fail-fast and
+    ///   does **not** skip malformed lines (the cursor is unchanged so
+    ///   the caller can repair the outbox + re-drain).
+    ///
+    /// [`commit_drain_cursor`]: StcortexWriter::commit_drain_cursor
+    /// [`outbox_cursor_path`]: StcortexWriter::outbox_cursor_path
+    #[allow(dead_code)] // Phase 5 V1 consumer wires per ADR D-S1004XXX-04 §1.2 m13 row
+    pub(crate) fn drain_outbox(&self) -> Result<DrainResult, StcortexWriterError> {
+        use std::io::BufRead;
+        // Cursor read: absent file == 0 offset (first drain).
+        let cursor_path = self.outbox_cursor_path();
+        let start_offset: u64 = match std::fs::read_to_string(&cursor_path) {
+            Ok(s) => s.trim().parse::<u64>().unwrap_or(0),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(e) => return Err(StcortexWriterError::OutboxIo(e)),
+        };
+        // Outbox-absent → empty drain (semantically equivalent to no entries
+        // and cursor unchanged). The `defer_to_outbox` path creates the file
+        // on first write; reading-before-any-write is a valid drain state.
+        if !self.outbox_path.exists() {
+            return Ok(DrainResult {
+                entries: Vec::new(),
+                new_cursor: start_offset,
+            });
+        }
+        // Take the outbox lock so a concurrent `defer_to_outbox` write
+        // cannot interleave between our read-seek and the line scan
+        // (poison-recovery via PoisonError::into_inner matches the write
+        // path's discipline at L506-513).
+        let _guard = self
+            .outbox_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let f = std::fs::File::open(&self.outbox_path)?;
+        let total_len = f.metadata()?.len();
+        // Defensive: a shorter outbox than the cursor implies external
+        // truncation or rotation; reset to 0 rather than skip past EOF.
+        let effective_start = if start_offset > total_len {
+            0
+        } else {
+            start_offset
+        };
+        let mut reader = std::io::BufReader::new(f);
+        if effective_start > 0 {
+            use std::io::Seek;
+            reader.seek(std::io::SeekFrom::Start(effective_start))?;
+        }
+        let mut entries = Vec::new();
+        let mut new_cursor = effective_start;
+        for line_result in reader.lines() {
+            let line = line_result?;
+            new_cursor += u64::try_from(line.len()).unwrap_or(0) + 1; // +1 for `\n`
+            if line.trim().is_empty() {
+                continue; // blank lines tolerated (defensive)
+            }
+            let entry: OutboxEntry = serde_json::from_str(&line)?;
+            entries.push(entry);
+        }
+        Ok(DrainResult {
+            entries,
+            new_cursor,
+        })
+    }
+
+    /// Persist a new cursor offset to the outbox cursor sidecar.
+    ///
+    /// C1 NA-GAP-06 drain skeleton commit step. Atomic-rename via
+    /// write-temp-then-rename to avoid leaving the cursor in a
+    /// partial-write state under a crash mid-commit.
+    ///
+    /// # Errors
+    ///
+    /// - [`StcortexWriterError::OutboxIo`] if the temp-write or atomic
+    ///   rename fails.
+    #[allow(dead_code)] // Phase 5 V1 consumer wires per ADR D-S1004XXX-04 §1.2 m13 row
+    pub(crate) fn commit_drain_cursor(&self, new_cursor: u64) -> Result<(), StcortexWriterError> {
+        let cursor_path = self.outbox_cursor_path();
+        let mut tmp_path = cursor_path.clone();
+        let mut tmp_name = tmp_path
+            .file_name()
+            .map(|os| os.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        tmp_name.push_str(".tmp");
+        tmp_path.set_file_name(tmp_name);
+        if let Some(parent) = cursor_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&tmp_path, new_cursor.to_string())?;
+        std::fs::rename(&tmp_path, &cursor_path)?;
+        Ok(())
+    }
+}
+
+/// Outbox entry deserialised from the JSONL stream produced by
+/// `defer_to_outbox`. C1 NA-GAP-06 drain skeleton support type
+/// (Plan v2 v0.2.0 §3 Phase 3 step 2).
+///
+/// Mirrors the on-disk JSONL shape:
+/// `{"ts_ms": <int|null>, "memory": {...}, "reason": {...}, "clock_unavailable": bool?}`
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[allow(dead_code)] // Phase 5 V1 consumer wires per ADR D-S1004XXX-04 §1.2 m13 row
+pub(crate) struct OutboxEntry {
+    /// Wall-clock ms at defer-time; `None` when `now_ms()` returned `None`
+    /// (clock fault — see write path at L472-499). Paired with
+    /// `clock_unavailable: true` in that case.
+    pub ts_ms: Option<u64>,
+    /// The correlation memory that was deferred.
+    pub memory: CorrelationMemory,
+    /// The defer-reason (`LtpBelowFloor` / `OracUnreachable` / `StcortexUnreachable`).
+    pub reason: serde_json::Value, // tag-or-typed deser deferred to Phase 5 V1 consumer wire
+    /// True when `now_ms()` was unavailable at defer-time (F-POVM-07 tag).
+    #[serde(default)]
+    pub clock_unavailable: bool,
+}
+
+/// Result of [`StcortexWriter::drain_outbox`].
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)] // Phase 5 V1 consumer wires per ADR D-S1004XXX-04 §1.2 m13 row
+pub(crate) struct DrainResult {
+    /// Entries read since the last committed cursor.
+    pub entries: Vec<OutboxEntry>,
+    /// New cursor offset (byte-position past the last entry read). Caller
+    /// passes this to [`StcortexWriter::commit_drain_cursor`] **only after**
+    /// successfully consuming the entries.
+    pub new_cursor: u64,
 }
 
 /// SEC4 — read an HTTP response body with a hard [`MAX_RESPONSE_BYTES`]
@@ -1769,6 +1935,171 @@ mod tests {
         assert!(
             d.is_some_and(|v| (v - 0.05).abs() < 1e-12),
             "an under-cap valid body must parse; got {d:?}"
+        );
+    }
+
+    // ========================================================================
+    // C1 NA-GAP-06 drain skeleton tests (Plan v2 v0.2.0 §3 Phase 3 step 2).
+    // The drain is `pub(crate)`; no external consumer yet (V1
+    // RefusalToken-typed consumer wires in Phase 5). These tests assert the
+    // *idempotent at-least-once replay* contract that the Phase 5 consumer
+    // will rely on.
+    // ========================================================================
+
+    #[test]
+    fn drain_outbox_empty_when_outbox_absent_returns_zero_entries_cursor_zero() {
+        // Setup: writer with a temp outbox path that doesn't exist yet
+        // (no defer_to_outbox has run).
+        let w = writer(Some(0.20), false); // density above floor: no defers
+        let result = w.drain_outbox().expect("drain of absent outbox is clean");
+        assert!(result.entries.is_empty(), "no entries when no outbox file");
+        assert_eq!(result.new_cursor, 0, "cursor stays at 0 when outbox absent");
+    }
+
+    #[test]
+    fn drain_outbox_reads_all_entries_when_no_cursor_persisted() {
+        // Setup: writer below floor; defer 3 entries.
+        let w = writer(Some(0.001), false);
+        for _ in 0..3 {
+            let _ = w.promote_run(&run(), &canonical_ns()).expect("promote");
+        }
+        // First drain (no cursor file): reads all 3.
+        let result = w.drain_outbox().expect("drain");
+        assert_eq!(result.entries.len(), 3, "all 3 deferred entries surfaced");
+        assert!(
+            result.new_cursor > 0,
+            "cursor advances past the 3 lines (got {})",
+            result.new_cursor
+        );
+        // Each entry has the LtpBelowFloor reason shape and the
+        // canonical-namespace memory.
+        for entry in &result.entries {
+            assert!(entry.ts_ms.is_some(), "ts_ms populated when clock OK");
+            assert!(!entry.clock_unavailable, "clock_unavailable false in happy path");
+            let reason_str = entry.reason.to_string();
+            assert!(
+                reason_str.contains("LtpBelowFloor"),
+                "expected LtpBelowFloor reason, got {reason_str}"
+            );
+        }
+    }
+
+    #[test]
+    fn drain_replay_returns_same_entries_when_cursor_not_committed() {
+        // Setup: defer 2 entries.
+        let w = writer(Some(0.001), false);
+        for _ in 0..2 {
+            let _ = w.promote_run(&run(), &canonical_ns()).expect("promote");
+        }
+        // First drain: returns 2 entries + new_cursor.
+        let first = w.drain_outbox().expect("first drain");
+        assert_eq!(first.entries.len(), 2, "first drain reads 2 entries");
+        // DO NOT commit the cursor — simulate consumer failure mid-delivery.
+        // Second drain: re-returns the SAME 2 entries (replay-safe).
+        let second = w.drain_outbox().expect("second drain (replay)");
+        assert_eq!(
+            second.entries.len(),
+            2,
+            "replay returns same 2 entries when cursor not committed"
+        );
+        assert_eq!(
+            first.entries, second.entries,
+            "replay entries byte-for-byte identical"
+        );
+        assert_eq!(
+            first.new_cursor, second.new_cursor,
+            "replay cursor proposal identical"
+        );
+    }
+
+    #[test]
+    fn drain_after_commit_returns_only_new_entries() {
+        // Setup: defer 3 entries, drain + commit cursor.
+        let w = writer(Some(0.001), false);
+        for _ in 0..3 {
+            let _ = w.promote_run(&run(), &canonical_ns()).expect("promote");
+        }
+        let first = w.drain_outbox().expect("first drain");
+        assert_eq!(first.entries.len(), 3);
+        w.commit_drain_cursor(first.new_cursor)
+            .expect("commit cursor");
+        // Second drain (post-commit): no new entries.
+        let empty = w.drain_outbox().expect("post-commit drain");
+        assert!(empty.entries.is_empty(), "no entries after commit absorbs them");
+        assert_eq!(
+            empty.new_cursor, first.new_cursor,
+            "cursor unchanged when no new content"
+        );
+        // Defer 2 more entries; drain reads ONLY the new ones.
+        for _ in 0..2 {
+            let _ = w.promote_run(&run(), &canonical_ns()).expect("promote");
+        }
+        let delta = w.drain_outbox().expect("delta drain");
+        assert_eq!(
+            delta.entries.len(),
+            2,
+            "delta drain reads only the 2 new entries after commit"
+        );
+        assert!(
+            delta.new_cursor > first.new_cursor,
+            "cursor advances past the new entries (was {}, now {})",
+            first.new_cursor,
+            delta.new_cursor
+        );
+    }
+
+    #[test]
+    fn commit_drain_cursor_persists_atomically_via_temp_rename() {
+        // Setup: defer 1 entry; drain; commit.
+        let w = writer(Some(0.001), false);
+        let _ = w.promote_run(&run(), &canonical_ns()).expect("promote");
+        let result = w.drain_outbox().expect("drain");
+        let cursor_value = result.new_cursor;
+        w.commit_drain_cursor(cursor_value).expect("commit");
+        // Cursor sidecar file exists at outbox_path + ".cursor" with the
+        // expected decimal-string content; the .tmp sidecar is absent
+        // (atomic rename completed).
+        let cursor_contents = std::fs::read_to_string(w.outbox_cursor_path())
+            .expect("cursor sidecar present after commit");
+        assert_eq!(
+            cursor_contents.trim().parse::<u64>().expect("decimal u64"),
+            cursor_value,
+            "cursor contents match committed value"
+        );
+        let mut tmp_path = w.outbox_cursor_path();
+        let mut name = tmp_path
+            .file_name()
+            .map(|os| os.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        name.push_str(".tmp");
+        tmp_path.set_file_name(name);
+        assert!(
+            !tmp_path.exists(),
+            "atomic rename should not leave .tmp sidecar"
+        );
+    }
+
+    #[test]
+    fn drain_reset_to_zero_when_outbox_shorter_than_persisted_cursor() {
+        // Defensive: external truncation/rotation. Cursor points past EOF
+        // → drain re-reads from offset 0 rather than skip silently.
+        let w = writer(Some(0.001), false);
+        let _ = w.promote_run(&run(), &canonical_ns()).expect("promote");
+        let _ = w.promote_run(&run(), &canonical_ns()).expect("promote");
+        let drain1 = w.drain_outbox().expect("drain");
+        w.commit_drain_cursor(drain1.new_cursor).expect("commit");
+        // Externally truncate the outbox to a shorter length than the
+        // committed cursor (simulates rotation).
+        let outbox_path = w.outbox_path().clone();
+        std::fs::write(&outbox_path, "").expect("truncate outbox");
+        // Re-defer 1 entry (now the file is small, cursor is past EOF).
+        let _ = w.promote_run(&run(), &canonical_ns()).expect("promote");
+        let drain2 = w.drain_outbox().expect("drain after truncation");
+        // Should re-read from 0 → 1 entry surfaced.
+        assert_eq!(
+            drain2.entries.len(),
+            1,
+            "post-truncation drain re-reads from 0 and surfaces 1 entry"
         );
     }
 }

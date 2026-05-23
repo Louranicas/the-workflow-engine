@@ -140,6 +140,7 @@ pub mod m11_fitness_weighted_decay;
 pub mod m16_substrate_drift_canary;
 pub mod orchestration;
 pub mod refusal_token;
+pub mod substrate_trust;
 pub mod user_facing_strings;
 
 pub use m1_atuin_consumer::{

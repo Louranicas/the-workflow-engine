@@ -6,7 +6,146 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ---
 
-## [Unreleased]
+## [v0.1.0] — 2026-05-23 (S1004115) — M0 / Workflow-Trace Completion Plan v2
+
+Completion Plan v2 (S1004115) — closed all outstanding tasks → v0.1.0 / M0 tag. The plan
+ran ten phases (Phase 4 was the locked-decision interview, executed S1004115 with 48
+decisions locked); Phases 1, 2, 3, 5, 6 (six sub-phases 6a–6f), 7, 8, 9, 10 shipped as
+named commits on `main`. Per § 15 D30, the prior `v0.1.0-s1003733` working tag is
+superseded by this clean `v0.1.0`; tests **1967 → 2043+** (final count = STAGE 4 of the
+M0 ship gate; recorded below), clippy + pedantic clean every phase, mutation kill-rate
+held at **≥ 96.3 %** per § 15 D28.
+
+#### What M0 / v0.1.0 certifies (per Plan v2 § 8, the named cut)
+
+> **`v0.1.0` / M0 certifies engine-internal completeness:** every residual the engine
+> owns is closed, tested, audited, and documented. It does **NOT** certify the
+> engine's safety as a substrate-facing organ — substrate-drift detection,
+> substrate-side test fixtures, and substrate-mediated trust are absent by deliberate
+> deferral (`NA-GAP-07/08/10`, ADR `D-S1002127-03` + amendments per Phase 2 audit
+> recommending NA-GAP-01 and NA-GAP-04 also land in v0.2.0). The tag tells the
+> habitat "the engine is done to a milestone." It does not tell the habitat "the
+> engine is safe to run continuously against a live substrate." That assurance is
+> `v0.2.0`.
+
+#### Added
+
+- **Plan v2 ten-phase execution** (canonical: `ai_docs/WORKFLOW_TRACE_COMPLETION_PLAN_V2_S1004115.md`).
+- **Phase 1 doc set:** `PHASE1_RESIDUAL_LIST_S1004115.md` (authoritative successor to the
+  `HARDENING_FLEET_CARRY_FORWARD_S1002600.md` carry-forward).
+- **Phase 2 audit doc:** `PHASE2_AUDIT_S1004115.md` (wire-contract verification, 8-NA-gap
+  code audit reframing "8/11 closed" → 3 code-backed + 2 partial + 3 spec-only).
+- **Phase 8 integration doc:** `PHASE8_INTEGRATION_S1004115.md` (env matrix + clock-coherence
+  enumeration of the 6 CC-5 loop clocks + Frame-A self-check on the substrate-load proxy).
+- **Phase 9 audit fold-in doc:** `PHASE9_SD_RECONCILIATION_S1004115.md` (SD1–SD12 disposition
+  + honest residuals consolidated).
+- **CI machinery (D29):** `.github/workflows/ci.yml` + `.gitlab-ci.yml` running the
+  canonical 4-stage gate. **Known M0 limitation** documented in-file: the
+  `spacetimedb-sdk` sibling-repo path-dep makes standalone-checkout CI non-trivial; v0.2.0
+  resolution by vendor / submodule / crates.io.
+- **m33 four-named-verifier set:** Phase 6a `SecurityVerifier` (D5/D6/D7), Phase 6b
+  `EmberVerifier` (D13/D14/D15/D16 — scores via m10's 7-trait rubric per D15), Phase 6c
+  `CostVerifier` documented stub (D9), Phase 6d `ConsistencyVerifier` documented stub
+  (D11). `ConservativeVerifier` retired from the production builder.
+- **m9 ↔ m32 `AcceptanceSignatureReader` trait seam** (Phase 6e — gap C-8 / NA-GAP-11
+  fold). m9 namespace guard reads the EscapeSurfaceProfile capability table through the
+  trait; new `NamespaceViolation::CapabilityNotAcknowledged` typed refusal.
+- **Substrate-confirmable verdict receipts** (Phase 6f — D8 + NA-GAP-09 fold):
+  `NexusEventKind::WorkflowRefused` + `RefusalReceipt` payload + `emit_refusal_receipts`
+  helper. Operator-visible `nexus_refusal_emit_failures` counter.
+- **CC-7 PressureEvent → m23 wire** (Phase 7 — D21–D24): m15
+  `read_pressure_level()` + `pressure_scalar_from_count()` feeds m23
+  `compose_proposals_with_pressure` via additive-bounded
+  (`MAX_PRESSURE_CONTRIBUTION = 0.5`) modulation; CC-7 no longer a dead edge.
+- **m22 K-means CLI wiring** (Phase 5 — D17–D20): `extract_variant_features` 5-dim
+  feature vector (step-count-norm, mutation one-hot ×3, Levenshtein-from-identity proxy
+  per D17); `recommended_k_for_variant_count` adaptive `k = sqrt(n/2)` clamped per D19;
+  `build_variant_cluster_map` rewires `compose_proposals` from `|_v| None` to a real
+  variant→cluster lookup; `diversity_cluster` emitted via the JSONL bridge.
+- **NA-4 Conductor enforcement-state assertion** (Phase 8 step 2): `wf-dispatch`
+  warns when `CONDUCTOR_ENFORCEMENT_ENABLED` is unset or `"0"`; flag exposed on
+  `Report::conductor_enforcement_advisory`.
+- **NA-2 substrate-side load observation** (Phase 8 step 3): m1 atuin ingest timed
+  (`m1_read_latency_ms` + `m1_read_perturbation_observed` on the report); honestly
+  labelled as a Frame-A engine-timed proxy per § 15 D37.
+- **MUT-2 unit-test kill** (Phase 3): two new direct unit tests
+  (`project_after_prefix_full_embedding_*` + `project_after_prefix_gap_restart_*`)
+  with exact-value `(suffix, right_gap)` assertions covering the `embed_from`
+  `==` base case. Caught the `==` → `!=` mutation that prior `is_some()`-only
+  tests missed.
+- **T4-LIB**: `self_dispatch_guard` re-exported from `lib.rs`.
+
+#### Changed
+
+- **Mutation kill-rate truth arc** (W4 → Wave G → S1003733-final):
+  - W4 commit message ("412 mutants / 80.6 %") was unreproducible — self-detected.
+  - W4-verify (`046e955`) reset to 324 mutants / 254 caught / 94.4 % (artefact-backed).
+  - Wave G (`c0ec95c`) killed 5 of the 15 W4-close survivors and proved 9 m21
+    `build_variants` survivors equivalent (defense-in-depth via
+    `MAX_LOOP_ITERATIONS` + redundant `out.len()` guard renders the mutated
+    operators unobservable).
+  - Final (`2096fd0` + S1004115 fold): **324 mutants — 259 caught / 10 missed / 0
+    timeout / 55 unviable → 96.3 % kill rate**; 10 survivors all proven-equivalent
+    (9 m21 `build_variants` + 1 m22 `kmeans_plus_plus_seed:310` FNV-collision-required)
+    with in-code `// mutant-equivalent:` proofs.
+- **m33 SD reconciliation** (Phase 9 — D27): 8 Class-A/B drifts reconciled (code is
+  canonical; spec-doc amendments are documentation-only follow-up); 4 Class-C drifts
+  (SD8/9/10/11) deferred to v0.2.0.
+- **Doc supersession chain**: `HARDENING_FLEET_CARRY_FORWARD_S1002600.md` superseded by
+  `PHASE1_RESIDUAL_LIST_S1004115.md` (Phase 1 DOC-2); vault `Hardening Fleet 2026-05-21.md`
+  + `Assessment Remediation S1003733.md` W4 rows folded to 259/96.3 % (Phase 2 DOC-3 fold).
+
+#### Audit
+
+- **In-session zen verdicts** (per § 15 D25/D26 — substitute = in-session `zen` agent
+  because no external Zen verdict file landed for any workflow-trace wave):
+  - Phase 1: APPROVE-WITH-NITS (folded in Phase 2)
+  - Phase 2: APPROVE
+  - Phase 3: APPROVE
+  - Phase 5: APPROVE-WITH-NITS (A2 — m31 caller still uses `|_w| 0.0`; substrate-side
+    diversity contract satisfied, consumer-side wire is v0.2.0)
+  - Phase 9 hardening-campaign audit: **APPROVE-WITH-NITS, recommend ship v0.1.0
+    as-is.** Per-commit verdicts on all 13 audited commits (W1/W2/W3/W4/Wave-G/W5 +
+    S1003733 + C22 + Phases 6e/6f/7/8 + final mutation fold) returned APPROVE or
+    APPROVE-WITH-NITS. Honest residuals consolidated in
+    `PHASE9_SD_RECONCILIATION_S1004115.md` § 4. Recommendation: add m33 doc-test
+    locking `workflow_escape_surface` to Sandboxed-pending-wire-contract — **landed
+    this commit** as `security_verifier_workflow_escape_surface_locked_to_sandboxed_pending_wire_contract`.
+
+#### Resolved
+
+- R1 m33 dispatch verifier policy logic (split 6a–6f).
+- R2 m22 K-means diversity CLI wiring.
+- MUT-2 m20_prefixspan `==` survivor.
+- T4-LIB `self_dispatch_guard` re-export.
+- m9-TODO m9 ↔ m32 trait seam (Phase 6e).
+- CC-7 / H5 dead edge (Phase 7 wires).
+- Doc surfaces: DOC-1 stcortex S1003733 memory (Phase 1 read-back-verified id 18410);
+  DOC-2 carry-forward supersession; DOC-3 CHANGELOG / vault W4 figures.
+
+#### Honest residuals — v0.2.0 candidates
+
+Per Plan v2 § 11 + Phase 9 § 4 (named, not silenced):
+- NA-GAP-01 `RefusalToken`, NA-GAP-04 substrate back-pressure, NA-GAP-07 substrate-drift
+  canary `m16`, NA-GAP-08 substrate test fixtures, NA-GAP-10 substrate-mediated trust.
+- Phase 5 nit A2: m31 production caller `|_w| 0.0` (m22 diversity consumer-side wire).
+- SD8/9/10/11 Class-C algorithmic / shape upgrades.
+- m33 Security M0 default surface = Sandboxed (gate shape correct; per-workflow
+  surface determination is v0.2.0).
+- R3 m22 K-means CLI batch-path tests, R4 m8 POVM-gate (KEEP-DORMANT) — see
+  `the-workflow-engine/CLAUDE.local.md`.
+- `wf-dispatch --execute` live-Conductor verification is post-M0 dispatch soak (D34/D35/D36;
+  Watcher ☤ carries the 24h NoOp soak).
+- CI `.github/workflows/ci.yml` + `.gitlab-ci.yml` ship with M0 per D29, but the
+  `spacetimedb-sdk` sibling-path dep makes standalone-checkout CI non-trivial (vendor
+  / submodule / crates.io resolution is v0.2.0).
+
+#### Operator hand-off (Plan §3 Phase 10 step 8)
+
+- **OP-1 / B3** — Conductor bring-up + 24h NoOp soak + flip
+  `CONDUCTOR_ENFORCEMENT_ENABLED=1` per D33/D35.
+- **OP-2 / G2** — directory rename `the-workflow-engine/` → `workflow-trace/` is
+  post-M0 cosmetic per D32.
 
 ### [v0.1.0-s1003733] — 2026-05-22 (S1003733) — assessment remediation + binary wiring
 

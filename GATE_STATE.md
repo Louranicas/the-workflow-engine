@@ -1,5 +1,13 @@
 # GATE_STATE — live G1-G9 + B1-B6 blocker register
 
+> **🏷 v0.1.0 / M0 SHIPPED 2026-05-23 (S1004115)** — Completion Plan v2 all ten phases
+> committed and zen-verified; gate state is **POST-M0**. Pre-genesis gates G1–G9 are
+> all CLOSED / FIRED (G9 fired 2026-05-17, M0 shipped 2026-05-23). The blocker register
+> below is preserved as historical record; v0.2.0 residuals are tracked in
+> `CHANGELOG.md` `[v0.1.0]` § "Honest residuals" + `ai_docs/PHASE9_SD_RECONCILIATION_S1004115.md`
+> § 4. Operator hand-off: OP-1 (Conductor bring-up + enforcement flip) + OP-2 (directory
+> rename) are post-M0 per § 15 D33–D35 / D32. See `CLAUDE.local.md` § "v0.1.0 / M0 SHIPPED".
+>
 > **Updated:** 2026-05-17 (S1002209 — Luke task-cascade 1-6 in flight)
 > **Canonical context:** [`CLAUDE.local.md`](CLAUDE.local.md) · [`the-workflow-engine-vault/GOD_TIER_CONSOLIDATION_S1001982.md`](the-workflow-engine-vault/GOD_TIER_CONSOLIDATION_S1001982.md) § Part VI (Waiver record) · § Part VIII (6 blockers)
 > **This file:** live state mirror; refresh-on-session-boundary.

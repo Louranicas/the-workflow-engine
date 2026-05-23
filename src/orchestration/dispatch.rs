@@ -1180,6 +1180,55 @@ mod tests {
         }
     }
 
+    // rationale: Phase 9 zen-recommended invariant lock (Phase 10 fold-in).
+    // The Phase 6a SecurityVerifier ships with a documented M0
+    // simplification: `workflow_escape_surface` hard-returns
+    // `EscapeSurfaceProfile::Sandboxed` because the WorkflowProposal type
+    // does not carry an `escape_surface` field at M0. The hard-Refuse
+    // SEMANTIC of §15 D5 is wire-correct in `security_verdict`; the
+    // tautological-pass behaviour at M0 is the documented stub.
+    //
+    // This test LOCKS the stub shape so that a future refactor cannot
+    // silently regress D5 — if `workflow_escape_surface` ever stops
+    // returning Sandboxed, that refactor MUST be accompanied by a
+    // corresponding wire-contract change (a per-proposal `escape_surface`
+    // field, or a StepToken→surface table per the Phase 2 audit option
+    // ladder) AND a doctrine review (D5 hard-Refuse path becomes live).
+    // Per Phase 9 zen audit recommendation; v0.2.0 wire-contract work is
+    // the natural exit from this lock.
+    #[test]
+    fn security_verifier_workflow_escape_surface_locked_to_sandboxed_pending_wire_contract() {
+        use crate::m14_lift::LiftSnapshot;
+        use crate::m20_prefixspan::{Pattern, StepToken};
+        use crate::m21_variant_builder::build_variants;
+        use crate::m23_proposer::build_proposal;
+        use crate::m30_bank::AcceptedWorkflow;
+        use std::time::SystemTime;
+
+        let pattern = Pattern::new(vec![StepToken(11), StepToken(13)], 25, (0, 0));
+        let variants = build_variants(&pattern).expect("variants");
+        let snapshot = LiftSnapshot {
+            lift: Some(0.5),
+            ci_half: Some(0.05),
+            n: 25,
+            latest_ts_ms: 0,
+            computed_at: SystemTime::now(),
+        };
+        // Sweep all available variants to assert the M0 invariant holds
+        // for every proposal shape m23 can produce.
+        for v in variants {
+            let proposal = build_proposal(v, &snapshot, Some(2)).expect("proposal");
+            let wf = AcceptedWorkflow::for_test(13, proposal, 0, i64::MAX, 1.0, None, 0);
+            assert_eq!(
+                SecurityVerifier::workflow_escape_surface(&wf),
+                EscapeSurfaceProfile::Sandboxed,
+                "M0 invariant: workflow_escape_surface MUST be Sandboxed pending \
+                 the v0.2.0 per-workflow surface wire-contract; any change here \
+                 requires the wire-contract amendment + D5 doctrine review"
+            );
+        }
+    }
+
     // rationale: Phase 6a — accessor test for `ack_ceiling`. Confirms the
     // verifier stores what it was constructed with (anti-stale-clone bug).
     #[test]

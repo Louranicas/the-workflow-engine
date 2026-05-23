@@ -1,14 +1,63 @@
 # the-workflow-engine — Local Session State (delta)
 
 > **Back to:** [CLAUDE.md](CLAUDE.md) — project charter (structural facts; do not duplicate here)
-> **Session checkpoint:** [`~/projects/shared-context/sessions/2026-05-17T124122_workflow-engine-ultimate-framework.md`](file:///home/louranicas/projects/shared-context/sessions/2026-05-17T124122_workflow-engine-ultimate-framework.md)
-> **🟢 S1002209 ACTIVE — Luke task-cascade 1-6:** see "S1002209 — Luke Task-Cascade 1-6 Execution" section below for live status.
+> **🟢 v0.1.0 / M0 SHIPPED 2026-05-23 (S1004115):** see the "v0.1.0 / M0 SHIPPED" section directly below for cold-start anchor.
 > **Vault home:** [the-workflow-engine-vault/HOME.md](the-workflow-engine-vault/HOME.md)
 > **God-tier synthesis:** [the-workflow-engine-vault/GOD_TIER_CONSOLIDATION_S1001982.md](the-workflow-engine-vault/GOD_TIER_CONSOLIDATION_S1001982.md)
 > **Deployment recipe:** [the-workflow-engine-vault/ULTIMATE_DEPLOYMENT_FRAMEWORK_S1001982.md](the-workflow-engine-vault/ULTIMATE_DEPLOYMENT_FRAMEWORK_S1001982.md)
 > **Workflow tracker:** [the-workflow-engine-vault/workflow-engine-code-base.md](the-workflow-engine-vault/workflow-engine-code-base.md) — 15 phases / 13 decisions / 13 open issues
 >
 > **Synergy with [CLAUDE.md](CLAUDE.md):** the charter holds the rules (how to behave, which protocols govern the fleet). This file holds the state those rules operate over — live workstream, pending decisions, persisted surfaces, cold-start pointers. **Charter answers _how_; this file answers _what the world looks like right now_.** Do NOT duplicate charter content here.
+
+---
+
+## 🏷 v0.1.0 / M0 SHIPPED — Workflow-Trace Completion Plan v2 (S1004115, 2026-05-23)
+
+**Status:** **`v0.1.0` tagged** on `main` (final M0 ship per Plan v2 §3 Phase 10). All ten phases
+of the Completion Plan v2 are committed; all in-session zen verdicts on record (APPROVE or
+APPROVE-WITH-NITS; recommendation = ship v0.1.0 as-is). Honest residuals named in
+`CHANGELOG.md` v0.1.0 entry + `ai_docs/PHASE9_SD_RECONCILIATION_S1004115.md` § 4.
+
+**Phase commit chain (`0aaa2cd..` → `v0.1.0` tag):**
+
+| Phase | Commit | Subject |
+|-------|--------|---------|
+| P1 | `24cf6e1` | re-baseline + DOC/HYG + residual list |
+| P2 | `ff26546` | wire-contract + 8-NA-gap audit + verifier input catalog |
+| P3 | `97bb331` | MUT-2 unit-test kill + T4-LIB re-export |
+| P5 | `d709aad` | R2 m22 K-means CLI wiring + cluster emission |
+| P6a | `437824d` | m33 Security verifier (D5/D6/D7) |
+| P6b | `c42083d` | m33 Ember verifier (D13–D16) |
+| P6c | `9a22b50` | m33 Cost verifier (D9 documented stub) |
+| P6d | `0aaa2cd` | m33 Consistency verifier (D11 documented stub) |
+| P6e | `8fb94e6` | m9 ↔ m32 EscapeSurfaceProfile trait seam (gap C-8 / NA-GAP-11 fold) |
+| P6f | `23a5587` | substrate-confirmable verdict receipts (D8 + NA-GAP-09 fold) |
+| P7  | `4b5a5e7` | CC-7 PressureEvent → m23 compose-priority wire (D21–D24) |
+| P8  | `c30a2b5` | integration + substrate-frame folds (NA-4 + NA-2 + NA-5) |
+| P9  | `f26fa8c` | Zen audit fold-in + SD1–SD12 reconciliation |
+| P10 | (this commit) | M0 / v0.1.0 ship + CI + 4-surface persist |
+
+**Key M0 numbers:**
+- **Tests:** 1967 (pre-Plan-v2) → **2043+** at M0 (final exact count in CHANGELOG v0.1.0 § Audit)
+- **Mutation kill-rate:** **96.3 %** held (324 mutants; 10 survivors all proven-equivalent — 9 m21 + 1 m22 FNV)
+- **Clippy + pedantic:** clean every phase
+- **CI machinery (D29):** `.github/workflows/ci.yml` + `.gitlab-ci.yml` ship; known limitation = `spacetimedb-sdk` sibling-repo path-dep
+- **Final HEAD:** v0.1.0 tag (commit SHA after Phase 10 commit lands)
+
+**Cold-start surfaces (4-surface persistence):**
+- **ai_docs canonical:** [`ai_docs/WORKFLOW_TRACE_COMPLETION_PLAN_V2_S1004115.md`](ai_docs/WORKFLOW_TRACE_COMPLETION_PLAN_V2_S1004115.md) (the plan) · [`PHASE1_RESIDUAL_LIST_S1004115.md`](ai_docs/PHASE1_RESIDUAL_LIST_S1004115.md) · [`PHASE2_AUDIT_S1004115.md`](ai_docs/PHASE2_AUDIT_S1004115.md) · [`PHASE8_INTEGRATION_S1004115.md`](ai_docs/PHASE8_INTEGRATION_S1004115.md) · [`PHASE9_SD_RECONCILIATION_S1004115.md`](ai_docs/PHASE9_SD_RECONCILIATION_S1004115.md)
+- **Obsidian vault:** [`the-workflow-engine-vault/Workflow-Trace Completion Plan v2 S1004115.md`](the-workflow-engine-vault/Workflow-Trace%20Completion%20Plan%20v2%20S1004115.md)
+- **stcortex:** ns `workflow_trace_completion_s1004115` — Phase 10 M0 ship memory written at v0.1.0 commit (read-back-verified per §13)
+- **CLAUDE.local.md anchor:** this section
+- **CHANGELOG:** [`CHANGELOG.md`](CHANGELOG.md) `[v0.1.0]` entry
+- **git tag:** `v0.1.0` (annotated)
+
+**Operator hand-off — node 0.A:**
+- **OP-1 / B3:** Conductor bring-up + 24h NoOp soak + flip `CONDUCTOR_ENFORCEMENT_ENABLED=1` (D33/D35). Watcher ☤ carries the soak per D36.
+- **OP-2 / G2:** directory rename `the-workflow-engine/` → `workflow-trace/` is post-M0 cosmetic per D32.
+
+**Honest residuals → v0.2.0** (per CHANGELOG `[v0.1.0]` § "Honest residuals" — named, not silenced):
+NA-GAP-01 `RefusalToken`, NA-GAP-04 substrate back-pressure, NA-GAP-07 substrate-drift canary `m16`, NA-GAP-08 substrate test fixtures, NA-GAP-10 substrate-mediated trust, Phase 5 nit A2 (m31 caller `|_w| 0.0`), SD8–SD11 Class-C algorithmic upgrades, m33 Security M0 Sandboxed default surface, `wf-dispatch --execute` live-Conductor verification post-M0 soak.
 
 ---
 

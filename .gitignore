@@ -53,3 +53,16 @@ logs/
 # cargo-mutants output (ephemeral mutation-testing artifacts)
 mutants.out/
 mutants.out.old/
+
+# cargo-mutants per-task target dir (separate from the default cargo target/)
+target-mutants/
+
+# Watcher ☤ deployment-watch journals (v0.1.1 hygiene resolution).
+# These are live-appended by the synthex-v2 Watcher daemon every session
+# and were causing "asymptotic dirty tree" (Zen Phase-1 finding). The
+# historical content through v0.1.0 ship is preserved in commits up to
+# b18ef0c ("docs(watcher): post-M0 journal snapshot — tick·1866"); further
+# Watcher writes stay on-disk but out of git. Operator can `git add -f`
+# to capture a snapshot if desired.
+pre-framework-consolidation/WATCHER_DEPLOYMENT_WATCH_JOURNAL_S1001982.md
+the-workflow-engine-vault/Watcher Deployment Watch Journal S1001982.md

@@ -530,6 +530,71 @@ mod tests {
         assert!(r.is_none() || r.unwrap().right_gap <= 4);
     }
 
+    // rationale: MUT-2 (S1002600 carry-forward `==`→`!=` survivor in
+    // `embed_from`'s `p_idx == prefix.len()` base case) — pins the precise
+    // `(suffix, right_gap)` shape of a non-trivial full-prefix embedding
+    // so the base-case `==` predicate is exercised end-to-end with
+    // exact-value assertions, not just `is_some()`. A `==`→`!=` mutation
+    // would short-circuit `embed_from` at the first prefix-token match
+    // (returning the start position with `right_gap = 0`), producing the
+    // wrong suffix and right_gap.
+    #[test]
+    fn project_after_prefix_full_embedding_returns_correct_suffix_and_right_gap() {
+        // seq:    [1, 2, 3, 4, 5]
+        // prefix: [1, 3]   (gap-1 inside the embedding)
+        // max_gap = 5
+        //
+        // Correct trace: start=0 matches `tok(1)`; `embed_from` finds
+        // `tok(3)` at cand=2 (gap=1), recurses with `p_idx=2`; base case
+        // fires (`p_idx == prefix.len()`), returns `(last_idx=2, 0)`.
+        // Backtrack returns `(2, 1)`. `project_after_prefix` builds
+        // `suffix = seq[3..] = [4, 5]`, `right_gap = 1`.
+        //
+        // Under `==`→`!=` mutation: `embed_from` returns `Some((0, 0))`
+        // immediately at the first call, giving `suffix = seq[1..] =
+        // [2, 3, 4, 5]`, `right_gap = 0` — both wrong.
+        let s = seq(&[1, 2, 3, 4, 5]);
+        let p = project_after_prefix(&s, &[tok(1), tok(3)], MaxGap::new(5))
+            .expect("full-prefix embedding must succeed");
+        assert_eq!(
+            p.suffix,
+            seq(&[4, 5]),
+            "suffix is the seq tail after the prefix's last matched token"
+        );
+        assert_eq!(
+            p.right_gap, 1,
+            "right_gap is the max gap inside the embedding"
+        );
+    }
+
+    // rationale: MUT-2 supplement — gap-restart branch coverage. Sequence
+    // contains `prefix[0]` at index 0 but the embedding from there fails
+    // (intervening tokens push past `max_gap`); a later start at index 5
+    // succeeds. Exercises the outer loop's start-position restart that an
+    // equality-predicate mutation could break.
+    #[test]
+    fn project_after_prefix_gap_restart_advances_past_failing_start() {
+        // seq:    [1, 9, 9, 9, 9, 1, 2]
+        // prefix: [1, 2]
+        // max_gap = 1
+        //
+        // Start at 0: needs `tok(2)` within idx 1..=2, but those are
+        // `tok(9)`. Embed_from fails, `failed` gets `(1, 0)`, outer loop
+        // continues. Start at 5 matches `tok(1)`; embed_from at cand=6
+        // finds `tok(2)`. Returns `suffix=[]`, `right_gap=0`.
+        let s = seq(&[1, 9, 9, 9, 9, 1, 2]);
+        let p = project_after_prefix(&s, &[tok(1), tok(2)], MaxGap::new(1))
+            .expect("gap-restart must find the later `tok(1)`-start");
+        assert!(
+            p.suffix.is_empty(),
+            "consecutive-tokens embedding has empty suffix"
+        );
+        assert_eq!(
+            p.right_gap, 0,
+            "consecutive embedding has zero internal gap"
+        );
+    }
+
     // ---- mine_sequences happy paths (6) ---------------------------------
 
     #[test]

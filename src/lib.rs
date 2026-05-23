@@ -113,8 +113,8 @@ pub use m31_selector::{
     DEFAULT_ALPHA, DEFAULT_BETA, DEFAULT_DELTA, DEFAULT_GAMMA, RECENCY_HALF_LIFE_DAYS,
 };
 pub use m32_dispatcher::{
-    ConductorClient, ConductorDispatcher, DispatchOutcome, DispatcherError,
-    EscapeSurfaceProfile, HumanAcceptanceSignature, RefusalReason,
+    self_dispatch_guard, ConductorClient, ConductorDispatcher, DispatchOutcome,
+    DispatcherError, EscapeSurfaceProfile, HumanAcceptanceSignature, RefusalReason,
 };
 pub use m33_verifier::{
     aggregate as aggregate_verifiers, AggregateVerdict, Verifier, VerifierError,

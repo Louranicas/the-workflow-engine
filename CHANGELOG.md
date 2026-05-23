@@ -6,7 +6,54 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ---
 
-## [v0.2.0-WIP] — 2026-05-23 (S1004377) — Plan v2 Phase 1 (re-baseline + ADR cascade)
+## [v0.2.0-WIP] — 2026-05-23 (S1004377) — Plan v2 Phase 1 + Phase 2 (re-baseline + ADR cascade + deep FP-verify + 7-substrate audit)
+
+### Phase 2 (2026-05-23 S1004377)
+
+Decision-free audit. No source code touched. Engine at `v0.1.0` tag (`df00fd2`);
+tests 2048 (no delta).
+
+#### Added (Phase 2)
+
+- **`ai_docs/WORKFLOW_TRACE_V020_PHASE2_AUDIT_S1004377.md`** — deep FP-verify
+  + Tier 2 W1 sizing + 7-substrate enumeration + V3 Genesis v1.4 pre-flight.
+  Findings:
+  - **NA-GAP-01 / NA-GAP-04 / NA-GAP-06-drain confirmed still ungrounded** at
+    HEAD `39e71a7` (matches Phase 2 audit S1004115; Plan v2 §2.5 work-item
+    registry is faithful).
+  - **W1 blast radius:** 6 src files (m23 declares; m30 wraps via
+    `AcceptedWorkflow`; m42 emits; orchestration crystallise + dispatch
+    serdes; lib.rs re-exports) + 10 integration test fixture files
+    (wf_crystallise / wf_dispatch / cc5 / cc4 / cc7 / m11 / m23 / m30 /
+    m31 / m32). V1 co-lands per C-2 — one JSONL fixture regen pass in
+    Phase 5.
+  - **7 substrates verified against runtime evidence** per NA-2 + convergent
+    C-3 (atuin / stcortex live mem 18511 + 18517 / Conductor pending OP-1 /
+    CC-5 5-clock set / Luke + Watcher / RALPH gen 7,622 / Cargo build graph
+    with spacetimedb-sdk sibling-repo). Each substrate has a concrete
+    v0.2.0 participation surface.
+  - **C-4 Zen-verdict-absent confirmed at HEAD:** 0 strict `zen_*verdict*`
+    matches for workflow-trace hardening waves. Only Luke-as-Zen-substitute
+    (per D26) verdict on record (`2026-05-17T094500Z_luke_as_zen_g7_verdict_approve_v3.md`).
+    DX-V3.b 7-day ship-with-honest-residual cap is the right Phase 9
+    mitigation.
+  - **V3 m16 Genesis v1.4 amendment pre-flighted:** 4 v1.3 anchors enumerated
+    (`:35` 26→27 modules; `:37` architecture line; `:62` OI-3 resolution
+    + new OI-3.b; `:288` test budget 1562→1602). Recommended Cluster E
+    expansion (vs new Cluster I) — pending Phase 9 step 1 sub-decision.
+
+#### Phase 2 done-evidence (per Plan v2 §15 D43)
+
+- **Gate (4-stage, all green):** carried clean from Phase 1; no source code
+  change in Phase 2 means re-run is no-op semantically. Test count
+  **2048 passed / 0 failed / 1 ignored across 38 suites** (Phase 1 baseline;
+  Phase 2 no-delta).
+- **Test-count delta:** +0
+- **Cargo-mutants:** N/A
+- **Stcortex:** Phase 2 progress memory will be written + read-back-verified
+  in the commit-land step per NA-6 discipline.
+
+### Phase 1 (2026-05-23 S1004377)
 
 v0.2.0 execution opened per Luke @ node 0.A "begin V2" Phase 1 go (D48 execution
 gate fired). Phase 1 is doc-only (decision-free per Plan v2 §3); no source code

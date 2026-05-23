@@ -10,6 +10,7 @@ use thiserror::Error;
 use crate::m14_lift::{LiftSnapshot, MIN_SAMPLE_SIZE};
 use crate::m20_prefixspan::Pattern;
 use crate::m21_variant_builder::{MutationKind, WorkflowVariant};
+use crate::m32_dispatcher::EscapeSurfaceProfile;
 
 /// **F2 hard gate:** proposals refuse to build when the m14 lift
 /// snapshot reports `n < MIN_SAMPLE_SIZE` or `lift.is_none()`.
@@ -38,6 +39,14 @@ pub struct WorkflowProposal {
     /// Cluster index assigned by m22 (`None` if feature clustering
     /// skipped).
     diversity_cluster: Option<usize>,
+    /// Declared escape-surface profile — W1 wire-bump per Plan v2 v0.2.0
+    /// §3 Phase 5 step 2 + DX-W.b (W1 wire-bump) + DX-W.c (SemVer-break).
+    /// Consumed by Phase 6 R1 Security real verifier; default at
+    /// [`build_proposal`] is [`EscapeSurfaceProfile::Sandboxed`] per
+    /// Plan v2 §15 D7 fail-safe. **No `#[serde(default)]`** — v0.1.0
+    /// proposals lacking this field fail to deserialise (SemVer-break
+    /// at wire level per DX-W.c).
+    escape_surface: EscapeSurfaceProfile,
 }
 
 impl WorkflowProposal {
@@ -60,6 +69,7 @@ impl WorkflowProposal {
         evidence_lift: f64,
         evidence_ci_half: f64,
         diversity_cluster: Option<usize>,
+        escape_surface: EscapeSurfaceProfile,
     ) -> Result<Self, ProposerError> {
         if evidence_n < PROPOSAL_F2_THRESHOLD {
             return Err(ProposerError::EvidenceBelowThreshold {
@@ -74,6 +84,7 @@ impl WorkflowProposal {
             evidence_lift,
             evidence_ci_half,
             diversity_cluster,
+            escape_surface,
         })
     }
 
@@ -113,6 +124,15 @@ impl WorkflowProposal {
     pub const fn diversity_cluster(&self) -> Option<usize> {
         self.diversity_cluster
     }
+
+    /// Declared escape-surface profile — W1 wire-bump per Plan v2 v0.2.0
+    /// §3 Phase 5 step 2 + DX-W.b. Consumed by Phase 6 R1 Security real
+    /// verifier; default at [`build_proposal`] is
+    /// [`EscapeSurfaceProfile::Sandboxed`] per Plan v2 §15 D7 fail-safe.
+    #[must_use]
+    pub const fn escape_surface(&self) -> EscapeSurfaceProfile {
+        self.escape_surface
+    }
 }
 
 /// Proposal-builder errors.
@@ -147,6 +167,36 @@ pub fn build_proposal(
     snapshot: &LiftSnapshot,
     diversity_cluster: Option<usize>,
 ) -> Result<WorkflowProposal, ProposerError> {
+    // W1 wire-bump per Plan v2 §15 DX-W.b + DX-W.c: the 3-arg shape
+    // defaults `escape_surface` to `Sandboxed` per Plan v2 §15 D7
+    // (most-restrictive, fail-safe). Callers that need to declare a
+    // non-default surface use [`build_proposal_with_escape_surface`].
+    build_proposal_with_escape_surface(
+        variant,
+        snapshot,
+        diversity_cluster,
+        EscapeSurfaceProfile::Sandboxed,
+    )
+}
+
+/// Construct a `WorkflowProposal` with an explicit `escape_surface`
+/// declaration — W1 wire-bump 4-arg variant per Plan v2 v0.2.0 §3 Phase
+/// 5 step 2 + DX-W.b (W1) + DX-W.c (SemVer-break).
+///
+/// Identical semantics to [`build_proposal`] (F2 evidence-floor enforcement
+/// at the same site) except the caller declares the escape-surface
+/// profile that Phase 6 R1 Security verifier will check against the
+/// dispatcher's ack-ceiling per Plan v2 §15 D5 + D6.
+///
+/// # Errors
+///
+/// See [`build_proposal`].
+pub fn build_proposal_with_escape_surface(
+    variant: WorkflowVariant,
+    snapshot: &LiftSnapshot,
+    diversity_cluster: Option<usize>,
+    escape_surface: EscapeSurfaceProfile,
+) -> Result<WorkflowProposal, ProposerError> {
     if snapshot.n < PROPOSAL_F2_THRESHOLD {
         return Err(ProposerError::EvidenceBelowThreshold {
             n: snapshot.n,
@@ -171,6 +221,7 @@ pub fn build_proposal(
         lift,
         ci_half,
         diversity_cluster,
+        escape_surface,
     )
 }
 
@@ -385,11 +436,13 @@ mod tests {
     use std::time::SystemTime;
 
     use super::{
-        build_proposal, compose_proposals, ProposerError, PROPOSAL_F2_THRESHOLD,
+        build_proposal, build_proposal_with_escape_surface, compose_proposals, ProposerError,
+        WorkflowProposal, PROPOSAL_F2_THRESHOLD,
     };
     use crate::m14_lift::LiftSnapshot;
     use crate::m20_prefixspan::{Pattern, StepToken};
     use crate::m21_variant_builder::{build_variants, MutationKind, WorkflowVariant};
+    use crate::m32_dispatcher::EscapeSurfaceProfile;
 
     fn snap(n: usize, lift: Option<f64>, ci: Option<f64>) -> LiftSnapshot {
         LiftSnapshot {
@@ -1214,5 +1267,86 @@ mod tests {
             out.is_empty(),
             "pressure must NOT promote sub-F2 proposals past the evidence gate"
         );
+    }
+
+    // ========================================================================
+    // W1 escape_surface wire-bump tests (Plan v2 v0.2.0 §3 Phase 5 step 2;
+    // DX-W.b = W1, DX-W.c = SemVer-break per §15). Verifies:
+    //   - default `build_proposal` → escape_surface = Sandboxed (D7 fail-safe)
+    //   - `build_proposal_with_escape_surface` threads explicit surface
+    //   - SemVer-break at wire level: v0.1.0-shape JSONL (missing
+    //     escape_surface) fails to deserialise
+    //   - serde round-trip preserves the surface
+    // ========================================================================
+
+    #[test]
+    fn build_proposal_default_escape_surface_is_sandboxed() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let p = build_proposal(sample_variant(), &s, None).expect("ok");
+        assert_eq!(
+            p.escape_surface(),
+            EscapeSurfaceProfile::Sandboxed,
+            "W1 build_proposal default per Plan v2 §15 D7 = Sandboxed (most-restrictive)"
+        );
+    }
+
+    #[test]
+    fn build_proposal_with_escape_surface_threads_explicit_surface() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        for surface in EscapeSurfaceProfile::VARIANTS {
+            let p = build_proposal_with_escape_surface(sample_variant(), &s, None, surface)
+                .expect("ok");
+            assert_eq!(
+                p.escape_surface(),
+                surface,
+                "build_proposal_with_escape_surface must preserve the declared surface for {surface:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn semver_break_v0_1_0_jsonl_missing_escape_surface_fails_to_deserialise() {
+        // Per DX-W.c SemVer-break: a v0.1.0-shape JSONL line (no
+        // `escape_surface` field) MUST fail to deserialise into
+        // WorkflowProposal at v0.2.0. There is no `#[serde(default)]` on
+        // the new field — that absence is the SemVer-break contract.
+        let v0_1_0_shape = serde_json::json!({
+            "proposal_id": 12345_u64,
+            "variant": {
+                "variant_id": 42_u64,
+                "steps": [],
+                "mutation": "identity",
+                "source_pattern_hash": 7_u64,
+            },
+            "evidence_n": 30_usize,
+            "evidence_lift": 0.5_f64,
+            "evidence_ci_half": 0.05_f64,
+            "diversity_cluster": null,
+            // NOTE: escape_surface intentionally absent — this is the
+            // v0.1.0 wire-shape the SemVer-break refuses.
+        });
+        let s = v0_1_0_shape.to_string();
+        let result: Result<WorkflowProposal, _> = serde_json::from_str(&s);
+        assert!(
+            result.is_err(),
+            "v0.1.0 proposals lacking escape_surface MUST fail to deserialise at v0.2.0 (SemVer-break per DX-W.c); got Ok({:?})",
+            result.ok()
+        );
+    }
+
+    #[test]
+    fn v0_2_0_jsonl_with_escape_surface_round_trips_successfully() {
+        let s = snap(30, Some(0.5), Some(0.05));
+        let p = build_proposal_with_escape_surface(
+            sample_variant(),
+            &s,
+            Some(2),
+            EscapeSurfaceProfile::FileWrite,
+        )
+        .expect("build");
+        let serialised = serde_json::to_string(&p).expect("ser");
+        let restored: WorkflowProposal = serde_json::from_str(&serialised).expect("de");
+        assert_eq!(p, restored, "round-trip identity");
+        assert_eq!(restored.escape_surface(), EscapeSurfaceProfile::FileWrite);
     }
 }

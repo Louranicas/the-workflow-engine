@@ -316,5 +316,13 @@ pub struct DetectionResult {
     pub events: Vec<RefusalToken>,
 }
 
+/// W1 transport client for m16 → synthex-v2 `/v3/heartbeat`
+/// (v0.2.2+ per Plan v2 — Source-Verified Integration S1004590, Zen
+/// PARTIAL APPROVE / AMEND 2026-05-24T102556Z). Engine-side enrichment
+/// wrapper + NA-5 RefusalToken sub-tag routing. Does NOT depend on
+/// synthex-v2-side endpoint landing — every emit routes through
+/// `RefusalToken::Unavailable` honestly until the substrate ships.
+pub mod transport;
+
 #[cfg(test)]
 mod tests;

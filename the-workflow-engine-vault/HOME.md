@@ -15,6 +15,19 @@ This vault holds the workflow-engine codebase's artefacts. **The codebase is imp
 
 ---
 
+## 🔍 Wiring Gap Analysis — S1004590 (Dual-Frame, 2026-05-24)
+
+**VERDICT: AMEND.** Dual-pass agent review on the 5 SYNTHEX-V2 wiring schematics below.
+
+- **Conventional pass** (Explore, 324-line evidence): 6/10 claims verified; **CONV-1 CRITICAL** = `/v3/nexus/push` is a 501 STUB (Bug Hunt Armada `c9eeb75` landed AFTER schematics — Wiring 02 headline contract false); CONV-2 HIGH internal-only routing; CONV-3/4 SPECULATIVE m16/m42 schemas.
+- **NA pass** (na-gap-analyst, 305-line frame analysis): dominant frame A; **NA-1' HIGH** = NA-4 NOT closed (signal_bus_recent cap 50 evicts heartbeats before m47 sees pattern); **NA-2' HIGH** "Bidirectional" is unidirectional; **NA-3' HIGH** no reverse `WorkflowTraceParticipationStatus`; **NA-4' HIGH** single-substrate completion theatre.
+- **Wiring 03 lands as authored.** Other 4 need amendments + 1 NEW schematic (Wiring 02b inbound).
+- **NA-4 closure gate revised** to 7-condition acceptance test (wire existence necessary but not sufficient).
+
+**Full note: [[Wiring Gap Analysis — S1004590 Dual-Frame]]** · source reports `/tmp/synthex-v2-deep-evidence-for-gap-analysis.md` + `/tmp/synthex-v2-wiring-plan-na-gap.md`.
+
+---
+
 ## 🔌 SYNTHEX-V2 Integration Schematics — S1004590 (2026-05-24)
 
 Four wiring schematics (+ master map) extracted from a read-only Explore mission against the synthex-v2 Obsidian vault (213 files, 110-wikilink MASTER_INDEX). Closes **OP-6 / NA-4 self-canary loop** authoring side; synthex-v2-side endpoint land is Luke @ node 0.A coordination.

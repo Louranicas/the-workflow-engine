@@ -22,8 +22,9 @@ Comprehensive catalogue of every artefact in the the-workflow-engine vault, orga
 
 ---
 
-## 0a. SYNTHEX-V2 wiring schematics (S1004590, 2026-05-24) — substrate integration
+## 0a. SYNTHEX-V2 wiring schematics + gap analysis (S1004590, 2026-05-24)
 
+- **[[Wiring Gap Analysis — S1004590 Dual-Frame]]** — **VERDICT: AMEND.** Dual-pass (conventional 6/10 verified + 1 CRITICAL drift; NA pass 4 HIGH + 3 tensions + 2 convergent). Read FIRST.
 - [[SYNTHEX-V2 Integration Master Schematic]] — umbrella; cross-vault to `synthex-v2/MASTER_INDEX`
 - [[Wiring 01 — m16 Heartbeat Consumer (NA-4 Closure)]] — **highest leverage**; closes OP-6 / NA-4 self-canary loop
 - [[Wiring 02 — NexusEvent Bidirectional Push]] — m40/m41/m42 outbound to `:8092`

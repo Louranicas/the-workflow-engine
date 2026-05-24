@@ -188,5 +188,65 @@ impl HeartbeatTransport {
     }
 }
 
+/// Glue: convert a `DetectionResult` from `DriftDetector::detect()` plus
+/// process-wide context into a wire envelope, send via the transport,
+/// return the typed outcome.
+///
+/// Per Plan v2 — Source-Verified Integration S1004590 § "v0.2.2+ horizon
+/// item 1" (call-site integration). Bridges the call-driven `detect()`
+/// surface (m16 v0.2.0 KEYSTONE) with the wire-driven `HeartbeatTransport`
+/// surface (W1, v0.2.2+ commit `2e9edff`).
+///
+/// `boot_id` + `instance_id` are caller-injected (m16 has no
+/// process-wide UUID generator; this is the integration point).
+/// `alert_budget_remaining` is caller-derived from the budget state at
+/// emit time (m16's `AlertBudget` does not expose this directly per
+/// design; callers compute via `(min_interval_ms.saturating_sub(now -
+/// last_fired))` clamped to `u16` if a budget primitive is needed).
+///
+/// # Errors
+///
+/// Returns `Err(RefusalToken::Unavailable(_))` per the failure-table in
+/// the [`HeartbeatTransport::send`] docs — V5 gate, transport, 501, 503,
+/// 4xx/5xx, parse-fail all route through NA-5-distinguishable sub-tags.
+pub fn emit_detection_to_transport(
+    result: &super::DetectionResult,
+    transport: &HeartbeatTransport,
+    boot_id: String,
+    instance_id: String,
+    alert_budget_remaining: u16,
+) -> Result<HeartbeatAck, RefusalToken> {
+    // Derive SkewSummary from the DetectionResult's samples + events
+    // (engine-side enrichment per Plan v2 § S2 amendment 2).
+    let max_observed_skew_ms = result
+        .samples
+        .iter()
+        .flat_map(|a| {
+            result
+                .samples
+                .iter()
+                .filter(move |b| a.source != b.source)
+                .map(move |b| super::pair_skew_ms(a.clock_value_ms, b.clock_value_ms))
+        })
+        .max()
+        .unwrap_or(0);
+    let skew_summary = SkewSummary {
+        max_observed_skew_ms,
+        samples_observed: u16::try_from(result.samples.len()).unwrap_or(u16::MAX),
+        had_refusals: !result.events.is_empty(),
+    };
+
+    let envelope = HeartbeatWireEnvelope {
+        heartbeat: result.heartbeat,
+        heartbeat_source: "workflow-trace::m16_substrate_drift_canary".to_owned(),
+        boot_id,
+        instance_id,
+        skew_summary,
+        alert_budget_remaining,
+    };
+
+    transport.send(&envelope)
+}
+
 #[cfg(test)]
 mod tests;

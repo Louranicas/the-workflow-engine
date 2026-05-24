@@ -106,6 +106,34 @@ deploy with pre-snapshot → 30-tick fitness window → auto-rollback if Δfitne
 4. **POVM CR-2 inflation** — pre-CR-2 binary still serving `learning_health=0.9146` on some configs; workflow-trace m42 ADR routes substrate-feedback writes to stcortex (POVM-decoupled) — this risk is structurally avoided.
 5. **`#![forbid(unsafe_code)]`** on workflow-trace must be preserved across the bridge — synthex-v2's `WsMessage` enum and `IngestSignal` must round-trip without unsafe interop.
 
+## 7-substrate generalisability audit (NA-4' resolution, Plan v2 § S1)
+
+> Per NA-4' (gap analysis HIGH finding): the synthex-v2 pattern is NOT generalisable. Each of the 7 NA-2 substrates has a different consumption surface. This table is the honest per-substrate audit — for each, what wire shape (if any) is the integration target, and what's the honest blocker.
+
+| Substrate | Consumption surface | Heartbeat-shape fit? | Integration path | Honest blocker |
+|---|---|---|---|---|
+| **synthex-v2** | HTTP daemon `:8092` + WebSocket `/ws/orac` + 8-channel signal bus + m46 TensorSnapshot consumer | YES (engine-side enrichment per Plan v2 § S2; m16 heartbeat lands at m10 → TensorSnapshot path per NA-1'') | [[Wiring 01 — m16 Heartbeat Consumer (NA-4 Closure)]] + [[Wiring Plan v2 — Source-Verified Integration S1004590]] | synthex-v2-side endpoint authoring (~400 LOC, operator-only); Option A vs B TensorSnapshot decision (Zen + Luke) |
+| **stcortex** | SpacetimeDB module `:3000` + write_pathway / write_memory reducers + Rust SDK | NO (heartbeat is liveness signal; stcortex is durable substrate — wrong shape) | [[Wiring 03 — stcortex Pathway Namespace Alignment]] (pathway-pair emission, not heartbeat) | Slug-namespace discipline already in place (P30); workflow_trace_outcomes single family today |
+| **HABITAT-CONDUCTOR** | Per-pane Zellij IPC + file-drop comms + 4 binaries (`weaver`/`weaver-tail`/`zen`/`enforcer`) + `auto_start=false` Batch 5 | NO (per-pane dispatch coordination via IPC; no HTTP daemon for heartbeats; lifecycle/control plane requires Luke per CLAUDE.md) | Conductor-side liveness via existing `:8141/health` probe (LCM corridor — Command-2's lane per Zen 102556Z) | LCM chunk-3a not yet authorised; Wiring schematic for WFE→Conductor not yet authored (separate scope) |
+| **CC-5 loop clocks** | In-process m11 fitness decay + m14 lift evidence + m15 pressure register (workflow_core lib internals) | YES intra-process (already in place) | Internal m11→m14→m15 wire (CC-7 PressureEvent → m23 compose-priority, shipped v0.1.0) | No external integration needed — CC-5 is engine-internal |
+| **Luke + Watcher ☤** | Human + persona pair; cross-pane file-drop (`~/projects/shared-context/agent-cross-talk/`) + WCP (`watcher notify`) | NO (no machine consumer — Luke is decisional, Watcher is observer) | Operator-only via D1-D7 + WCP notices | This substrate is decisional/observational, not heartbeat-consuming. The "heartbeat" Luke sees is the commit chain itself; the Watcher's is the synthex-v2 m46 stream |
+| **RALPH** | In-process fitness loop on ORAC sidecar `:8133`; observable via `/ralph` endpoint | NO direct (RALPH is observer of fitness gradient, not heartbeat consumer) | Read-only fitness gradient pull (LCM Wiring W5 lane per Zen 102556Z); informs WFE's own m11 decay weight | RALPH is on ORAC, not addressable as WFE→RALPH push; only WFE→ORAC observation pull |
+| **Cargo build graph** | Build-time substrate; observable via `cargo metadata` + `cargo check` + `cargo clippy` JSON output | NO (build-time only; not runtime; no live heartbeat surface) | CI integration via `.github/workflows/ci.yml` + `.gitlab-ci.yml` (already in place per v0.1.0) | None — CI is the heartbeat path for this substrate |
+
+**Honest generalisation conclusion:**
+
+Of the 7 NA-2 substrates:
+- **1** (synthex-v2) has a true HTTP heartbeat-consumer integration path — that's what Wiring 01 + Plan v2 § S2 specifies
+- **1** (stcortex) has a wholly different pathway-emission path — Wiring 03
+- **1** (HABITAT-CONDUCTOR) is operator-coordinated (Command-2's lane)
+- **1** (CC-5) is engine-internal — already wired
+- **2** (Luke+Watcher, RALPH) are observational/decisional — heartbeat-shape is a category error
+- **1** (Cargo build graph) is build-time — CI is the heartbeat
+
+**No single "wiring pattern" generalises across all 7.** Each substrate needs its own design, audited honestly. v0.2.2+ horizon focuses on synthex-v2 (the highest-leverage HTTP daemon integration target); the other 6 are operator-coordinated, already wired, or out-of-scope for engine-driven push integration.
+
+---
+
 ## Cross-vault anchors (bidirectional)
 
 | synthex-v2 vault note | What it gives the wiring |

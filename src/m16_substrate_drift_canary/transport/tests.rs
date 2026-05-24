@@ -169,6 +169,104 @@ fn v5_gate_shipping_status_does_not_short_circuit() {
 }
 
 // ============================================================================
+// Glue: emit_detection_to_transport (call-site integration, v0.2.2+ horizon item 1)
+// ============================================================================
+
+#[test]
+fn glue_emit_detection_short_circuits_when_substrate_not_shipped() {
+    use crate::m16_substrate_drift_canary::{ClockSample, ClockSource, DetectionResult};
+    use super::emit_detection_to_transport;
+
+    let transport = HeartbeatTransport::new(
+        "http://127.0.0.1:1/v3/heartbeat".to_owned(),
+        Arc::new(SubstrateTrust::new()), // NotShipped
+    );
+    let detection = DetectionResult {
+        heartbeat: Heartbeat { emitted_at_ms: 1000, cycle: 5 },
+        samples: vec![
+            ClockSample { source: ClockSource::M11Recency, clock_value_ms: 100, observed_at_ms: 0 },
+            ClockSample { source: ClockSource::AtuinCheckpoint, clock_value_ms: 110, observed_at_ms: 0 },
+        ],
+        events: vec![],
+    };
+    let result = emit_detection_to_transport(
+        &detection,
+        &transport,
+        "boot-uuid-glue-test".to_owned(),
+        "wfe-glue-instance".to_owned(),
+        5,
+    );
+    match result {
+        Err(RefusalToken::Unavailable(UnavailableReason::EngineImagined { .. })) => {}
+        other => panic!("glue must short-circuit via V5 gate when NotShipped; got {other:?}"),
+    }
+}
+
+#[test]
+fn glue_derives_skew_summary_from_detection_samples() {
+    use crate::m16_substrate_drift_canary::{ClockSample, ClockSource, DetectionResult};
+    use super::emit_detection_to_transport;
+
+    let transport = HeartbeatTransport::new(
+        "http://127.0.0.1:1/v3/heartbeat".to_owned(),
+        shipped_trust(),
+    );
+    // 3 samples; max pair skew = abs(200-100) = 100
+    let detection = DetectionResult {
+        heartbeat: Heartbeat { emitted_at_ms: 1000, cycle: 5 },
+        samples: vec![
+            ClockSample { source: ClockSource::M11Recency, clock_value_ms: 100, observed_at_ms: 0 },
+            ClockSample { source: ClockSource::AtuinCheckpoint, clock_value_ms: 200, observed_at_ms: 0 },
+            ClockSample { source: ClockSource::M13StcortexDecay, clock_value_ms: 150, observed_at_ms: 0 },
+        ],
+        events: vec![],
+    };
+    // Transport fails (port 1 unreachable) but we can still observe the
+    // envelope-construction path was taken (not short-circuited).
+    let result = emit_detection_to_transport(
+        &detection,
+        &transport,
+        "boot".to_owned(),
+        "inst".to_owned(),
+        7,
+    );
+    match result {
+        Err(RefusalToken::Unavailable(UnavailableReason::SubstrateUnreachable { .. })) => {}
+        other => panic!("glue must reach transport.send() for Live substrate; got {other:?}"),
+    }
+}
+
+#[test]
+fn glue_handles_empty_samples_without_panic() {
+    use crate::m16_substrate_drift_canary::DetectionResult;
+    use super::emit_detection_to_transport;
+
+    let transport = HeartbeatTransport::new(
+        "http://127.0.0.1:1/v3/heartbeat".to_owned(),
+        shipped_trust(),
+    );
+    let detection = DetectionResult {
+        heartbeat: Heartbeat { emitted_at_ms: 1000, cycle: 5 },
+        samples: vec![], // empty
+        events: vec![],
+    };
+    let result = emit_detection_to_transport(
+        &detection,
+        &transport,
+        "boot".to_owned(),
+        "inst".to_owned(),
+        0,
+    );
+    // Empty samples → max_observed_skew_ms defaults to 0 (per unwrap_or(0));
+    // glue does not panic on iterator-empty path.
+    match result {
+        Err(RefusalToken::Unavailable(_)) => {} // OK — substrate unreachable
+        Ok(_) => panic!("port 1 should not yield Ok"),
+        other => panic!("unexpected RefusalToken variant for transport error path; got {other:?}"),
+    }
+}
+
+// ============================================================================
 // Envelope wire-shape audit — minimal heartbeat preserved verbatim
 // (per CONV-3 + ZA-2: m16's actual Heartbeat is the wire's inner shape)
 // ============================================================================

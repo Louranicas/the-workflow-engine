@@ -157,10 +157,34 @@ impl AlertBudget {
     /// Should an alert for this (a, b) pair fire now? Updates the
     /// last-alerted bookkeeping on `true` returns. Pair is normalised
     /// to (min, max) so symmetric crossings dedup correctly.
+    ///
+    /// **M5 silent-failure-hunter fix (CRITICAL — m16 self-canary
+    /// meta-failure):** the previous `saturating_sub` would return 0
+    /// on a clock rewind (`now_ms < last`), which is `< min_interval_ms`,
+    /// which would SUPPRESS the alert. That is precisely the failure
+    /// mode m16 EXISTS to detect — clock-skew rewind silently muting
+    /// the canary that watches for clock-skew rewind. Explicit
+    /// rewind-detection now fires the alert AND emits a separate
+    /// rewind-warn for operator visibility.
     pub fn should_fire(&mut self, a: ClockSource, b: ClockSource, now_ms: u64) -> bool {
         let (lo, hi) = if (a as u8) <= (b as u8) { (a, b) } else { (b, a) };
         let key = (lo, hi);
         match self.last_alert.get(&key).copied() {
+            Some(last) if now_ms < last => {
+                // Clock rewind detected — the exact failure m16 is built
+                // for. Fire anyway (do not let cooldown suppress drift
+                // detection during the rewind window) + emit the
+                // meta-warn so operators see the clock-skew itself.
+                tracing::warn!(
+                    target: "m16.alert_budget.clock_rewind",
+                    pair_lo = ?lo, pair_hi = ?hi,
+                    last_alert_ms = last, now_ms,
+                    "engine clock appears to have rewound; firing alert anyway \
+                     to preserve m16 detection during the very failure mode it exists for"
+                );
+                self.last_alert.insert(key, now_ms);
+                true
+            }
             Some(last) if now_ms.saturating_sub(last) < self.min_interval_ms => false,
             _ => {
                 self.last_alert.insert(key, now_ms);
@@ -214,6 +238,20 @@ impl DriftDetector {
     /// emitted (as V1 RefusalToken envelopes) + a [`Heartbeat`] for
     /// the Watcher liveness assertion.
     pub fn detect(&mut self, now_ms: u64) -> DetectionResult {
+        // M4 silent-failure-hunter fix: previous saturating_add would
+        // silently freeze the cycle counter at u64::MAX, breaking
+        // Watcher liveness assertion (NA-4 mitigation) — heartbeat
+        // would stop advancing while emitted_at_ms still ticked. Log
+        // an error-level event on saturation so operators see the
+        // canary's own canary fail.
+        if self.cycle == u64::MAX {
+            tracing::error!(
+                target: "m16.detector.cycle_saturated",
+                "m16 detector cycle counter saturated at u64::MAX; \
+                 Watcher liveness assertion (NA-4) heartbeat will FREEZE — \
+                 restart the detector to recover"
+            );
+        }
         self.cycle = self.cycle.saturating_add(1);
         let samples: Vec<ClockSample> = self.samplers.iter().map(|s| s.sample()).collect();
         let mut events: Vec<RefusalToken> = Vec::new();

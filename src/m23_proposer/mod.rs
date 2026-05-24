@@ -242,12 +242,32 @@ pub const fn mutation_weight_for(kind: &MutationKind) -> u32 {
 ///
 /// Consumed by [`build_proposal_with_escape_surface`] to populate the
 /// proposal's `cost` field for Phase 6 R2 Cost verifier consumption.
+///
+/// **M1 silent-failure-hunter fix:** previous `unwrap_or(i64::MAX)`
+/// silently saturated — operator saw "cost exceeds ceiling" Refuse with
+/// no signal that the arithmetic overflowed. `debug_assert!` catches
+/// the "impossible" case in tests; release builds emit a
+/// `tracing::warn!` on the saturation branch for operator visibility.
 #[must_use]
 fn project_cost(variant: &WorkflowVariant) -> i64 {
     let weight = mutation_weight_for(&variant.mutation);
     let step_count: u64 = variant.steps.len() as u64;
     let product: u128 = u128::from(step_count) * u128::from(weight);
-    i64::try_from(product).unwrap_or(i64::MAX)
+    debug_assert!(
+        product <= u128::from(u64::MAX) && i64::try_from(product).is_ok(),
+        "project_cost overflow: step_count={step_count} × weight={weight} = {product} exceeds i64::MAX; \
+         realistic WorkflowVariant inputs (MAX_STEPS_PER_VARIANT × max weight) cannot reach this — \
+         contract regression upstream"
+    );
+    i64::try_from(product).unwrap_or_else(|_| {
+        tracing::warn!(
+            target: "m23.project_cost.saturated",
+            step_count, weight, product = %product,
+            "cost projection saturated to i64::MAX; downstream R2 verifier will see max-cost — \
+             check m21 MAX_STEPS_PER_VARIANT + mutation_weight_for contract"
+        );
+        i64::MAX
+    })
 }
 
 /// Proposal-builder errors.

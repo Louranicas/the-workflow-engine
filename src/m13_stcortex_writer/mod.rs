@@ -579,10 +579,28 @@ where
     #[allow(dead_code)] // production drain-consumer wire is post-v0.2.0 per §11
     pub(crate) fn drain_outbox(&self) -> Result<DrainResult, StcortexWriterError> {
         use std::io::BufRead;
-        // Cursor read: absent file == 0 offset (first drain).
+        // Cursor read: absent file == 0 offset (first drain). A corrupt
+        // cursor file (parse failure) emits a tracing::warn and resets to
+        // 0 (full re-drain) rather than silently bypassing operator
+        // visibility — H2 silent-failure-hunter (v0.2.0 ship audit).
+        // The full re-drain is at-least-once-correct (the consumer must
+        // be idempotent per `drain_to_refusal_tokens` semantics anyway);
+        // the warn ensures operators see the corruption and can repair
+        // the sidecar rather than silently double-processing all
+        // historical entries.
         let cursor_path = self.outbox_cursor_path();
         let start_offset: u64 = match std::fs::read_to_string(&cursor_path) {
-            Ok(s) => s.trim().parse::<u64>().unwrap_or(0),
+            Ok(s) => s.trim().parse::<u64>().unwrap_or_else(|e| {
+                tracing::warn!(
+                    target: "m13.drain.cursor_corrupt",
+                    cursor_path = %cursor_path.display(),
+                    error = %e,
+                    "outbox cursor sidecar corrupt; resetting to 0 (full re-drain). \
+                     Repair by deleting the .cursor sidecar after verifying downstream \
+                     consumer idempotency."
+                );
+                0
+            }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
             Err(e) => return Err(StcortexWriterError::OutboxIo(e)),
         };
@@ -621,7 +639,21 @@ where
         let mut new_cursor = effective_start;
         for line_result in reader.lines() {
             let line = line_result?;
-            new_cursor += u64::try_from(line.len()).unwrap_or(0) + 1; // +1 for `\n`
+            // H1 silent-failure-hunter fix: previous `unwrap_or(0)` would
+            // silently zero-advance the cursor on a line > u64::MAX bytes
+            // (practically unreachable on 64-bit usize, but the silent-zero
+            // breaks the at-least-once cursor invariant — next drain
+            // re-reads the same line forever). Cap-to-MAX (warn-and-skip)
+            // is the safer fail-mode: cursor advances PAST the line so
+            // the next drain doesn't re-emit it.
+            let line_bytes = u64::try_from(line.len()).unwrap_or_else(|_| {
+                tracing::warn!(
+                    target: "m13.drain.line_overflow",
+                    "outbox line length exceeds u64; cursor capped to u64::MAX to skip-past"
+                );
+                u64::MAX
+            });
+            new_cursor = new_cursor.saturating_add(line_bytes).saturating_add(1); // +1 for `\n`
             if line.trim().is_empty() {
                 continue; // blank lines tolerated (defensive)
             }
@@ -725,11 +757,31 @@ fn outbox_entry_to_refusal_token(
         if let Some(ltp) = obj.get("LtpBelowFloor").and_then(|v| v.get("density")) {
             format!("ltp_below_floor:density={ltp}")
         } else {
-            // Defensive fallback: emit the JSON serialised form.
-            entry.reason.to_string()
+            // H3 silent-failure-hunter fix: unknown tagged variant (e.g.,
+            // a v0.3.0 DeferReason addition) must be observable in
+            // operator telemetry + must prefix the reason so downstream
+            // substrate-consumer filters can match-and-route the
+            // unknown variant rather than silently downgrading to a
+            // raw-JSON blob indistinguishable from a legitimate reason.
+            let raw = entry.reason.to_string();
+            tracing::warn!(
+                target: "m13.drain.unknown_reason",
+                raw_reason = %raw,
+                "outbox entry reason is an unknown tagged variant; \
+                 emitting with `unknown_reason:` prefix for downstream visibility"
+            );
+            format!("unknown_reason:{raw}")
         }
     } else {
-        entry.reason.to_string()
+        // Non-object, non-string reason: same handling — observable + prefixed.
+        let raw = entry.reason.to_string();
+        tracing::warn!(
+            target: "m13.drain.unknown_reason",
+            raw_reason = %raw,
+            "outbox entry reason is not a known shape; \
+             emitting with `unknown_reason:` prefix for downstream visibility"
+        );
+        format!("unknown_reason:{raw}")
     };
     crate::refusal_token::RefusalToken::substrate_authored(
         crate::refusal_token::SubstrateId::Stcortex,

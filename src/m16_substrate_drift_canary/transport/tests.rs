@@ -237,6 +237,64 @@ fn glue_derives_skew_summary_from_detection_samples() {
 }
 
 #[test]
+fn tick_and_emit_drives_detector_plus_transport_short_circuits_when_not_shipped() {
+    use crate::m16_substrate_drift_canary::{
+        AlertBudget, ClockSampler, DriftDetector, SkewEnvelope,
+    };
+    use super::tick_and_emit;
+
+    // Minimal sampler fixture so DriftDetector can be constructed.
+    struct FixtureSampler {
+        source: crate::m16_substrate_drift_canary::ClockSource,
+        value_ms: u64,
+    }
+    impl ClockSampler for FixtureSampler {
+        fn source(&self) -> crate::m16_substrate_drift_canary::ClockSource {
+            self.source
+        }
+        fn sample(&self) -> crate::m16_substrate_drift_canary::ClockSample {
+            crate::m16_substrate_drift_canary::ClockSample {
+                source: self.source,
+                clock_value_ms: self.value_ms,
+                observed_at_ms: 0,
+            }
+        }
+    }
+
+    let samplers: Vec<Box<dyn ClockSampler>> = vec![
+        Box::new(FixtureSampler {
+            source: crate::m16_substrate_drift_canary::ClockSource::M11Recency,
+            value_ms: 100,
+        }),
+        Box::new(FixtureSampler {
+            source: crate::m16_substrate_drift_canary::ClockSource::AtuinCheckpoint,
+            value_ms: 200,
+        }),
+    ];
+    let mut detector = DriftDetector::new(
+        samplers,
+        SkewEnvelope { max_skew_ms: 50 },
+        AlertBudget::new(1000),
+    );
+    let transport = HeartbeatTransport::new(
+        "http://127.0.0.1:1/v3/heartbeat".to_owned(),
+        Arc::new(SubstrateTrust::new()),
+    );
+    let result = tick_and_emit(
+        &mut detector,
+        500,
+        &transport,
+        "boot-tick-test".to_owned(),
+        "wfe-tick-instance".to_owned(),
+        3,
+    );
+    match result {
+        Err(RefusalToken::Unavailable(UnavailableReason::EngineImagined { .. })) => {}
+        other => panic!("tick_and_emit must short-circuit via V5 gate when NotShipped; got {other:?}"),
+    }
+}
+
+#[test]
 fn glue_handles_empty_samples_without_panic() {
     use crate::m16_substrate_drift_canary::DetectionResult;
     use super::emit_detection_to_transport;

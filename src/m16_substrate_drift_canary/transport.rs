@@ -248,5 +248,42 @@ pub fn emit_detection_to_transport(
     transport.send(&envelope)
 }
 
+/// Convenience tick wrapper: invoke `DriftDetector::detect()` for the
+/// given `now_ms`, then emit the result via `emit_detection_to_transport`.
+///
+/// Per Plan v2 — Source-Verified Integration S1004590 § "v0.2.2+ horizon
+/// item 1" extension (call-loop wire). m16 has no internal scheduler
+/// today (`detect()` is call-driven); this wrapper is the smallest
+/// integration that combines per-cycle detection + transport emission
+/// into one operator-facing call.
+///
+/// The caller is expected to drive the scheduling (`tick(now_ms)` per
+/// cycle on whatever cadence the operator chooses — typically 1 Hz).
+/// Boot ID and instance ID are caller-injected (same contract as
+/// [`emit_detection_to_transport`]).
+///
+/// # Errors
+///
+/// Same failure-table as [`HeartbeatTransport::send`] — V5 gate,
+/// transport, 501, 503, 4xx/5xx, parse-fail all route through
+/// NA-5-distinguishable sub-tags.
+pub fn tick_and_emit(
+    detector: &mut super::DriftDetector,
+    now_ms: u64,
+    transport: &HeartbeatTransport,
+    boot_id: String,
+    instance_id: String,
+    alert_budget_remaining: u16,
+) -> Result<HeartbeatAck, RefusalToken> {
+    let result = detector.detect(now_ms);
+    emit_detection_to_transport(
+        &result,
+        transport,
+        boot_id,
+        instance_id,
+        alert_budget_remaining,
+    )
+}
+
 #[cfg(test)]
 mod tests;

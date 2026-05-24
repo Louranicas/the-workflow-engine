@@ -51,6 +51,11 @@ pub mod m33_verifier;
 pub mod m40_nexus_emit;
 pub mod m41_lcm_rpc;
 pub mod m42_stcortex_emit;
+/// m43 — synthex-v2 → WFE inbound consumer (v0.2.2+ library-only scaffold).
+/// Per Plan v2 — Source-Verified Integration S1004590 § S4 + [[Wiring 02b]].
+/// Library-only; HTTP listener deferred to future bin-level integration
+/// per Zen "HOLD source expansion" guidance.
+pub mod m43_synthex_v2_inbound;
 pub mod m8_povm_build_prereq;
 
 pub use m4_cascade::{

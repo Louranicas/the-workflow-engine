@@ -185,7 +185,7 @@ Plan v2 §6 NA-4 row must NOT update from "mitigated structurally" → "loop-clo
 
 | # | Item | Effort | Source |
 |---|---|---|---|
-| **D7** | **Operator decision (Zen ZA-4):** W1 remains honest-501 until true consumption exists, OR authorize minimal accepted-and-audited inbox for WFE events? Distinct from D2 (redeploy) — decides target state AFTER redeploy lands. | Luke @ node 0.A only | Zen 2026-05-24T102556Z |
+| **D7** | **Operator decision (Zen ZA-4):** W1 remains honest-501 until true consumption exists, OR authorize minimal accepted-and-audited inbox for WFE events? Distinct from D2 (redeploy) — decides target state AFTER redeploy lands. **Disposition: HOLD until Luke's natural cycle** per Zen 2026-05-24T104102Z status-verify recommendation; no compact 2-option AskUserQuestion bundled this cycle (Command ACK 2026-05-24T104700Z). | Luke @ node 0.A only | Zen 2026-05-24T102556Z + ACK 2026-05-24T104700Z |
 | 1 | Author amendments per §S1–S6 dispositions (in this note) | ~7 hr | this plan |
 | 2 | Author Wiring 02b (SX2 → WFE) | ~2 hr | NA-2' |
 | 3 | Zen audit collaboration + bilateral V5 substrate-authorship | external | NA-3' + this plan |

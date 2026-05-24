@@ -6,6 +6,84 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ---
 
+## [v0.2.1-hardening] — 2026-05-24 (S1004590) — Post-ship verification close
+
+Single hygiene commit folding 5 silent-failure-hunter follow-ups + 4 Zen
+findings + 1 silent-failure-hunter re-audit regression catch (N1), all
+surfaced by post-v0.2.0-ship verification agents on the ship diff.
+
+**Commit:** `28e4209` on `main`, pushed origin + gitlab.
+**Tests:** 2163 (v0.2.0) → **2164 (+1)**, clippy + pedantic clean.
+
+### Fixed
+
+- **M2** — `BackPressureRegistry::is_substrate_explicitly_set` added for
+  NA-5 parity with `SubstrateTrust::is_substrate_imagined_for`. Consumers
+  can now distinguish "operator explicitly chose Pull" from
+  "operator forgot to configure this substrate". Required by the V5 ADR
+  D-S1004XXX-05 audit-distinguishability contract.
+- **M3** — `SubstrateTrust::set` now returns `Option<TrustEntry>` so
+  callers can detect overwrites; parity with
+  `BackPressureRegistry::set_mode`.
+- **N1** (silent-failure-hunter re-audit) — `#[must_use]` on both
+  `SubstrateTrust::set` and `BackPressureRegistry::set_mode` so the
+  M3/parity contract is **compiler-enforced**, not docstring-only. Test
+  call sites updated to bind `let _ = …` where the prior value is
+  intentionally discarded — the exact failure mode M3 was authored to
+  prevent (silent overwrite swallowed by `;`-terminated call) is now
+  impossible to ship past the gate.
+- **L1** — `BankSnapshot` carries `variant_id_set: HashSet<u64>` built
+  once in `CuratedBank::client_ref()`; `ConsistencyVerifier::contains_variant_id`
+  is now O(1) (see Zen #3 entry).
+- **L2** — `dispatch::diversity_score_from_proposal` single-arm match
+  collapsed to `let-else` with `tracing::debug!` on the `None` branch.
+  Prior shape silently fell through to 0.0 with no observability when
+  the `diversity_cluster` field was absent.
+- **L3** — `m13_stcortex_writer` outbox filename `expect` documented
+  honestly: constructor validates the `OsStr → &str` invariant, so the
+  late `expect` is unreachable-by-construction; message names the
+  constructor as the validator.
+
+### Hardened (Zen-style code-review)
+
+- **Zen #1** — m16 substrate-drift-canary: two per-cycle `Vec`
+  allocations now `with_capacity(samplers.len())` and `n*(n-1)/2`
+  respectively. Residual `format!()` String alloc on alert path named
+  as honest deferral to v0.2.2+ pending a typed reason enum.
+- **Zen #2** — `SubstrateTrust::refusal_for_unavailable` reason `String`
+  now prefixed with the participation-status provenance tag
+  (`engine_imagined:` / `substrate_unreachable:` / `substrate_authored:`)
+  so log-grep audits distinguish the three branches in textual receipts
+  without re-deserialising the enum tag. Structural variant distinction
+  preserved unchanged; prefix is operator-observability additive.
+  Signature also changed `String → &str` (caller-friendly — no alloc when
+  caller already holds `&str`).
+- **Zen #3** — `BankSnapshot::variant_id_set: HashSet<u64>` (L1 above).
+- **Zen #5** — `SubstrateId` variant-count parity test documented as
+  honest residual: runtime literal `assert_eq!(r.len(), 10)` retained;
+  compile-time `strum::EnumCount` enforcement deferred to v0.2.2+ (would
+  require `derive_macro` dep add — out-of-scope for this hygiene round).
+
+### Honest residuals → v0.2.2+
+
+- m16 alert-path `format!()` String alloc — typed reason enum.
+- `SubstrateId` `strum::EnumCount` compile-time variant-count
+  enforcement.
+- V1 RefusalToken consumer-side call-site cascade (~65 occurrences of
+  `RefusalReason`) — deferred per ADR D-S1004XXX-04 § 1.2 + Plan v2 D44
+  C-2 lean co-land.
+- Substrate-side schema/daemon work per ADR D-S1004XXX-05 + Plan v2 §11.
+
+### Why this is a hardening tag, not a v0.2.1 SemVer
+
+No wire-contract changes. No new public types or modules. No new tests
+(net +1 from M3 `_returns_prior` + 3 NA-5 prefix assertion updates).
+This is the post-ship "drift caught + corrected" round that every
+substrate-safety milestone should expect; tagged as `v0.2.1-hardening`
+to distinguish from a real v0.2.1 feature release.
+
+---
+
 ## [v0.2.0] — 2026-05-24 (S1004377) — Substrate-safety milestone SHIPPED
 
 Plan v2 v0.2.0 execution complete. All 12 phases shipped across **17

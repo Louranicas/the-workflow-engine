@@ -15,9 +15,12 @@ This vault holds the workflow-engine codebase's artefacts. **The codebase is imp
 
 ---
 
-## 🟢 Wiring Plan v2 — Source-Verified Integration (S1004590, 2026-05-24)
+## 🟢 Wiring Plan v2 — Source-Verified Integration (S1004590, 2026-05-24) — ZEN PARTIAL APPROVE / AMEND
 
-**RATIFICATION-CANDIDATE.** Integrated plan synthesising all 4 evidence streams (Wave 0 Explore discovery + Wave 1a conventional gap pass + Wave 1b NA frame pass + Wave 2a source-truth verification reading actual `src/m16_substrate_drift_canary/mod.rs`, `src/m42_stcortex_emit/mod.rs`, `synthex-v2/src/m8_watcher/m46_watcher_observer.rs`).
+> *Hygiene note (Zen ZA-5):* Current WFE m16 heartbeat is `{ emitted_at_ms: u64, cycle: u64 }`. Richer envelopes (sequence_number, skew_envelope, alert_budget, heartbeat_source, etc.) are PROPOSALS, not shipped wire shape.
+> *W1 status convention (Zen ZA-2):* `SOURCE-STUBBED / DEPLOY-LYING-200 / CONTRACT-PENDING`. Source returns honest-501 since `c9eeb75` (2026-05-24); running daemon binary still returns lying-200 (mtime predates fix by 18 days).
+
+**Zen verdict 2026-05-24T102556Z: PARTIAL APPROVE / AMEND.** 4 Zen amendments (ZA-1..ZA-4) + 1 hygiene rule (ZA-5) integrated. Documentation authority RATIFIED; code-deploy-ready NOT YET (gated on D1-D7). NA-4 acceptance gate 7→**8 conditions** (new cond 0 = source/deploy drift check). Integrated plan synthesising all 4 evidence streams (Wave 0 Explore discovery + Wave 1a conventional gap pass + Wave 1b NA frame pass + Wave 2a source-truth verification reading actual `src/m16_substrate_drift_canary/mod.rs`, `src/m42_stcortex_emit/mod.rs`, `synthex-v2/src/m8_watcher/m46_watcher_observer.rs`).
 
 **Major plan revisions from Wave 2 verification:**
 - **NA-1' REFUTED** — m46 doesn't read signal_bus_recent; consumes TensorSnapshot via tick(). HeartbeatBuffer ring requirement DROPPED. NEW NA-1'' substituted: m16 heartbeats need to influence a tensor dimension OR feed m22 capability_trace (substrate design choice for Zen + Luke).

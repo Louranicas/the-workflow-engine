@@ -4,7 +4,23 @@
 
 # Wiring Plan v2 — Source-Verified Integration (S1004590)
 
-> **Verdict:** dual-frame gap analysis + third-pass source verification together force a material plan revision. Five amendments + 1 new sibling schematic. The honest residual count grows, not shrinks — but the plan is now **source-grounded** rather than schematic-aspirational.
+> **🟢 ZEN VERDICT: PARTIAL APPROVE / AMEND** (2026-05-24T102556Z — see `agent-cross-talk/2026-05-24T102556Z_zen_response_command_command2_command3_wire_in.md`). Plan v2 is the documentation authority; **4 Zen-required amendments integrated below + 1 hygiene rule for cross-vault indexes**. Zen: *"proceed with amended schematics; verdict is PARTIAL APPROVE / AMEND. North Star remains valid. Restraint remains mandatory."*
+>
+> **Verdict:** dual-frame gap analysis + third-pass source verification + Zen audit together force a material plan revision. Five amendments + 1 new sibling schematic + 4 Zen amendments. The honest residual count grows, not shrinks — but the plan is now **source-grounded + Zen-cross-validated** rather than schematic-aspirational.
+
+## Zen amendments integrated (2026-05-24T102556Z)
+
+| # | Zen finding | Integrated as |
+|---|---|---|
+| **ZA-1** | NA-1' as written is too strong — m46 source has `DEFAULT_WINDOW_SIZE = 60`, `DEFAULT_WARMUP_TICKS = 30`; no `signal_bus_recent` symbol exists. Replace "m46's signal_bus_recent cap of 50 evicts heartbeats" with conditional language: **"No current m46 source-side consumer/buffer for WFE m16 heartbeats exists; if future wiring uses a bounded general recent-signal buffer, it must include a dedicated HeartbeatBuffer or prove non-eviction under load."** Downgrade severity HIGH-REFUTED → **SPECULATIVE/AMEND** (principle valid as future consumer requirement, not current m46 bug). | NA-1''' (this replaces my NA-1'' substitution; the underlying TensorSnapshot integration concern stays as NA-1'' but the eviction concern reframes per Zen) |
+| **ZA-2** | W1 status label is `SOURCE-STUBBED / DEPLOY-LYING-200 / CONTRACT-PENDING`, NOT plain "LIVE" or "501 STUB". Zen verified: source returns `501` but running daemon `pid 1702370` binary is `bin/synthex-v2` mtime 2026-05-06, predating HEAD `c9eeb75` by 18 days. **The running daemon still returns lying-200 (AP01)** despite source fix landing — source/deploy drift. Wiring 02 + 03 indexes must use the 3-part label. | New status convention applied in Plan v2 dispositions table (§ S3 row); CLAUDE.local + HOME + MASTER_INDEX must reflect the 3-part label, not the binary-state shorthand. |
+| **ZA-3** | NA-4 acceptance gate must include **source/deploy drift check for synthex-v2 BEFORE any endpoint live-test** (otherwise Phase 2 live probe only proves the stale binary still returns lying-200, not that the source fix works). | NA-4 7-condition → **8-condition acceptance gate** (new condition 0: drift check `git rev-parse HEAD` vs running binary mtime). |
+| **ZA-4** | Add D7 operator decision: *"Do we want W1 to remain honest-501 until true consumption exists, OR do we authorize a minimal accepted-and-audited inbox for WFE events?"* Distinct from D2 redeploy decision — D7 decides target state AFTER redeploy. | D7 added to operator hand-off register (v0.2.2+ horizon item 10). |
+| **ZA-5** (hygiene) | Visible note on every WFE↔SX2 integration index: *"Current WFE m16 heartbeat type is `{ emitted_at_ms, cycle }`; richer heartbeat envelopes are proposals, not shipped wire shape."* | Added to HOME + MASTER_INDEX + Master Schematic + Wiring 01 (already noted; reinforce). |
+
+Zen also accepted bilateral V5 (`WorkflowTraceParticipationStatus`) as **substrate-authorship request**, not Zen-authored code — matches my Plan v2 § NA-3' framing.
+
+Zen also clarified sequencing: **Phase 1 contract truth FIRST → Phase 2 labelled stale-binary smoke → Phase 3 LCM docs → Phase 4 persistence → Luke D1-D7.** Never run Phase 2 as "proof of live delivery" — only proves stale binary returns lying-200.
 
 ## TL;DR — what's changed since Wiring 01–04 + Gap Analysis
 
@@ -150,10 +166,11 @@ workflow-trace m16  ── POST :8092/v3/heartbeat ──┐
 
 **Effort:** ~1 hr authoring.
 
-## Revised NA-4 closure 7-condition acceptance test
+## Revised NA-4 closure 8-condition acceptance test (Zen ZA-3 amendment)
 
 Plan v2 §6 NA-4 row must NOT update from "mitigated structurally" → "loop-closed" until ALL of:
 
+0. ✅ **Source/deploy drift check (Zen ZA-3)** — `git rev-parse HEAD` on synthex-v2 vs `bin/synthex-v2` mtime — confirm running daemon binary post-dates `c9eeb75` (the W1-005 honest-501 fix). Otherwise live-test only proves stale binary returns lying-200, not source fix correctness.
 1. ✅ synthex-v2 ships POST `/v3/heartbeat` endpoint at m10 (CONV-1 unblock)
 2. ✅ **TensorSnapshot integration path** chosen (Option A: 12th dimension `wfe_clock_skew_ms` added to m07; OR Option B: m22 capability_trace fed from m16 alerts) — m46 must actually OBSERVE m16-derived drift via its existing TensorSnapshot path, NOT signal_bus_recent (NA-1' refuted; NA-1'' substituted)
 3. ✅ End-to-end acceptance test demonstrates: WFE emits 60 heartbeats over 60s; m46's 60-sample rolling baseline on the chosen dimension exhibits a measurable drift-anomaly z-score; m47 Critic detects within 10s of pattern onset
@@ -164,10 +181,11 @@ Plan v2 §6 NA-4 row must NOT update from "mitigated structurally" → "loop-clo
 
 **Wire existence is necessary but not sufficient.** Condition 3 (end-to-end drift detection under load) is the actual loop-closure gate.
 
-## v0.2.2+ horizon (final, source-grounded)
+## v0.2.2+ horizon (final, source-grounded + Zen-cross-validated)
 
 | # | Item | Effort | Source |
 |---|---|---|---|
+| **D7** | **Operator decision (Zen ZA-4):** W1 remains honest-501 until true consumption exists, OR authorize minimal accepted-and-audited inbox for WFE events? Distinct from D2 (redeploy) — decides target state AFTER redeploy lands. | Luke @ node 0.A only | Zen 2026-05-24T102556Z |
 | 1 | Author amendments per §S1–S6 dispositions (in this note) | ~7 hr | this plan |
 | 2 | Author Wiring 02b (SX2 → WFE) | ~2 hr | NA-2' |
 | 3 | Zen audit collaboration + bilateral V5 substrate-authorship | external | NA-3' + this plan |

@@ -4,6 +4,13 @@
 
 # Wiring 02 — NexusEvent Bidirectional Push
 
+> **⚠️ TITLE + HEADLINE AMENDED 2026-05-24 — see [[Wiring Plan v2 — Source-Verified Integration S1004590]].**
+> - **CONV-1 CRITICAL:** `/v3/nexus/push` is a 501 STUB (commit `c9eeb75` Bug Hunt Armada W1-005 fix landed AFTER this schematic). "synthex-v2 side (LIVE)" headline is FALSE.
+> - **NA-2' HIGH:** Title says "Bidirectional" but body defers SX2→WFE to T2+. Effective rename: "Wiring 02 — NexusEvent Outbound (WFE → SX2)". See NEW sibling [[Wiring 02b — NexusEvent Inbound (SX2 → WFE)]] (to be authored per Plan v2 § S4).
+> - **CONV-2 HIGH:** m13→m29→4-subscriber routing chain is INTERNAL only; HTTP layer is the 501 stub.
+>
+> **This note retained as historical draft.** Plan v2 supersedes its headline claims.
+
 > Engine ALREADY emits, synthex-v2 ALREADY consumes — this wire is **largely already in place**; what's missing is the workflow-trace-side outbound client + namespace conventions for the `(source, kind)` axis. ~120 LOC.
 
 ## Current state

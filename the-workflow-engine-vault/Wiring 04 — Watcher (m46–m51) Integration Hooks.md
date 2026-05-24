@@ -4,6 +4,14 @@
 
 # Wiring 04 — Watcher (m46–m51) Integration Hooks
 
+> **⚠️ TITLE + ARCHITECTURE CLAIMS AMENDED 2026-05-24 — see [[Wiring Plan v2 — Source-Verified Integration S1004590]] § S6.**
+> - **m46 does NOT read `signal_bus_recent`** — it consumes a `TensorSnapshot` passed to `tick()` (file: `src/m8_watcher/m46_watcher_observer.rs:544`). Has its own isolated 60-sample rolling baseline per dimension.
+> - **NA-1' REFUTED:** signal-bus has 8 channels × 1024 capacity broadcast::Sender; no 50-event cap. No heartbeat eviction risk.
+> - **NA-5' HELD:** Watcher's agency is over synthex-v2's own state (PID/heat), NOT WFE's. Effective rename: "Wiring 04 — Watcher Observation of WFE (read-only; no WFE feedback loop)". § "What this does NOT do" required.
+> - True WFE-feedback requires `m44_watcher_pathway_crawl` (NEW WFE module, promoted to first-class v0.3.0+ per C1').
+>
+> **This note retained as historical draft.** Plan v2 supersedes its headline claims.
+
 > Once m16 heartbeat lands at synthex-v2, the Watcher becomes the substrate-side actor that can **propose PID adjustments** to mitigate workflow-trace clock drift, gated through the Ember 7-trait check and PBFT q=27/n=41 quorum.
 
 ## Watcher state (as of S1004590)

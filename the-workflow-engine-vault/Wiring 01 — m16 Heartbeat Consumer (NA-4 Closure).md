@@ -4,6 +4,13 @@
 
 # Wiring 01 — m16 Heartbeat Consumer (NA-4 Closure)
 
+> **⚠️ HEADLINE AMENDED 2026-05-24 — see [[Wiring Plan v2 — Source-Verified Integration S1004590]].** Source verification (Wave 2, S1004590) found:
+> - § 3.2 wire schema is WRONG — actual `Heartbeat { emitted_at_ms, cycle }` only, NOT the fat envelope claimed (Plan v2 § S2 amendment 1)
+> - § 3.3 landing chain is WRONG — m46 does NOT read signal_bus_recent; consumes TensorSnapshot via `tick()` (Plan v2 § S2 amendment 3; NA-1' REFUTED + NA-1'' substituted)
+> - Engine-side enrichment + Goodbye contract + replay semantics + bilateral V5 — see Plan v2 § S2 amendments 2/4/5/6
+>
+> **This note retained as historical draft.** Plan v2 supersedes its headline claims; the wiring concept (m16 → m10 → m46 observation) remains correct but the wire shape + consumption path are source-revised.
+
 > **🔴 HIGHEST-LEVERAGE wiring point.** V3 m16 KEYSTONE is **operationally inert at v0.2.0** — emits heartbeats with no consumer. This schematic specifies the synthex-v2-side receiver to close the self-canary loop.
 
 ## The current state

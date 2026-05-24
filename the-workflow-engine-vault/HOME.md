@@ -15,6 +15,20 @@ This vault holds the workflow-engine codebase's artefacts. **The codebase is imp
 
 ---
 
+## 🟢 Wiring Plan v2 — Source-Verified Integration (S1004590, 2026-05-24)
+
+**RATIFICATION-CANDIDATE.** Integrated plan synthesising all 4 evidence streams (Wave 0 Explore discovery + Wave 1a conventional gap pass + Wave 1b NA frame pass + Wave 2a source-truth verification reading actual `src/m16_substrate_drift_canary/mod.rs`, `src/m42_stcortex_emit/mod.rs`, `synthex-v2/src/m8_watcher/m46_watcher_observer.rs`).
+
+**Major plan revisions from Wave 2 verification:**
+- **NA-1' REFUTED** — m46 doesn't read signal_bus_recent; consumes TensorSnapshot via tick(). HeartbeatBuffer ring requirement DROPPED. NEW NA-1'' substituted: m16 heartbeats need to influence a tensor dimension OR feed m22 capability_trace (substrate design choice for Zen + Luke).
+- **CONV-3 ESCALATED** — m16's actual `Heartbeat { emitted_at_ms, cycle }` is minimal; Wiring 01's fat envelope must be replaced with engine-side enrichment wrapper.
+- **CONV-4 ESCALATED** — only `workflow_trace_outcomes` emits today; other 9 slug families are SPECIFIED-only.
+- Other NA-2'/3'/4'/5'/6'/7'/8'/9'/10' findings HELD.
+
+**Full note: [[Wiring Plan v2 — Source-Verified Integration S1004590]]** · Zen AUDIT-REQUEST filed `~/projects/shared-context/agent-cross-talk/2026-05-24T070000Z_command_zen_audit_request_wiring_gap_analysis_s1004590.md`.
+
+---
+
 ## 🔍 Wiring Gap Analysis — S1004590 (Dual-Frame, 2026-05-24)
 
 **VERDICT: AMEND.** Dual-pass agent review on the 5 SYNTHEX-V2 wiring schematics below.

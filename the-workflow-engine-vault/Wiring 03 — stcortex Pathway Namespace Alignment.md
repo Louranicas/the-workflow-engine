@@ -5,6 +5,13 @@
 
 # Wiring 03 — stcortex Pathway Namespace Alignment
 
+> **⚠️ TABLES AMENDED 2026-05-24 — see [[Wiring Plan v2 — Source-Verified Integration S1004590]] § S5.**
+> - **CONV-4 MAJOR DRIFT:** Catalogued 10 slug families but **only `workflow_trace_outcomes` actually emits today** (verified via grep + tests on `src/m42_stcortex_emit/`). Other 9 families are SPECIFIED-only with zero emission sites — split into IMPLEMENTED vs SPECIFIED-FOR-v0.3.0+ tables per Plan v2.
+> - Emit is FORWARD-ONLY single-write today (no bidi pair with weight 0.85 reverse as claimed; bidi convention applies post-v0.3.0+).
+> - Namespace validation lives in m9 → m13 chain (AP30 machine-enforced), not m42-side as plan suggested.
+>
+> **Otherwise: this schematic LANDS AS AUTHORED** — namespace discipline + cross-loop pair convention + P30 alignment all correct.
+
 > Wire ALREADY exists (`POST :3000` via stcortex MCP / SDK / CLI). What's missing is **namespace discipline** — workflow-trace must use `workflow_trace_*` prefix so cross-loop Hebbian co-activation pairs become first-class and audit-traceable. ~80 LOC.
 
 ## Why this matters

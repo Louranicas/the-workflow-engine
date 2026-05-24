@@ -3,6 +3,10 @@
 
 # SYNTHEX-V2 Integration — Master Schematic
 
+> **⚠️ SUPERSEDED IN PART 2026-05-24 by [[Wiring Plan v2 — Source-Verified Integration S1004590]].**
+> Source verification (Wave 2, S1004590) found material schema + architecture drift in the 4 child schematics (Wiring 01 § 3.2 wire shape; Wiring 02 stub vs LIVE; Wiring 03 slug-families; Wiring 04 signal-bus claim). Plan v2 is the integrated source-grounded plan; this Master Schematic retains as historical umbrella with per-schematic AMENDMENT markers.
+> **§ "7-substrate generalisability audit" still pending — author per Plan v2 § S1.**
+
 **Source of truth:** `/tmp/synthex-v2-wiring-discovery-for-workflow-trace.md` (551-line read-only Explore discovery, 2026-05-24, S1004590).
 **Target:** wire workflow-trace's Cluster H (m40–m42 substrate feedback) + V3 m16 KEYSTONE into the LIVE synthex-v2 daemon on `:8092`, closing **OP-6 / NA-4 self-canary loop** (highest residual from v0.2.0 SHIPPED).
 

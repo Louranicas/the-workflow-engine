@@ -516,13 +516,22 @@ fn render_workflow_artefact(workflow: &crate::m30_bank::AcceptedWorkflow) -> Str
     reason = "cluster_idx + 1 is bounded by RECOMMENDED_K_MAX + 1 = 9; the cast is exact"
 )]
 fn diversity_score_from_proposal(workflow: &crate::m30_bank::AcceptedWorkflow) -> f64 {
-    match workflow.proposal().diversity_cluster() {
-        Some(cluster_idx) => {
-            let max_norm = RECOMMENDED_K_MAX as f64 + 1.0;
-            (cluster_idx as f64 + 1.0) / max_norm
-        }
-        None => 0.5,
-    }
+    let Some(cluster_idx) = workflow.proposal().diversity_cluster() else {
+        // L2 post-v0.2.0 hardening: previously silent None→0.5
+        // mid-band default. A proposal where m22 clustering FAILED
+        // (kmeans error swallowed upstream) is indistinguishable
+        // from a proposal where clustering was SKIPPED. Observable
+        // trace so downstream filters can spot the absence.
+        tracing::debug!(
+            target: "dispatch.diversity_score.cluster_absent",
+            workflow_id = workflow.workflow_id(),
+            "m22 diversity_cluster absent for workflow; defaulting to neutral mid-band 0.5 \
+             (proposal either had clustering skipped or upstream kmeans failed)"
+        );
+        return 0.5;
+    };
+    let max_norm = RECOMMENDED_K_MAX as f64 + 1.0;
+    (cluster_idx as f64 + 1.0) / max_norm
 }
 
 /// Map an m10 rubric verdict to the m33 Ember verifier verdict per D16.

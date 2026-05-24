@@ -311,6 +311,30 @@ fn all_substrate_ids_serde_distinct() {
     );
 }
 
+/// Zen #5 post-v0.2.0 hardening: parity test pinning SubstrateId
+/// variant count to the BackPressureRegistry::all_pull_default
+/// enumeration count. If anyone adds an 11th SubstrateId variant
+/// without updating BackPressureRegistry::all_pull_default, this test
+/// fails — closes the comment-rot risk Zen flagged in v0.2.0 review.
+#[test]
+fn substrate_id_variant_count_matches_back_pressure_registry_default_enumeration() {
+    use crate::back_pressure::BackPressureRegistry;
+    let r = BackPressureRegistry::all_pull_default();
+    // The all_pull_default registry enumerates every known SubstrateId
+    // variant. If a new SubstrateId variant lands without an update to
+    // all_pull_default, the new variant will silently be absent from
+    // the default registry — Zen #5 v0.2.0 review.
+    assert_eq!(
+        r.len(),
+        10,
+        "BackPressureRegistry::all_pull_default must enumerate every SubstrateId variant; \
+         current SubstrateId variant count is 10 (Atuin/Stcortex/HabitatConductor/\
+         HabitatInjection/Cc5LoopClocks/Watcher/Ralph/CargoBuildGraph/Lcm/SynthexV2). \
+         If you added a new SubstrateId variant, also update \
+         BackPressureRegistry::all_pull_default + this test's count."
+    );
+}
+
 #[test]
 fn all_module_ids_serde_distinct() {
     let ids = [

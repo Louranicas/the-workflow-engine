@@ -105,7 +105,7 @@ fn substrate_trust_get_unset_returns_not_shipped_default() {
 #[test]
 fn substrate_trust_set_then_get_round_trips() {
     let mut t = SubstrateTrust::new();
-    t.set(SubstrateId::Stcortex, TrustEntry::live_score(0.85));
+    let _ = t.set(SubstrateId::Stcortex, TrustEntry::live_score(0.85));
     assert_eq!(
         t.get(SubstrateId::Stcortex),
         TrustEntry::live_score(0.85)
@@ -142,7 +142,7 @@ fn is_substrate_imagined_for_unset_substrate_returns_true() {
 #[test]
 fn is_substrate_imagined_for_live_substrate_returns_false() {
     let mut t = SubstrateTrust::new();
-    t.set(SubstrateId::Stcortex, TrustEntry::live_score(0.5));
+    let _ = t.set(SubstrateId::Stcortex, TrustEntry::live_score(0.5));
     assert!(
         !t.is_substrate_imagined_for(SubstrateId::Stcortex),
         "Live substrate MUST NOT be engine-imagined"
@@ -152,7 +152,7 @@ fn is_substrate_imagined_for_live_substrate_returns_false() {
 #[test]
 fn is_substrate_imagined_for_shipping_substrate_returns_false() {
     let mut t = SubstrateTrust::new();
-    t.set(
+    let _ = t.set(
         SubstrateId::HabitatConductor,
         TrustEntry {
             status: SubstrateParticipationStatus::Shipping,
@@ -169,14 +169,16 @@ fn is_substrate_imagined_for_shipping_substrate_returns_false() {
 fn refusal_for_unavailable_routes_correct_na5_sub_tag_per_status() {
     let mut t = SubstrateTrust::new();
     // 1. NotShipped (default) → EngineImagined.
-    let r1 = t.refusal_for_unavailable(SubstrateId::Atuin, "no schema yet".to_owned());
+    let r1 = t.refusal_for_unavailable(SubstrateId::Atuin, "no schema yet");
     match &r1 {
         RefusalToken::Unavailable(UnavailableReason::EngineImagined {
             substrate_id,
             reason,
         }) => {
             assert_eq!(*substrate_id, SubstrateId::Atuin);
-            assert_eq!(reason, "no schema yet");
+            // Zen #2 post-v0.2.0 hardening: reason is prefixed with the
+            // status tag so log-grep audits can distinguish branches.
+            assert_eq!(reason, "engine_imagined:no schema yet");
         }
         other => panic!("expected EngineImagined; got {other:?}"),
     }
@@ -184,24 +186,21 @@ fn refusal_for_unavailable_routes_correct_na5_sub_tag_per_status() {
     assert!(!r1.is_substrate_authored());
 
     // 2. Shipping → SubstrateUnreachable.
-    t.set(
+    let _ = t.set(
         SubstrateId::HabitatConductor,
         TrustEntry {
             status: SubstrateParticipationStatus::Shipping,
             value: TrustValue::Unavailable,
         },
     );
-    let r2 = t.refusal_for_unavailable(
-        SubstrateId::HabitatConductor,
-        "transient".to_owned(),
-    );
+    let r2 = t.refusal_for_unavailable(SubstrateId::HabitatConductor, "transient");
     match &r2 {
         RefusalToken::Unavailable(UnavailableReason::SubstrateUnreachable {
             substrate_id,
             transport_reason,
         }) => {
             assert_eq!(*substrate_id, SubstrateId::HabitatConductor);
-            assert_eq!(transport_reason, "transient");
+            assert_eq!(transport_reason, "substrate_unreachable:transient");
         }
         other => panic!("expected SubstrateUnreachable; got {other:?}"),
     }
@@ -209,15 +208,15 @@ fn refusal_for_unavailable_routes_correct_na5_sub_tag_per_status() {
     assert!(!r2.is_substrate_authored());
 
     // 3. Live → Unavailable::SubstrateAuthored.
-    t.set(SubstrateId::Stcortex, TrustEntry::live_score(0.5));
-    let r3 = t.refusal_for_unavailable(SubstrateId::Stcortex, "rate_limited".to_owned());
+    let _ = t.set(SubstrateId::Stcortex, TrustEntry::live_score(0.5));
+    let r3 = t.refusal_for_unavailable(SubstrateId::Stcortex, "rate_limited");
     match &r3 {
         RefusalToken::Unavailable(UnavailableReason::SubstrateAuthored {
             substrate_id,
             substrate_reason,
         }) => {
             assert_eq!(*substrate_id, SubstrateId::Stcortex);
-            assert_eq!(substrate_reason, "rate_limited");
+            assert_eq!(substrate_reason, "substrate_authored:rate_limited");
         }
         other => panic!("expected SubstrateAuthored unavailable; got {other:?}"),
     }
@@ -229,20 +228,20 @@ fn refusal_for_unavailable_routes_correct_na5_sub_tag_per_status() {
 fn na5_audit_distinguishability_three_sub_tags_pairwise_distinct_via_trust() {
     let mut t = SubstrateTrust::new();
     // Three substrates, three different statuses → three distinct sub-tags.
-    t.set(SubstrateId::Atuin, TrustEntry::not_shipped());
-    t.set(
+    let _ = t.set(SubstrateId::Atuin, TrustEntry::not_shipped());
+    let _ = t.set(
         SubstrateId::HabitatConductor,
         TrustEntry {
             status: SubstrateParticipationStatus::Shipping,
             value: TrustValue::Unavailable,
         },
     );
-    t.set(SubstrateId::Stcortex, TrustEntry::live_score(0.9));
+    let _ = t.set(SubstrateId::Stcortex, TrustEntry::live_score(0.9));
 
-    let r_atuin = t.refusal_for_unavailable(SubstrateId::Atuin, "x".to_owned());
+    let r_atuin = t.refusal_for_unavailable(SubstrateId::Atuin, "x");
     let r_conductor =
-        t.refusal_for_unavailable(SubstrateId::HabitatConductor, "x".to_owned());
-    let r_stcortex = t.refusal_for_unavailable(SubstrateId::Stcortex, "x".to_owned());
+        t.refusal_for_unavailable(SubstrateId::HabitatConductor, "x");
+    let r_stcortex = t.refusal_for_unavailable(SubstrateId::Stcortex, "x");
 
     // Pairwise inequality — structural enforcement of NA-5
     // audit-distinguishability.
@@ -264,7 +263,7 @@ fn substrate_participation_status_accessor_independent_per_substrate() {
     // Per NA-8 reshape pattern: setting one substrate's status MUST
     // NOT affect another's.
     let mut t = SubstrateTrust::new();
-    t.set(SubstrateId::Stcortex, TrustEntry::live_score(0.9));
+    let _ = t.set(SubstrateId::Stcortex, TrustEntry::live_score(0.9));
     assert_eq!(
         t.substrate_participation_status(SubstrateId::Stcortex),
         SubstrateParticipationStatus::Live

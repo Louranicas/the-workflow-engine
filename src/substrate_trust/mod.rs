@@ -141,9 +141,24 @@ impl SubstrateTrust {
         Self::default()
     }
 
-    /// Set the trust entry for a substrate.
-    pub fn set(&mut self, substrate: SubstrateId, entry: TrustEntry) {
-        self.entries.insert(substrate, entry);
+    /// Set the trust entry for a substrate. Returns the previous entry
+    /// (if any) so callers can detect overwrites — M3 post-v0.2.0
+    /// hardening (parity with `BackPressureRegistry::set_mode`). When
+    /// `Some`, two emitters set conflicting trust for the same
+    /// substrate; downstream observers SHOULD log the conflict.
+    ///
+    /// **N1 silent-failure-hunter regression fix:** `#[must_use]`
+    /// forces callers to acknowledge the overwrite signal — the exact
+    /// failure mode M3 was authored to prevent (a caller writing
+    /// `t.set(id, entry);` would silently discard the conflict
+    /// indicator). Compiler-enforced now.
+    #[must_use = "set() returns the previous TrustEntry; conflicting emitters must be logged per M3 contract"]
+    pub fn set(
+        &mut self,
+        substrate: SubstrateId,
+        entry: TrustEntry,
+    ) -> Option<TrustEntry> {
+        self.entries.insert(substrate, entry)
     }
 
     /// Look up the trust entry for a substrate. Returns the v0.2.0
@@ -189,7 +204,14 @@ impl SubstrateTrust {
 
     /// Convenience: construct a `RefusalToken` for an unavailable
     /// substrate trust query, choosing the correct NA-5 sub-tag per
-    /// participation status.
+    /// participation status. **Zen #2 post-v0.2.0 hardening:** the
+    /// `reason` String is prefixed with the participation-status
+    /// provenance tag (`engine_imagined:` / `substrate_unreachable:` /
+    /// `substrate_authored:`) so log-grep audits can distinguish the
+    /// three branches without losing the variant information that
+    /// NA-5 was built to preserve. The structural distinction via the
+    /// enum variant is preserved unchanged; the prefix is operator-
+    /// observability additive.
     ///
     /// `NotShipped` → `Unavailable(EngineImagined)` (engine fabricating
     /// silence). `Shipping` → `Unavailable(SubstrateUnreachable)`
@@ -200,17 +222,30 @@ impl SubstrateTrust {
     pub fn refusal_for_unavailable(
         &self,
         substrate: SubstrateId,
-        reason: String,
+        reason: &str,
     ) -> RefusalToken {
+        // Zen #2 post-v0.2.0 hardening: prefix the reason with the
+        // status tag so the three branches are distinguishable in
+        // log-grep + textual-audit even though the structural enum
+        // variant already differentiates them.
         match self.substrate_participation_status(substrate) {
             SubstrateParticipationStatus::NotShipped => {
-                RefusalToken::unavailable_engine_imagined(substrate, reason)
+                RefusalToken::unavailable_engine_imagined(
+                    substrate,
+                    format!("engine_imagined:{reason}"),
+                )
             }
             SubstrateParticipationStatus::Shipping => {
-                RefusalToken::unavailable_substrate_unreachable(substrate, reason)
+                RefusalToken::unavailable_substrate_unreachable(
+                    substrate,
+                    format!("substrate_unreachable:{reason}"),
+                )
             }
             SubstrateParticipationStatus::Live => {
-                RefusalToken::unavailable_substrate_authored(substrate, reason)
+                RefusalToken::unavailable_substrate_authored(
+                    substrate,
+                    format!("substrate_authored:{reason}"),
+                )
             }
         }
     }

@@ -160,6 +160,15 @@ impl BackPressureRegistry {
     /// Look up the mode for a given substrate. Returns
     /// [`SubstrateBackPressureMode::Pull`] (the v0.2.0 default) when the
     /// substrate has not been explicitly set.
+    ///
+    /// **Note on NA-5 parity (M2 post-v0.2.0 hardening):** the consumer
+    /// of this accessor cannot distinguish "operator explicitly chose
+    /// `Pull`" from "operator forgot to configure this substrate" by
+    /// the return value alone. Use [`is_substrate_explicitly_set`] when
+    /// audit-distinguishability matters (mirrors `SubstrateTrust`'s
+    /// NA-5 contract per ADR D-S1004XXX-04).
+    ///
+    /// [`is_substrate_explicitly_set`]: BackPressureRegistry::is_substrate_explicitly_set
     #[must_use]
     pub fn mode_for(&self, substrate: SubstrateId) -> SubstrateBackPressureMode {
         self.modes
@@ -168,7 +177,24 @@ impl BackPressureRegistry {
             .unwrap_or_default()
     }
 
+    /// True iff this substrate has been explicitly configured via
+    /// [`set_mode`]. M2 post-v0.2.0 hardening — NA-5 parity with
+    /// `SubstrateTrust::is_substrate_imagined_for`: callers can now
+    /// distinguish explicit-Pull from implicit-default-Pull, which the
+    /// V5 ADR D-S1004XXX-05 contract requires.
+    ///
+    /// [`set_mode`]: BackPressureRegistry::set_mode
+    #[must_use]
+    pub fn is_substrate_explicitly_set(&self, substrate: SubstrateId) -> bool {
+        self.modes.contains_key(&substrate)
+    }
+
     /// Set the mode for a substrate. Returns the previous mode (if any).
+    /// **N1 silent-failure-hunter parity fix (post-v0.2.0):** the
+    /// `#[must_use]` annotation matches `SubstrateTrust::set`'s
+    /// contract — callers MUST acknowledge the overwrite signal so
+    /// conflicting emitters can be logged.
+    #[must_use = "set_mode() returns the previous SubstrateBackPressureMode; conflicting emitters must be logged"]
     pub fn set_mode(
         &mut self,
         substrate: SubstrateId,

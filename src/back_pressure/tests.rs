@@ -165,7 +165,7 @@ fn registry_per_substrate_independence_set_one_does_not_affect_others() {
     // NA-8 reshape: heterogeneous substrate landscape. Setting stcortex
     // to Push must NOT change atuin's mode.
     let mut r = BackPressureRegistry::all_pull_default();
-    r.set_mode(SubstrateId::Stcortex, SubstrateBackPressureMode::Push);
+    let _ = r.set_mode(SubstrateId::Stcortex, SubstrateBackPressureMode::Push);
     assert_eq!(
         r.mode_for(SubstrateId::Stcortex),
         SubstrateBackPressureMode::Push
@@ -184,9 +184,9 @@ fn registry_per_substrate_independence_set_one_does_not_affect_others() {
 #[test]
 fn registry_iter_yields_all_set_substrates() {
     let mut r = BackPressureRegistry::new();
-    r.set_mode(SubstrateId::Stcortex, SubstrateBackPressureMode::Push);
-    r.set_mode(SubstrateId::Atuin, SubstrateBackPressureMode::Pull);
-    r.set_mode(SubstrateId::Ralph, SubstrateBackPressureMode::Unavailable);
+    let _ = r.set_mode(SubstrateId::Stcortex, SubstrateBackPressureMode::Push);
+    let _ = r.set_mode(SubstrateId::Atuin, SubstrateBackPressureMode::Pull);
+    let _ = r.set_mode(SubstrateId::Ralph, SubstrateBackPressureMode::Unavailable);
     let collected: std::collections::HashMap<SubstrateId, SubstrateBackPressureMode> =
         r.iter().collect();
     assert_eq!(collected.len(), 3);

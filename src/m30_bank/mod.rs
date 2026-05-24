@@ -260,16 +260,19 @@ pub enum BankError {
 }
 
 /// Read-only snapshot of the bank state — W4 client_ref support type
-/// (Plan v2 v0.2.0 §3 Phase 5 step 1).
+/// (Plan v2 v0.2.0 §3 Phase 5 step 1; Zen #3 post-v0.2.0 hardening adds
+/// `variant_id_set` for O(1) duplicate detection).
 ///
 /// Held cloned `workflow_ids` + `variant_ids` (parallel `Vec<u64>`s; the
-/// indices align). Returned by [`CuratedBank::client_ref`]. The bank's
-/// internal `Mutex` is NOT held while the snapshot is alive.
+/// indices align) + a `variant_id_set` HashSet pre-built at
+/// snapshot-construction time. Returned by [`CuratedBank::client_ref`].
+/// The bank's internal `Mutex` is NOT held while the snapshot is alive.
 ///
 /// Phase 6 R3 Consistency real verifier consumes this per DX-R3
 /// variant_id-only conflict semantic (default): an incoming proposal
-/// whose `variant().variant_id` already appears in `variant_ids()` is
-/// Refused.
+/// whose `variant().variant_id` is in `variant_id_set` is Refused.
+/// Lookup is O(1) per query (Zen #3 hardening; previously O(N) linear
+/// scan via `contains_variant_id`).
 ///
 /// `lineage-chain-only` / `both with precedence` semantics (per DX-R3
 /// non-default arms) would extend this snapshot with `lineage_chains`
@@ -279,6 +282,10 @@ pub enum BankError {
 pub struct BankSnapshot {
     workflow_ids: Vec<u64>,
     variant_ids: Vec<u64>,
+    /// Pre-built HashSet for O(1) `contains_variant_id` lookups (Zen #3
+    /// post-v0.2.0 hardening). Always in sync with `variant_ids` (built
+    /// from it in `CuratedBank::client_ref`).
+    variant_id_set: std::collections::HashSet<u64>,
 }
 
 impl BankSnapshot {
@@ -307,10 +314,12 @@ impl BankSnapshot {
     }
 
     /// True when `variant_id` already appears in the snapshot — R3
-    /// Consistency primary check per DX-R3 = variant_id-only.
+    /// Consistency primary check per DX-R3 = variant_id-only. **O(1)**
+    /// HashSet lookup per Zen #3 post-v0.2.0 hardening (was O(N) linear
+    /// scan; preserves identical semantics).
     #[must_use]
     pub fn contains_variant_id(&self, variant_id: u64) -> bool {
-        self.variant_ids.contains(&variant_id)
+        self.variant_id_set.contains(&variant_id)
     }
 
     /// True when `workflow_id` already appears in the snapshot — useful
@@ -401,17 +410,22 @@ impl CuratedBank {
     /// discipline + DX-R3 variant_id-only conflict semantic).
     ///
     /// Returns a [`BankSnapshot`] holding cloned `workflow_ids` and
-    /// `variant_ids` vectors. The bank lock is held only for the duration
-    /// of the snapshot copy (O(n) where n = bank size); the returned
-    /// snapshot is owned and outlives any subsequent bank-state mutation.
+    /// `variant_ids` vectors + a pre-built `variant_id_set` HashSet
+    /// (Zen #3 post-v0.2.0 hardening — O(1) `contains_variant_id`
+    /// instead of the original O(N) linear scan). The bank lock is
+    /// held only for the duration of the snapshot copy (O(n) where n =
+    /// bank size); the returned snapshot is owned and outlives any
+    /// subsequent bank-state mutation.
     ///
     /// Phase 6 R3 Consistency verifier calls `client_ref()` per dispatch
     /// to compare an incoming proposal's `variant().variant_id` against
-    /// the snapshot's `variant_ids` (DX-R3 = variant_id-only Refuse).
+    /// the snapshot's `variant_id_set` (DX-R3 = variant_id-only Refuse).
     ///
     /// Poisoned-mutex recovery: `PoisonError::into_inner` matches the
     /// rest of the bank API — the `BTreeMap` is structurally valid even
-    /// after a prior panic.
+    /// after a prior panic. (L1 post-v0.2.0 docstring fold: poison
+    /// recovery is silent at the consumer; the R3 ConsistencyVerifier
+    /// sees a valid snapshot regardless of prior panic state.)
     #[must_use]
     pub fn client_ref(&self) -> BankSnapshot {
         let guard = self
@@ -423,9 +437,12 @@ impl CuratedBank {
             .values()
             .map(|a| a.proposal().variant().variant_id)
             .collect();
+        let variant_id_set: std::collections::HashSet<u64> =
+            variant_ids.iter().copied().collect();
         BankSnapshot {
             workflow_ids,
             variant_ids,
+            variant_id_set,
         }
     }
 

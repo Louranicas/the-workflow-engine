@@ -237,6 +237,13 @@ impl DriftDetector {
     /// Run one detection cycle. Returns the list of drift events
     /// emitted (as V1 RefusalToken envelopes) + a [`Heartbeat`] for
     /// the Watcher liveness assertion.
+    ///
+    /// **Zen #1 post-v0.2.0 hardening:** alloc minimisation —
+    /// `samples` Vec capacity pre-reserved to `samplers.len()`;
+    /// `events` Vec pre-reserved to triangular pair count
+    /// (`n*(n-1)/2`). Per-event `format!()` String alloc is the
+    /// load-bearing performance cost remaining; deferred to v0.2.2+
+    /// (would require a typed reason enum rather than String).
     pub fn detect(&mut self, now_ms: u64) -> DetectionResult {
         // M4 silent-failure-hunter fix: previous saturating_add would
         // silently freeze the cycle counter at u64::MAX, breaking
@@ -253,8 +260,12 @@ impl DriftDetector {
             );
         }
         self.cycle = self.cycle.saturating_add(1);
-        let samples: Vec<ClockSample> = self.samplers.iter().map(|s| s.sample()).collect();
-        let mut events: Vec<RefusalToken> = Vec::new();
+        let mut samples: Vec<ClockSample> = Vec::with_capacity(self.samplers.len());
+        samples.extend(self.samplers.iter().map(|s| s.sample()));
+        // Triangular pair count: n*(n-1)/2 worst-case events.
+        let n = samples.len();
+        let pair_cap = n.saturating_mul(n.saturating_sub(1)) / 2;
+        let mut events: Vec<RefusalToken> = Vec::with_capacity(pair_cap);
         // Pair-wise skew check; each unordered pair (i, j) where i < j.
         for i in 0..samples.len() {
             for j in (i + 1)..samples.len() {

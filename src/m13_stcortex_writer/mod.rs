@@ -680,10 +680,13 @@ where
     pub(crate) fn commit_drain_cursor(&self, new_cursor: u64) -> Result<(), StcortexWriterError> {
         let cursor_path = self.outbox_cursor_path();
         let mut tmp_path = cursor_path.clone();
+        // L3 post-v0.2.0 hardening: cursor_path is built from validated
+        // outbox_path by outbox_cursor_path(), so the file_name() must
+        // be present. expect() documents the invariant.
         let mut tmp_name = tmp_path
             .file_name()
             .map(|os| os.to_string_lossy().into_owned())
-            .unwrap_or_default();
+            .expect("cursor_path file_name present (built from validated outbox_path)");
         tmp_name.push_str(".tmp");
         tmp_path.set_file_name(tmp_name);
         if let Some(parent) = cursor_path.parent() {

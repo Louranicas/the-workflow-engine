@@ -11,18 +11,23 @@ status: ACTIVE — G9 fired; 26-module codebase implemented; both binaries wired
 
 Comprehensive catalogue of every artefact in the the-workflow-engine vault, organised by purpose.
 
-> **Current reality (2026-05-22):** the project is **implemented**. G9 fired 2026-05-17;
-> 26 modules / ~31k LOC; both binaries (`wf-crystallise`, `wf-dispatch`) are real CLI
-> programs after C22; the Hardening Fleet (W0–W5) + the assessment-driven remediation
-> S1003733 (5 waves + C22 + Wave G) are complete — **1967 tests, clippy + pedantic clean**,
-> commits `dc25335..ae7d460` on `main` (pushed). Any "planning-only / HOLD-v2 / stub binary"
-> language remaining below is superseded archaeology. See [[Assessment Remediation S1003733]]
-> and [[Hardening Fleet 2026-05-21]] for the live state.
+> **Current reality (2026-05-24):** the project has **shipped v0.2.0** (substrate-safety
+> milestone). G9 fired 2026-05-17; v0.1.0 / M0 tagged 2026-05-23 (`df00fd2`); v0.2.0 tagged
+> 2026-05-24 (`5d92248`). 27 modules (m16 added in v0.2.0 Phase 9 KEYSTONE); both binaries
+> (`wf-crystallise`, `wf-dispatch`) are real CLI programs after C22; **2163 tests, clippy +
+> pedantic clean**, three stacked SemVer-breaks at v0.2.0 wire level (`WorkflowProposal` 6 →
+> 12 fields). Any "planning-only / HOLD-v2 / stub binary" language remaining below is
+> superseded archaeology. See [[Session S1004377 — v0.2.0 SHIPPED]], [[Workflow-Trace v0.2.0 Plan v2 S1004377]],
+> [[Assessment Remediation S1003733]], and [[Hardening Fleet 2026-05-21]] for the live state.
 
 ---
 
 ## 0b. Current-state notes (read these first for live reality)
 
+- [[Session S1004377 — v0.2.0 SHIPPED]] — **🟢 v0.2.0 SHIPPED 2026-05-24 — substrate-safety milestone · tag `v0.2.0` at `5d92248` · 2163 tests (+115 from v0.1.0) · 12 phases · 4 new modules + 1 test suite + 3 ADRs + Genesis v1.4 · 21 §15 decisions · 12 honest residuals · 6 operator hand-offs (OP-1..OP-6)**
+- [[Workflow-Trace v0.2.0 Plan v2 S1004377]] — v0.2.0 Plan v2 RATIFIED 2026-05-23 (vault mirror; 25 gap-analysis findings folded; 21 Phase 4 interview decisions locked)
+- [[Session S1004115 — v0.1.1 + v0.2.0 Prep Save]] — post-M0 hygiene + v0.2.0 prep save (2026-05-23)
+- [[Session S1004115 — Completion Plan v2 Locked]] — v0.1.0 / M0 ship record (2026-05-23)
 - [[Assessment Remediation S1003733]] — **7-facet assessment (80/100), 5-wave remediation, C22 binary wiring, Wave G mutation closeout, per-facet deltas, Bugs & Known Issues (all assessment findings CLOSED), Diagnostics, open follow-ups**
 - [[Hardening Fleet 2026-05-21]] — 6-wave end-to-end quality + security hardening (W0–W5)
 

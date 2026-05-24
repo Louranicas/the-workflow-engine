@@ -15,6 +15,20 @@ This vault holds the workflow-engine codebase's artefacts. **The codebase is imp
 
 ---
 
+## 🟢 v0.2.0 SHIPPED — S1004377 (2026-05-24) · Substrate-safety milestone
+
+Workflow-Trace **v0.2.0** is tagged at commit `5d92248` on `main` (pushed both remotes). All 12 phases of the Plan v2 execution arc landed; **tests 2048 → 2163 (+115)**, clippy + pedantic clean every sub-phase. Engine is now **substrate-participation-ready across 7 substrates** per NA-2 expansion (atuin · stcortex · HABITAT-CONDUCTOR · CC-5 loop clocks · Luke + Watcher ☤ · RALPH · Cargo build graph).
+
+- 4 new modules (`src/refusal_token/` V1, `src/back_pressure/` V2, `src/m16_substrate_drift_canary/` V3 KEYSTONE, `src/substrate_trust/` V5), 1 new test suite (`tests/substrate_fixtures.rs` V4), 3 new ADRs, Genesis v1.4 amendment (26→27 modules)
+- Three stacked SemVer-breaks at the wire (`WorkflowProposal` 6 → 12 fields)
+- 21 §15 decisions ratified (15 Round A + 3 Round B + 3 stated defaults)
+- 12 honest residuals named, not silenced
+- 6 operator hand-offs (OP-1..OP-6) standing for Luke @ node 0.A
+
+**Full note: [[Session S1004377 — v0.2.0 SHIPPED]]** · ratification companion [[Workflow-Trace v0.2.0 Plan v2 S1004377]] · canonical `../ai_docs/WORKFLOW_TRACE_V020_PLAN_V2_S1004377.md` · `../CHANGELOG.md` `[v0.2.0]` · cold-start hub `../CLAUDE.local.md` § "v0.2.0 SHIPPED".
+
+---
+
 ## ✅ Assessment Remediation — S1003733 (2026-05-22) · COMPLETE
 
 A god-tier 7-facet code-quality assessment scored `workflow-trace` **80/100**. The

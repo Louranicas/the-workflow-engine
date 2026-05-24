@@ -15,6 +15,20 @@ This vault holds the workflow-engine codebase's artefacts. **The codebase is imp
 
 ---
 
+## 🔌 SYNTHEX-V2 Integration Schematics — S1004590 (2026-05-24)
+
+Four wiring schematics (+ master map) extracted from a read-only Explore mission against the synthex-v2 Obsidian vault (213 files, 110-wikilink MASTER_INDEX). Closes **OP-6 / NA-4 self-canary loop** authoring side; synthex-v2-side endpoint land is Luke @ node 0.A coordination.
+
+- **Master map:** [[SYNTHEX-V2 Integration Master Schematic]] — 8-layer synthex-v2 overview · 3 wiring schematics summary · cross-vault anchors · honest residuals
+- **Wiring 01 (🔴 HIGHEST):** [[Wiring 01 — m16 Heartbeat Consumer (NA-4 Closure)]] — `POST :8092/v3/heartbeat` landing surface (Option B selected from 5; ~400 LOC synthex-v2-side, ~80 LOC workflow-trace transport client)
+- **Wiring 02:** [[Wiring 02 — NexusEvent Bidirectional Push]] — m40/m41/m42 outbound to `POST :8092/v3/nexus/push` (receiver LIVE; just needs sender); 7-row source/kind schema table
+- **Wiring 03:** [[Wiring 03 — stcortex Pathway Namespace Alignment]] — P30 prefix discipline; `workflow_trace_*` slug families catalogued; cross-loop Hebbian pair convention
+- **Wiring 04 (optional):** [[Wiring 04 — Watcher (m46–m51) Integration Hooks]] — Watcher persona is ACTIVE (R13 elapsed 2026-05-19); m49 PBFT-eligible; proposal-flow schematic for clock-skew correction
+
+**Source report:** `/tmp/synthex-v2-wiring-discovery-for-workflow-trace.md` (551 lines, 24-row wiring surface table, 11 sections).
+
+---
+
 ## 🟢 v0.2.0 SHIPPED — S1004377 (2026-05-24) · Substrate-safety milestone
 
 Workflow-Trace **v0.2.0** is tagged at commit `5d92248` on `main` (pushed both remotes). All 12 phases of the Plan v2 execution arc landed; **tests 2048 → 2163 (+115)**, clippy + pedantic clean every sub-phase. Engine is now **substrate-participation-ready across 7 substrates** per NA-2 expansion (atuin · stcortex · HABITAT-CONDUCTOR · CC-5 loop clocks · Luke + Watcher ☤ · RALPH · Cargo build graph).

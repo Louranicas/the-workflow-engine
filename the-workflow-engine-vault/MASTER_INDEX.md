@@ -22,6 +22,18 @@ Comprehensive catalogue of every artefact in the the-workflow-engine vault, orga
 
 ---
 
+## 0a. SYNTHEX-V2 wiring schematics (S1004590, 2026-05-24) — substrate integration
+
+- [[SYNTHEX-V2 Integration Master Schematic]] — umbrella; cross-vault to `synthex-v2/MASTER_INDEX`
+- [[Wiring 01 — m16 Heartbeat Consumer (NA-4 Closure)]] — **highest leverage**; closes OP-6 / NA-4 self-canary loop
+- [[Wiring 02 — NexusEvent Bidirectional Push]] — m40/m41/m42 outbound to `:8092`
+- [[Wiring 03 — stcortex Pathway Namespace Alignment]] — `workflow_trace_*` prefix + cross-loop Hebbian pair discipline (P30)
+- [[Wiring 04 — Watcher (m46–m51) Integration Hooks]] — optional; substrate-side Watcher proposal flow post-Wiring 01
+
+> Source: `/tmp/synthex-v2-wiring-discovery-for-workflow-trace.md` (read-only Explore mission, 551 lines, 24-row wiring surface table)
+
+---
+
 ## 0b. Current-state notes (read these first for live reality)
 
 - [[Session S1004377 — v0.2.0 SHIPPED]] — **🟢 v0.2.0 SHIPPED 2026-05-24 — substrate-safety milestone · tag `v0.2.0` at `5d92248` · 2163 tests (+115 from v0.1.0) · 12 phases · 4 new modules + 1 test suite + 3 ADRs + Genesis v1.4 · 21 §15 decisions · 12 honest residuals · 6 operator hand-offs (OP-1..OP-6)**

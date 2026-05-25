@@ -21,6 +21,15 @@ path = "src/bin/wf_crystallise.rs"
 name = "wf-dispatch"
 path = "src/bin/wf_dispatch.rs"
 
+# `wf-poller` — Wave-15 the actual wire (m16 DriftDetector + W1
+# HeartbeatTransport + tick loop). Per Luke's 2026-05-25 directive
+# "ensure the workflow-engine is fully and comprehensively wired into
+# synthex". Until this binary lands the m16 / W1 / V5 library code
+# shipped in v0.2.0 and v0.2.2+ was dead code.
+[[bin]]
+name = "wf-poller"
+path = "src/bin/wf_poller.rs"
+
 [dependencies]
 thiserror = "2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
@@ -45,13 +54,18 @@ regex = "1"
 spacetimedb-sdk = { path = "../spacetimedb/sdks/rust" }
 tokio = { version = "1", features = ["full"] }
 
+# tracing-subscriber needed for the wf-poller binary's runtime log
+# subscriber (Wave-15 wire-in). Was dev-only before; promoted to regular
+# dep because the binary emits structured logs at runtime per Wave-9
+# Gate A discipline (`kind_preview="wf_poller_tick"`).
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
+
 [build-dependencies]
 # Build script is intentionally minimal (env-var-only per m8 spec § 10);
 # no HTTP deps needed at build time. cfg.rs is shared via `include!` so it
 # must be self-contained (no `use` statements above the constants).
 
 [dev-dependencies]
-tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 # m10 allowlist tests use temp TSV files.
 tempfile = "3"
 # m11 Gap 2 property tests — 10 invariants × up-to-10k cases each.

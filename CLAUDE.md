@@ -36,7 +36,7 @@
 
 **`workflow-trace`** (working name; final naming TBD per OI-5) — a single-phase Rust codebase for recording cascading-command + Battern-protocol + context-window observations across the Zellij habitat, then proposing variants for human evaluation, then dispatching ratified workflows via HABITAT-CONDUCTOR (never directly). **As of S1005032 Wave-16, workflow-trace is a first-class habitat service** (`wf-daemon` on port `:8142`, visible as `WFE` in the Zellij habitat-plugin's 14-service grid, registered in `~/.config/devenv/devenv.toml` as `id = "workflow-trace"`).
 
-- **Architecture:** 26 modules · 8 synergy clusters · ~31k LOC implemented (`workflow_core` lib + 4 binaries: `wf-crystallise` + `wf-dispatch` invoke-and-exit CLIs, `wf-poller` continuous CLI [Wave-15], `wf-daemon` habitat-managed service [Wave-16]) — the realised codebase is larger than the planning-era ~5,200 LOC estimate
+- **Architecture:** 26 modules · 8 synergy clusters · ~31k LOC implemented (`workflow_core` lib + 3 binaries: `wf-crystallise` + `wf-dispatch` invoke-and-exit CLIs, `wf-daemon` habitat-managed service with wire-aware `/health` on `:8142` + embedded poller subsystem [Wave-16/17]). `wf-poller` standalone CLI was removed in Wave-17 (S1005032) — superseded by `WF_DAEMON_DISABLE_HTTP=1 wf-daemon`. The realised codebase is larger than the planning-era ~5,200 LOC estimate.
 - **Deployment:** single-phase per Luke override 2026-05-17 (waiving Fossil scope discipline + Skeptic pain-source + RALPH selector safety + Watcher R6 + Substrate exploration-protection — all explicit; risks on Command's head)
 - **Reuse density:** ~65% boilerplate-lift from 48 source clones in `the-workflow-engine-vault/boilerplate modules/`
 - **Structural-gap authorship (cannot be lifted):**
@@ -101,7 +101,7 @@ Beyond the rubric, the working stance carried into this project:
 | **H** Substrate Feedback | m40, m41, m42 | ~450 | NexusEvent → SYNTHEX / LCM RPC / POVM Hebbian reinforce |
 | **Total** | 26 modules | ~5,200 LOC | + ~1,300 LOC tests |
 
-**Four-binary topology:** `wf-crystallise` owns m1-m23 + m40-m42 (invoke-and-exit); `wf-dispatch` owns m30-m33 (invoke-and-exit, posts to Conductor `:8141`); `wf-poller` is the Wave-15 continuous-tick CLI driver of m16 V3 KEYSTONE → SX2 `:8092/v3/heartbeat`; `wf-daemon` is the Wave-16 habitat-managed shape (axum `/health` on `:8142` + embedded poller subsystem via `tokio::spawn_blocking`). Shared `workflow-core` lib for types/schemas/namespace constants across all four binaries.
+**Three-binary topology (post-Wave-17):** `wf-crystallise` owns m1-m23 + m40-m42 (invoke-and-exit); `wf-dispatch` owns m30-m33 (invoke-and-exit, posts to Conductor `:8141`); `wf-daemon` is the habitat-managed shape (axum wire-aware `/health` on `:8142` + embedded poller subsystem via `tokio::spawn_blocking` driving m16 V3 KEYSTONE → SX2 `:8092/v3/heartbeat`; `WF_DAEMON_DISABLE_HTTP=1` env-gate gives the legacy poller-only mode previously served by the now-deleted `wf-poller` binary). Shared `workflow-core` lib for types/schemas/namespace constants across all three binaries.
 
 ---
 

@@ -1,9 +1,9 @@
 # the-workflow-engine — `workflow-trace`
 
-> **Status:** G9 fired · HOLD-v2 lifted · 26-module Rust codebase implemented (~31k LOC) · `workflow_core` lib + **4 binaries** (`wf-crystallise`, `wf-dispatch`, `wf-poller`, `wf-daemon`) · **habitat-managed service on port 8142** (S1005032 Wave-16) · 1967 tests passing · clippy + pedantic clean.
-> **Cargo package:** `workflow-trace` v0.1.0 — library `workflow_core`; binaries `wf-crystallise` + `wf-dispatch` (invoke-and-exit CLIs), `wf-poller` (operator-launched continuous CLI, Wave-15), `wf-daemon` (habitat-managed service shape on `:8142` with `/health` + embedded poller subsystem, Wave-16).
+> **Status:** G9 fired · HOLD-v2 lifted · 26-module Rust codebase implemented (~31k LOC) · `workflow_core` lib + **3 binaries** (`wf-crystallise`, `wf-dispatch`, `wf-daemon`) · **habitat-managed service on port 8142** (S1005032 Wave-16/17) · wire-aware `/health` body · 1967 tests passing · clippy + pedantic clean.
+> **Cargo package:** `workflow-trace` v0.1.0 — library `workflow_core`; binaries `wf-crystallise` + `wf-dispatch` (invoke-and-exit CLIs) and `wf-daemon` (habitat-managed service shape on `:8142` with wire-aware `/health` + embedded poller subsystem). `wf-poller` standalone CLI was DELETED in Wave-17 — superseded by `WF_DAEMON_DISABLE_HTTP=1 wf-daemon` (same tick logic, env-gated HTTP).
 > **Directory:** `the-workflow-engine/` (a rename to `workflow-trace/` is deferred — cosmetic).
-> **Habitat-service grid:** visible as `WFE` in the Zellij habitat-plugin (14-service grid: V3 Nerve TL SX V8 VMS POVM RM PV2 ORAC Inj **WFE** ME PSw). Registered in `~/.config/devenv/devenv.toml` as `id = "workflow-trace"` with `auto_start = true`, `auto_restart = true`.
+> **Habitat-service grid:** visible as `WFE` in the Zellij habitat-plugin (14+ service grid: V3 Nerve TL SX V8 VMS POVM RM PV2 ORAC Inj **WFE** ME PSw, +LCM pending). Registered in `~/.config/devenv/devenv.toml` as `id = "workflow-trace"` with `auto_start = true`, `auto_restart = true`.
 
 ---
 

@@ -6,6 +6,150 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ---
 
+## [v0.2.1-wave17] — 2026-05-25 (S1005032) — wire-aware /health + wf-poller merge + /port-claim skill
+
+Close-the-loop follow-up to Wave-16. Three recommendations from the
+post-Wave-16 retro shipped:
+
+1. **R-WAVE16-1 CLOSED: wire-aware `/health` body** — no longer just
+   `{"status":"ok"}`. Now carries `tick_count`, `ok_count`,
+   `refusal_count`, `unreachable_count`, `last_ok_unix_ms`,
+   `last_ok_age_ms`, `refusal_rate_per_kilo`. The dashboard-lying
+   surface I introduced in Wave-16 is now closed: operators reading
+   `curl :8142/health | jq` see the actual wire state. Smoke-tested
+   live against the stale (Wave-15-source-but-not-redeployed) SX2
+   daemon — body correctly reports `ok_count=0,
+   refusal_rate_per_kilo=1000` reflecting the operator-D2 source/deploy
+   drift the V5 trust gate exists to surface. (`/health` still returns
+   200 always — daemon-process liveness contract preserved; future
+   `bridge_health` upgrade can render YELLOW indicator on
+   `refusal_rate_per_kilo > 500` without a probe-contract break.)
+
+2. **`wf-poller` standalone CLI DELETED + merged into `wf-daemon`** —
+   4-binary topology collapses to 3 binaries. The standalone
+   `wf-poller` was strictly dominated by `wf-daemon` (same tick logic
+   embedded via `tokio::task::spawn_blocking`). New env-gate
+   `WF_DAEMON_DISABLE_HTTP=1` runs `wf-daemon` in poller-only mode
+   (the historical `wf-poller` shape). One binary, two modes; closes
+   the maintenance-debt creep.
+
+3. **NEW `/port-claim` skill at `.claude/skills/port-claim/`** —
+   procedural intervention against the port-collision trap (S1005032
+   evidence: 8141 false-positive from `ss -tlnp` that two Claude panes
+   independently hit). Skill includes a 4-check ritual (devenv.toml →
+   doctrine → bridge_health.rs → ss-last) + an authoritative
+   `HABITAT_PORT_AUDIT.tsv` (78 rows, surveyed by general-purpose
+   subagent across the live habitat 2026-05-25). Lesson recorded
+   procedurally, not just in memory — the same training tendency would
+   rediscover the same wrong answer without a tool.
+
+### Added
+
+- `src/bin/wf_daemon.rs`:
+  - `WireStats` struct with 4× `AtomicU64` counters
+    (`ok`, `refusals`, `unreachable`, `last_ok_ms`); shared
+    between poller subsystem (writer via `fetch_add` + `store`) and
+    axum `/health` handler (reader via `load`)
+  - `health()` handler upgraded from `&'static str` to
+    `State<Arc<WireStats>>`-injected `String` with the full 7-field
+    wire-aware body
+  - `WF_DAEMON_DISABLE_HTTP=1` env gate skips axum task + parks on
+    `std::future::pending::<()>().await` so the blocking poller is
+    the sole task — drop-in replacement for the deleted `wf-poller`
+  - `run_one_tick` signature gains `stats: &WireStats` for the
+    atomic-counter writes
+- `.claude/skills/port-claim/SKILL.md` (133 lines) + 4-check ritual
+  + free-port allocation suggestions per the audit
+- `.claude/skills/port-claim/HABITAT_PORT_AUDIT.tsv` (5.2 KB, 78 rows)
+
+### Removed
+
+- `src/bin/wf_poller.rs` (270 LOC) — superseded by
+  `WF_DAEMON_DISABLE_HTTP=1 wf-daemon`. The Wave-15 commit
+  (`54c107b` / `ce317ae`) stays in git history for archaeology;
+  operators using `wf-poller` directly should switch to the env-gate.
+- `Cargo.toml` `[[bin]] name = "wf-poller"` entry
+
+### Changed
+
+- `Cargo.toml` — comment block on `[[bin]] wf-daemon` updated to note
+  Wave-17 wf-poller merge + env-gate
+- (Pending in same session — README + QUICKSTART + ai_docs/spec/lifecycle
+  updates land alongside this entry)
+
+### Smoke test (live verify of the new `/health` body)
+
+```
+$ WF_DAEMON_PORT=18142 ./bin/wf-daemon &
+$ sleep 7 && curl -s http://127.0.0.1:18142/health
+{"status":"ok","service":"workflow-trace","port":8142,
+ "tick_count":7,"ok_count":0,
+ "refusal_count":7,"unreachable_count":0,
+ "last_ok_unix_ms":0,"last_ok_age_ms":18446744073709551615,
+ "refusal_rate_per_kilo":1000}
+```
+
+The `last_ok_age_ms = u64::MAX` is the "never acked" sentinel.
+`refusal_rate_per_kilo = 1000` (parts-per-thousand) = 100% refusal
+because the running SX2 daemon binary is 19 days behind Wave-15 source
+HEAD `c5e3ae4` (R-WAVE16-2 operator hand-off still standing).
+
+### Gate
+
+- `cargo check --release --bin wf-daemon`     GREEN
+- `cargo clippy --release --bin wf-daemon -- -D warnings`             GREEN
+- `cargo clippy --release --bin wf-daemon -- -D warnings -W clippy::pedantic`  GREEN
+- `cargo build --release --bin wf-daemon` (17.63 s)                   GREEN
+- `bin/wf-daemon` redeployed (sha `355936e9…`)
+- Live smoke against `WF_DAEMON_PORT=18142` — body shape verified
+
+### Honest residuals (carried from Wave-16, still standing)
+
+- **R-WAVE16-2 (operator-D2):** SX2 daemon redeploy. Until Luke
+  redeploys, every `wf-daemon` tick logs `refusal=ack_parse_error` —
+  the V5 trust gate keeps the drift audit-visible.
+- **R-WAVE16-3:** m46 Watcher subscription to
+  `Signal::ExternalHeartbeat` (NA-1'' Option C); v0.2.3+.
+- **R-WAVE16-4:** silence-watcher daemon task flipping
+  `Live → Unreachable` (NA-4 + NA-8'); v0.2.3+.
+- **R-WAVE16-5:** HABITAT-CONDUCTOR bring-up (OP-1) on `:8141` —
+  Conductor `auto_start=false`; when started, plugin grid → 16
+  services.
+
+### Persistence (5 surfaces)
+
+- ai_docs: `WAVE_16_WF_DAEMON_DESIGN_S1005032.md` updated +
+  `WAVE_17_WIRE_AWARE_HEALTH_S1005032.md` new
+- Obsidian vault: `[[Wave-17 — Wire-Aware Health + wf-poller Merge S1005032]]`
+- stcortex ns `workflow_trace_completion_s1004115` mem
+  **(landed this session)** — parent_ids `[19192 Wave-16, 19161 Wave-15]`
+- POVM mirror (deprecated overlap)
+- injection.db `causal_chain` row (landed this session)
+
+### Live-binary drift flag
+
+Subagent port audit revealed the **currently-running** `wf-daemon`
+process (pid 3695254) is bound to `127.0.0.1:8141`, NOT 8142. This is
+the OLD binary deployed before the Wave-16 8141→8142 re-port. Operator
+needs to:
+
+```bash
+~/.local/bin/devenv -c ~/.config/devenv/devenv.toml stop workflow-trace
+# (the new bin/wf-daemon is already in place — sha 355936e9...)
+~/.local/bin/devenv -c ~/.config/devenv/devenv.toml start workflow-trace
+curl -s localhost:8142/health  # expect the wire-aware body above
+```
+
+Until operator restarts, the plugin grid screenshot Luke shared
+(`ALL UP 14/14 (14 probed)` with green WFE) was actually showing the
+stale 8141-bound daemon being probed by the wasm at the new
+`(8142, "WFE")` PROBE_PATHS — which would have shown WFE as DOWN, not
+UP. The screenshot's `14/14` is likely a re-probe race or the wasm
+hot-reload didn't pick up the new PROBE_PATHS in time. Operator-side
+verify needed.
+
+---
+
 ## [v0.2.1-wave16] — 2026-05-25 (S1005032) — workflow-trace is now a habitat service
 
 Per Luke's 2026-05-25 directive ("ensure the workflow-engine is fully and

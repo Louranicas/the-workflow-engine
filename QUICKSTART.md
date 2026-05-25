@@ -2,24 +2,45 @@
 
 > **Back to:** [`README.md`](README.md) · [`CLAUDE.md`](CLAUDE.md) · full CLI reference: [`docs/COMMAND_MAPPING.md`](docs/COMMAND_MAPPING.md)
 
-A hands-on, copy-pasteable getting-started guide for the four `workflow-trace` binaries:
+A hands-on, copy-pasteable getting-started guide for the three `workflow-trace` binaries:
 
 | Binary | Role | Lifecycle |
 |---|---|---|
 | `wf-crystallise` | observe → mine → propose (produces JSONL proposal) | invoke-and-exit CLI |
 | `wf-dispatch` | bank → select → verify → dispatch (via HABITAT-CONDUCTOR `:8141`) | invoke-and-exit CLI |
-| `wf-poller` | continuous-tick WFE→SX2 heartbeat emitter (S1005032 Wave-15) | operator-launched continuous CLI |
-| `wf-daemon` | habitat-managed service shape (`/health` on `:8142` + embedded poller subsystem) | system-managed via `devenv start` (Wave-16) |
+| `wf-daemon` | habitat-managed service shape — axum wire-aware `/health` on `:8142` + embedded poller subsystem (m16 `DriftDetector` + W1 `HeartbeatTransport` + V5 `SubstrateTrust`) | system-managed via `devenv start` (Wave-16+17) |
 
-**Habitat-service grid:** `wf-daemon` is registered in `~/.config/devenv/devenv.toml` as `id = "workflow-trace"` and renders as `WFE` in the Zellij `habitat-plugin.wasm` 14-service grid (V3 Nerve TL SX V8 VMS POVM RM PV2 ORAC Inj **WFE** ME PSw).
+**Habitat-service grid:** `wf-daemon` is registered in `~/.config/devenv/devenv.toml` as `id = "workflow-trace"` and renders as `WFE` in the Zellij `habitat-plugin.wasm` service grid (V3 Nerve TL SX V8 VMS POVM RM PV2 ORAC Inj **WFE** ME PSw).
 
 ```bash
 # Quick service liveness check (after `devenv start`):
-curl -s localhost:8142/health
-# expected: {"status":"ok","service":"workflow-trace","port":8142}
+curl -s localhost:8142/health | jq
+# expected:
+# {"status":"ok","service":"workflow-trace","port":8142,
+#  "tick_count":7,"ok_count":7,"refusal_count":0,"unreachable_count":0,
+#  "last_ok_unix_ms":1779700000000,"last_ok_age_ms":300,
+#  "refusal_rate_per_kilo":0}
 ```
 
-> Note: `wf-daemon` is the system-managed shape. `wf-poller` is preserved as the standalone CLI for development / soak-test driving; both binaries share the same tick logic (m16 `DriftDetector` + W1 `HeartbeatTransport` + V5 `SubstrateTrust`).
+The `/health` body is **wire-aware** (Wave-17): `tick_count` increments at 1 Hz; `ok_count` shows ack-successes against SX2; `last_ok_age_ms` = ms since last successful ack (a large value indicates the wire is silently broken even when daemon process is alive). `refusal_rate_per_kilo` is parts-per-thousand (1000 = 100%, 0 = perfect).
+
+> **`wf-poller` standalone CLI** was removed in Wave-17. To run the daemon in poller-only mode (no HTTP, just emit ticks), use the env-gate:
+>
+> ```bash
+> WF_DAEMON_DISABLE_HTTP=1 ./bin/wf-daemon
+> ```
+>
+> Same tick logic, same V5 gate, no HTTP server bound. Useful for soak-test driving or when the port is already taken by an integration test.
+
+### Env overrides for `wf-daemon`
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `WF_DAEMON_PORT` | `8142` | Port for `/health` endpoint |
+| `WF_DAEMON_DISABLE_HTTP` | unset | If `1` or `true`, skip axum task; poller-only mode |
+| `WF_POLLER_ENDPOINT` | `http://127.0.0.1:8092/v3/heartbeat` | SX2 substrate URL |
+| `WF_POLLER_INTERVAL_MS` | `1000` (1 Hz) | Tick cadence |
+| `WF_POLLER_INSTANCE` | `wf-daemon-default` | Instance tag for tracing log |
 
 ---
 

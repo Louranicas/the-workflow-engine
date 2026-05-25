@@ -26,16 +26,19 @@ path = "src/bin/wf_dispatch.rs"
 # "ensure the workflow-engine is fully and comprehensively wired into
 # synthex". Until this binary lands the m16 / W1 / V5 library code
 # shipped in v0.2.0 and v0.2.2+ was dead code.
-[[bin]]
-name = "wf-poller"
-path = "src/bin/wf_poller.rs"
-
-# `wf-daemon` — habitat-service shape (S1005032 Wave-16). Long-running
-# tokio HTTP daemon exposing GET /health on port 8142, plus internal
+# `wf-daemon` — habitat-service shape (S1005032 Wave-16+Wave-17).
+# Long-running tokio HTTP daemon exposing GET /health on port 8142
+# (wire-aware body with tick counters + last_ok_ms, Wave-17) plus the
 # wf-poller tick logic spawned as a tokio::task::spawn_blocking. This is
 # the service-shape binary that `~/.local/bin/devenv start` manages,
 # `habitat-nerve-center` probes, and the Zellij habitat-plugin renders in
-# the 14-service grid (V3·Nerve·TL·SX·V8·VMS·POVM·RM·PV2·ORAC·Inj·ME·PSw·WFE).
+# the 14/15-service grid as `WFE`.
+#
+# Wave-17 (S1005032): `wf-poller` standalone CLI is DELETED. Operators
+# wanting poller-only / no-HTTP mode run `WF_DAEMON_DISABLE_HTTP=1
+# wf-daemon`. The 4-binary topology (wf-crystallise + wf-dispatch +
+# wf-poller + wf-daemon) collapses to a 3-binary topology (wf-crystallise
+# + wf-dispatch + wf-daemon) — wf-daemon subsumes wf-poller via env-gate.
 [[bin]]
 name = "wf-daemon"
 path = "src/bin/wf_daemon.rs"

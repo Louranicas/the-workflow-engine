@@ -42,9 +42,11 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::extract::State;
 use axum::routing::get;
 use axum::Router;
 use tokio::net::TcpListener;
@@ -70,7 +72,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// `auto_start=false`; the survey miss is documented in vault note
 /// "Wave-16 — Port 8142 Re-port S1005032" for future scaffold-mastery
 /// false-positive avoidance). 8142 verified free against
-/// devenv.toml + all ai_docs/ai_specs + bridge_health.rs.
+/// `devenv.toml` + all `ai_docs`/`ai_specs` + `bridge_health.rs`.
 const DEFAULT_PORT: u16 = 8142;
 
 /// Default tick cadence — 1 Hz per m16 spec DD-3 §4.1.
@@ -114,11 +116,76 @@ fn boot_id_for_this_process() -> String {
     format!("wf-daemon-{unix_ms}")
 }
 
-/// `GET /health` handler. Returns a static JSON body so the
-/// `habitat-nerve-center` + Zellij `habitat-plugin.wasm` probe sees the
-/// same canonical shape every other habitat service emits.
-async fn health() -> &'static str {
-    r#"{"status":"ok","service":"workflow-trace","port":8142}"#
+/// Wire-status counters shared between the axum `/health` handler
+/// (reader) and the poller subsystem (writer). All `AtomicU64`
+/// so reads can be lock-free from the async runtime while the blocking
+/// poller updates them at 1 Hz. `last_ok_ms` is the unix-ms timestamp
+/// of the most recent `outcome=ok` ack — 0 sentinel = "never acked".
+///
+/// Per Wave-17 (S1005032): replaces the static text/plain `/health`
+/// body so the dashboard surface actually reflects wire-state, not just
+/// daemon-process liveness. Closes R-WAVE16-1 (the lying-dashboard
+/// surface I introduced in Wave-16). The `bridge_health` probe still
+/// consumes only the 200 status code (so dashboard rendering is
+/// unchanged) but `curl :8142/health | jq` now returns meaningful
+/// counters for operator inspection + future `bridge_health` upgrades.
+#[derive(Default)]
+struct WireStats {
+    ok: AtomicU64,
+    refusals: AtomicU64,
+    unreachable: AtomicU64,
+    last_ok_ms: AtomicU64,
+}
+
+/// `GET /health` handler. Returns a JSON-shaped body (still served as
+/// `text/plain` to keep the dependency footprint minimal; consumers
+/// parse it loosely) carrying daemon-liveness + wire-status counters.
+///
+/// Wire-status fields are read-only snapshots — counter values may
+/// advance between fields' reads because each `Atomic` load is
+/// independent. That's acceptable for an observability endpoint.
+async fn health(State(stats): State<Arc<WireStats>>) -> String {
+    let ok = stats.ok.load(Ordering::Relaxed);
+    let refusals = stats.refusals.load(Ordering::Relaxed);
+    let unreachable = stats.unreachable.load(Ordering::Relaxed);
+    let last_ok_ms = stats.last_ok_ms.load(Ordering::Relaxed);
+    let total_ticks = ok.saturating_add(refusals).saturating_add(unreachable);
+
+    // Refusal+unreachable rate as parts-per-thousand (avoid float JSON).
+    // 0 if no ticks yet.
+    let refusal_rate_per_kilo = if total_ticks == 0 {
+        0_u64
+    } else {
+        (refusals.saturating_add(unreachable))
+            .saturating_mul(1_000)
+            .checked_div(total_ticks)
+            .unwrap_or(0)
+    };
+
+    let now_ms = unix_ms_now();
+    let last_ok_age_ms = if last_ok_ms == 0 {
+        u64::MAX  // sentinel: "never acked" — operator reads as huge
+    } else {
+        now_ms.saturating_sub(last_ok_ms)
+    };
+
+    format!(
+        concat!(
+            r#"{{"status":"ok","#,
+            r#""service":"workflow-trace","#,
+            r#""port":8142,"#,
+            r#""tick_count":{},"#,
+            r#""ok_count":{},"#,
+            r#""refusal_count":{},"#,
+            r#""unreachable_count":{},"#,
+            r#""last_ok_unix_ms":{},"#,
+            r#""last_ok_age_ms":{},"#,
+            r#""refusal_rate_per_kilo":{}"#,
+            r#"}}"#,
+        ),
+        total_ticks, ok, refusals, unreachable, last_ok_ms, last_ok_age_ms,
+        refusal_rate_per_kilo,
+    )
 }
 
 /// V5 substrate-trust seed for synthex-v2 at boot. Same as `wf-poller`
@@ -137,7 +204,11 @@ fn initial_trust() -> Arc<SubstrateTrust> {
     Arc::new(trust)
 }
 
-/// Per-tick counters logged on each emit for observability.
+/// Per-tick local counters logged on each emit. These mirror the
+/// shared `WireStats` atomics; kept as a local struct so the
+/// per-tick tracing log can include lifetime totals without atomic
+/// loads in every tracing field. The atomics are the canonical
+/// surface for `/health`; this struct is operator-log only.
 #[derive(Default)]
 struct TickCounters {
     ok: u64,
@@ -159,7 +230,9 @@ fn read_poller_config() -> (String, Duration) {
 }
 
 /// Run one poller tick. Same emit-and-log shape as `wf-poller`
-/// standalone; routes through tracing only — no writes back.
+/// standalone; routes through tracing only — no writes back. Updates
+/// both the local `TickCounters` (for the tracing log) AND the shared
+/// `WireStats` atomics (for the `/health` endpoint).
 fn run_one_tick(
     cycle: u64,
     detector: &mut DriftDetector,
@@ -167,6 +240,7 @@ fn run_one_tick(
     boot_id: &str,
     instance_id: &str,
     counters: &mut TickCounters,
+    stats: &WireStats,
 ) {
     let now_ms = unix_ms_now();
     let result = tick_and_emit(
@@ -181,6 +255,8 @@ fn run_one_tick(
     match result {
         Ok(ack) => {
             counters.ok += 1;
+            stats.ok.fetch_add(1, Ordering::Relaxed);
+            stats.last_ok_ms.store(now_ms, Ordering::Relaxed);
             tracing::info!(
                 kind_preview = "wf_daemon_tick",
                 cycle,
@@ -197,6 +273,7 @@ fn run_one_tick(
             reason, ..
         })) => {
             counters.refusals += 1;
+            stats.refusals.fetch_add(1, Ordering::Relaxed);
             tracing::warn!(
                 kind_preview = "wf_daemon_tick",
                 cycle,
@@ -211,6 +288,7 @@ fn run_one_tick(
             ..
         })) => {
             counters.unreachable += 1;
+            stats.unreachable.fetch_add(1, Ordering::Relaxed);
             tracing::warn!(
                 kind_preview = "wf_daemon_tick",
                 cycle,
@@ -225,6 +303,7 @@ fn run_one_tick(
             ..
         })) => {
             counters.refusals += 1;
+            stats.refusals.fetch_add(1, Ordering::Relaxed);
             tracing::warn!(
                 kind_preview = "wf_daemon_tick",
                 cycle,
@@ -236,6 +315,7 @@ fn run_one_tick(
         }
         Err(other) => {
             counters.refusals += 1;
+            stats.refusals.fetch_add(1, Ordering::Relaxed);
             tracing::warn!(
                 kind_preview = "wf_daemon_tick",
                 cycle,
@@ -262,6 +342,7 @@ fn poller_subsystem(
     endpoint: String,
     interval_ms: Duration,
     instance_id: String,
+    stats: Arc<WireStats>,
 ) {
     let boot_id = boot_id_for_this_process();
     let substrate_trust = initial_trust();
@@ -303,6 +384,7 @@ fn poller_subsystem(
             boot_id.as_str(),
             instance_id.as_str(),
             &mut counters,
+            stats.as_ref(),
         );
         cycle += 1;
         std::thread::sleep(interval_ms);
@@ -325,6 +407,14 @@ async fn main() -> ExitCode {
     let instance_id = std::env::var("WF_POLLER_INSTANCE")
         .unwrap_or_else(|_| "wf-daemon-default".to_owned());
 
+    // `WF_DAEMON_DISABLE_HTTP=1` skips the axum task and runs only the
+    // poller subsystem. This is the Wave-17 wf-poller-merge replacement:
+    // the standalone `wf-poller` CLI is deleted; operators wanting the
+    // standalone-CLI shape run `WF_DAEMON_DISABLE_HTTP=1 wf-daemon`.
+    let disable_http = std::env::var("WF_DAEMON_DISABLE_HTTP")
+        .ok()
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+
     tracing::info!(
         kind_preview = "wf_daemon_boot",
         version = VERSION,
@@ -332,16 +422,36 @@ async fn main() -> ExitCode {
         endpoint = endpoint.as_str(),
         interval_ms = u64::try_from(interval_ms.as_millis()).unwrap_or(u64::MAX),
         instance_id = instance_id.as_str(),
+        disable_http,
         "wf-daemon starting; habitat-service shape for workflow-trace"
     );
 
+    // Shared wire-status counters: poller writes (fetch_add), `/health`
+    // handler reads (load). Arc-wrapped so both sides own a clone.
+    let stats: Arc<WireStats> = Arc::new(WireStats::default());
+
     // Spawn poller in a blocking task (sync HeartbeatTransport).
+    let poller_stats = Arc::clone(&stats);
     let _poller_handle = task::spawn_blocking(move || {
-        poller_subsystem(endpoint, interval_ms, instance_id);
+        poller_subsystem(endpoint, interval_ms, instance_id, poller_stats);
     });
 
-    // Build axum router with /health only (minimal habitat-service surface).
-    let app = Router::new().route("/health", get(health));
+    if disable_http {
+        tracing::info!(
+            kind_preview = "wf_daemon_no_http",
+            "WF_DAEMON_DISABLE_HTTP=1; running poller-only (wf-poller-compatible mode)"
+        );
+        // Block forever on the poller — same lifetime as if HTTP were running.
+        // Using a no-progress await keeps tokio happy without busy-looping.
+        std::future::pending::<()>().await;
+        return ExitCode::SUCCESS;
+    }
+
+    // Build axum router with `/health` only (minimal habitat-service surface).
+    // `State<Arc<WireStats>>` injection so the handler can read the atomics.
+    let app = Router::new()
+        .route("/health", get(health))
+        .with_state(stats);
 
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
     let listener = match TcpListener::bind(addr).await {
@@ -361,7 +471,7 @@ async fn main() -> ExitCode {
         kind_preview = "wf_daemon_ready",
         port,
         endpoint = "/health",
-        "wf-daemon /health endpoint ready"
+        "wf-daemon /health endpoint ready (wire-aware body)"
     );
 
     if let Err(e) = axum::serve(listener, app).await {

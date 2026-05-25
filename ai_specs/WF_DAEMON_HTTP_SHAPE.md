@@ -20,25 +20,53 @@ The HTTP surface exposed by the `wf-daemon` binary in v0.2.1-wave16. This is the
 | Path | `/health` (exact match; trailing slash NOT accepted by axum default) |
 | Request body | none (any body is ignored) |
 | Response status | `200 OK` (always — see § 3 Liveness contract) |
-| Response Content-Type | `text/plain; charset=utf-8` (axum default for `&'static str` body) |
-| Response body | `{"status":"ok","service":"workflow-trace","port":8142}` (literal string, NOT JSON-typed — see § 4 Body shape note) |
+| Response Content-Type | `text/plain; charset=utf-8` (axum default for `String` body — see § 4) |
+| Response body | Wire-aware JSON-shaped string (Wave-17) — 10 fields covering daemon liveness + tick-loop wire status. Computed per-request from shared `WireStats` atomics written by the poller subsystem. |
 
-### Example
+### Example (Wave-17 wire-aware body)
 
 ```
-$ curl -s http://127.0.0.1:8142/health
-{"status":"ok","service":"workflow-trace","port":8142}
+$ curl -s http://127.0.0.1:8142/health | jq
+{
+  "status": "ok",
+  "service": "workflow-trace",
+  "port": 8142,
+  "tick_count": 7,
+  "ok_count": 7,
+  "refusal_count": 0,
+  "unreachable_count": 0,
+  "last_ok_unix_ms": 1779700123456,
+  "last_ok_age_ms": 300,
+  "refusal_rate_per_kilo": 0
+}
 ```
 
-## 3. Liveness contract (intentional scope limit)
+### Field semantics (Wave-17)
 
-**`/health` certifies daemon-process liveness, NOT wire-status.** If the WFE→SX2 wire is silently dropping ticks (SX2 daemon down, V5 trust gate refusing, source/deploy drift causing lying-200), `/health` still returns 200.
+| Field | Type | Meaning |
+|---|---|---|
+| `status` | `"ok"` | Daemon-process liveness (always returned if handler responds) |
+| `service` | `"workflow-trace"` | Service id matching `[[services]] id` in `devenv.toml` |
+| `port` | `8142` | Bind port (literal; informational) |
+| `tick_count` | `u64` | Total ticks emitted since daemon boot (lifetime cumulative) |
+| `ok_count` | `u64` | Subset of `tick_count` that returned `HeartbeatAck` from substrate |
+| `refusal_count` | `u64` | Subset that returned `RefusalToken::Unavailable` (engine-imagined + substrate-authored + other) |
+| `unreachable_count` | `u64` | Subset that returned `RefusalToken::Unavailable(SubstrateUnreachable)` (transport-layer failure) |
+| `last_ok_unix_ms` | `u64` | Unix ms timestamp of the most recent `outcome=ok` ack. `0` = sentinel "never acked". |
+| `last_ok_age_ms` | `u64` | Ms since last `outcome=ok` (computed at request time). `u64::MAX` (18446744073709551615) = sentinel "never acked". |
+| `refusal_rate_per_kilo` | `u64` | Parts-per-thousand integer rate: `(refusal_count + unreachable_count) * 1000 / tick_count`. `0` = perfect, `1000` = 100% failure. Integer-only to avoid float JSON serialisation. |
 
-Rationale recorded in `ai_docs/WAVE_16_WF_DAEMON_DESIGN_S1005032.md` § 5:
+**Atomicity note:** the body is computed by 4 independent `AtomicU64::load(Relaxed)` calls, so counter values may straddle increments (a tick could fire between `ok.load()` and `refusals.load()`). The body does not claim snapshot semantics — this is acceptable for an observability endpoint where the operator sees second-scale resolution.
 
-1. The V5 substrate-trust gate already surfaces source/deploy drift via the daemon's tracing log (`outcome=substrate_unreachable`, etc) — folding wire-status into `/health` would conflate two distinct signals.
-2. The habitat-plugin grid is a per-service-process liveness dashboard — every other habitat service follows the same liveness contract.
-3. Wire-aware observability belongs to a future `/v1/wire-status` endpoint (tick counters, last-ok-ms, refusal-rate, V5 trust state). Deferred v0.2.3+.
+## 3. Liveness contract (Wave-17 amendment)
+
+**The status code (200) certifies daemon-process liveness; the body fields certify wire status.** Both shipped in v0.2.1-wave17 (S1005032), closing the lying-dashboard surface introduced in Wave-16.
+
+- `bridge_health` probe in `habitat-zellij/.../bridge_health.rs` consumes ONLY the 200 status code → dashboard grid `WFE` indicator stays GREEN as long as the daemon process is alive (per other-services convention).
+- Operator running `curl :8142/health | jq` sees `tick_count`, `ok_count`, `refusal_rate_per_kilo`, `last_ok_age_ms` → wire-level health is observable without a separate endpoint.
+- Future `bridge_health` upgrade can parse `refusal_rate_per_kilo > 500` OR `last_ok_age_ms > 30_000` → render WFE in YELLOW (degraded) without breaking the existing probe contract.
+
+**Why both signals in `/health` instead of a separate endpoint:** Wave-16 originally deferred wire-status to a future `/v1/wire-status` endpoint, treating dashboard-liveness and wire-status as distinct signals not to be conflated. Wave-17 reversed that decision after the post-Wave-16 retro flagged the dashboard-lying surface as a real regression of the AP-V7-13 trap that the V5 trust gate exists to surface. Conclusion: a single endpoint with status-code AND body fields, each layer of consumer reading the field shape that matches its concern, is honest without conflation.
 
 ## 4. Body shape note (it returns text/plain JSON-shaped string)
 

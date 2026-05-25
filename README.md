@@ -1,8 +1,9 @@
 # the-workflow-engine — `workflow-trace`
 
-> **Status:** G9 fired · HOLD-v2 lifted · 26-module Rust codebase implemented (~31k LOC) · `workflow_core` lib + two real CLI binaries · 1967 tests passing · clippy + pedantic clean.
-> **Cargo package:** `workflow-trace` v0.1.0 — library `workflow_core`, binaries `wf-crystallise` and `wf-dispatch` (single crate, ORAC pattern).
+> **Status:** G9 fired · HOLD-v2 lifted · 26-module Rust codebase implemented (~31k LOC) · `workflow_core` lib + **4 binaries** (`wf-crystallise`, `wf-dispatch`, `wf-poller`, `wf-daemon`) · **habitat-managed service on port 8142** (S1005032 Wave-16) · 1967 tests passing · clippy + pedantic clean.
+> **Cargo package:** `workflow-trace` v0.1.0 — library `workflow_core`; binaries `wf-crystallise` + `wf-dispatch` (invoke-and-exit CLIs), `wf-poller` (operator-launched continuous CLI, Wave-15), `wf-daemon` (habitat-managed service shape on `:8142` with `/health` + embedded poller subsystem, Wave-16).
 > **Directory:** `the-workflow-engine/` (a rename to `workflow-trace/` is deferred — cosmetic).
+> **Habitat-service grid:** visible as `WFE` in the Zellij habitat-plugin (14-service grid: V3 Nerve TL SX V8 VMS POVM RM PV2 ORAC Inj **WFE** ME PSw). Registered in `~/.config/devenv/devenv.toml` as `id = "workflow-trace"` with `auto_start = true`, `auto_restart = true`.
 
 ---
 

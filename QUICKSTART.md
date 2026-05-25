@@ -2,7 +2,24 @@
 
 > **Back to:** [`README.md`](README.md) · [`CLAUDE.md`](CLAUDE.md) · full CLI reference: [`docs/COMMAND_MAPPING.md`](docs/COMMAND_MAPPING.md)
 
-A hands-on, copy-pasteable getting-started guide for the two `workflow-trace` binaries: `wf-crystallise` (observe → mine → propose) and `wf-dispatch` (bank → select → verify → dispatch).
+A hands-on, copy-pasteable getting-started guide for the four `workflow-trace` binaries:
+
+| Binary | Role | Lifecycle |
+|---|---|---|
+| `wf-crystallise` | observe → mine → propose (produces JSONL proposal) | invoke-and-exit CLI |
+| `wf-dispatch` | bank → select → verify → dispatch (via HABITAT-CONDUCTOR `:8141`) | invoke-and-exit CLI |
+| `wf-poller` | continuous-tick WFE→SX2 heartbeat emitter (S1005032 Wave-15) | operator-launched continuous CLI |
+| `wf-daemon` | habitat-managed service shape (`/health` on `:8142` + embedded poller subsystem) | system-managed via `devenv start` (Wave-16) |
+
+**Habitat-service grid:** `wf-daemon` is registered in `~/.config/devenv/devenv.toml` as `id = "workflow-trace"` and renders as `WFE` in the Zellij `habitat-plugin.wasm` 14-service grid (V3 Nerve TL SX V8 VMS POVM RM PV2 ORAC Inj **WFE** ME PSw).
+
+```bash
+# Quick service liveness check (after `devenv start`):
+curl -s localhost:8142/health
+# expected: {"status":"ok","service":"workflow-trace","port":8142}
+```
+
+> Note: `wf-daemon` is the system-managed shape. `wf-poller` is preserved as the standalone CLI for development / soak-test driving; both binaries share the same tick logic (m16 `DriftDetector` + W1 `HeartbeatTransport` + V5 `SubstrateTrust`).
 
 ---
 

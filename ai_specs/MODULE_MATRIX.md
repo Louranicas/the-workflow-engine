@@ -88,4 +88,19 @@ Each module declares which CC contracts it OWNS (writes the contract surface) vs
 
 ---
 
+## Binaries (Wave-16 update — 4 binaries)
+
+| Binary | Owns | Lifecycle | Wave |
+|---|---|---|---|
+| `wf-crystallise` | m1-m23 + m40-m42 (substrate observation, mining, proposal) | invoke-and-exit CLI | S1003733 |
+| `wf-dispatch` | m30-m33 (bank, select, dispatch via Conductor `:8141`, verify) | invoke-and-exit CLI | S1003733 |
+| `wf-poller` | m16 + W1 transport + V5 trust (continuous-tick WFE→SX2 wire driver) | operator-launched CLI | S1005032 Wave-15 |
+| `wf-daemon` | m16 + W1 + V5 + axum `/health` on `:8142` | habitat-managed (`devenv start`) | S1005032 Wave-16 |
+
+Shared `workflow_core` lib across all four binaries (types, schemas, namespace constants, m1-m42 modules). The habitat-plugin grid renders `wf-daemon` as `WFE` between `Inj` and `ME` in the 14-service row.
+
+Spec: [`WF_DAEMON_HTTP_SHAPE.md`](WF_DAEMON_HTTP_SHAPE.md) · design: [`../ai_docs/WAVE_16_WF_DAEMON_DESIGN_S1005032.md`](../ai_docs/WAVE_16_WF_DAEMON_DESIGN_S1005032.md) · lifecycle: [`../ultramap/WF_DAEMON_LIFECYCLE.md`](../ultramap/WF_DAEMON_LIFECYCLE.md)
+
+---
+
 > **Back to:** [`INDEX.md`](INDEX.md) · [`../README.md`](../README.md) · [`../ARCHITECTURE.md`](../ARCHITECTURE.md) · [`../ai_docs/optimisation-v7/ULTRAMAP.md`](../ai_docs/optimisation-v7/ULTRAMAP.md)

@@ -60,7 +60,7 @@ This folder ADDS:
 
 1. Start at canonical [`../ai_docs/optimisation-v7/ULTRAMAP.md`](../ai_docs/optimisation-v7/ULTRAMAP.md) for the structural map.
 2. Then [`MODULE_DEPENDENCY_GRAPH.md`](MODULE_DEPENDENCY_GRAPH.md) for the visual DAG.
-3. For the **runtime binary behaviour**, jump to [`WF_CRYSTALLISE_PIPELINE.md`](WF_CRYSTALLISE_PIPELINE.md) and [`WF_DISPATCH_PIPELINE.md`](WF_DISPATCH_PIPELINE.md) — what runs, in order, when each binary is invoked.
+3. For the **runtime binary behaviour**, jump to [`WF_CRYSTALLISE_PIPELINE.md`](WF_CRYSTALLISE_PIPELINE.md) and [`WF_DISPATCH_PIPELINE.md`](WF_DISPATCH_PIPELINE.md) — what runs, in order, when each invoke-and-exit binary fires. For the **habitat-service daemon** (Wave-16, `wf-daemon` on `:8142`), see [`WF_DAEMON_LIFECYCLE.md`](WF_DAEMON_LIFECYCLE.md) — process lifecycle, concurrency model, failure-mode taxonomy.
 4. For cross-module behaviour, jump to [`DATA_FLOW.md`](DATA_FLOW.md) → [`CONTROL_FLOW.md`](CONTROL_FLOW.md) → [`CONTEXTUAL_FLOW.md`](CONTEXTUAL_FLOW.md) → [`INVARIANT_MAP.md`](INVARIANT_MAP.md).
 5. Use [`ULTRAMAP.md`](ULTRAMAP.md) (this folder's synthesis) when you need everything in one view; [`../ai_docs/API_MAP.md`](../ai_docs/API_MAP.md) for the per-function API reference.
 

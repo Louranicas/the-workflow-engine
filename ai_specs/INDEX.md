@@ -129,6 +129,10 @@ Engine-internal CCs (CC-1, CC-1.subA, CC-2, CC-3, CC-6) are NOT decomposed here 
 
 ---
 
+## Binary HTTP shapes
+
+- [`WF_DAEMON_HTTP_SHAPE.md`](WF_DAEMON_HTTP_SHAPE.md) — formal HTTP contract for the `wf-daemon` habitat service (port 8142, single endpoint `GET /health`, liveness-only contract scope, env overrides). Wave-16 / S1005032.
+
 ## Schematics
 
 `schematics/` — per-module Mermaid diagrams (module-internal flow) + per-cluster Mermaid diagrams (cluster-internal contracts).

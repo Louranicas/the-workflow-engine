@@ -6,6 +6,134 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ---
 
+## [v0.2.1-wave16] — 2026-05-25 (S1005032) — workflow-trace is now a habitat service
+
+Per Luke's 2026-05-25 directive ("ensure the workflow-engine is fully and
+comprehensively wired into synthex … verify all binaries have been build
+and align with all conventions and systems of the zellij habitat services
+… ensure the workflow-engine starts with these services and is included
+[in the habitat-plugin grid]"), workflow-trace gains a third binary
+shape — `wf-daemon` — that makes it a first-class habitat-managed
+service on port 8142.
+
+**Visible in the Zellij `habitat-plugin.wasm` grid as `WFE` (14-service
+row: `V3 Nerve TL SX V8 VMS POVM RM PV2 ORAC Inj **WFE** ME PSw`).**
+
+### Added
+
+- **`src/bin/wf_daemon.rs`** (~330 LOC) — minimal habitat-service binary:
+  - `axum` HTTP server on port 8142 with single endpoint `GET /health`
+    returning `{"status":"ok","service":"workflow-trace","port":8142}`
+    200 (matches `bridge_health` probe shape used by every other habitat
+    service except ME `:8180/api/health`)
+  - `tokio::spawn_blocking` poller subsystem embedding the existing
+    `wf-poller` tick logic (m16 `DriftDetector` + W1 `HeartbeatTransport`
+    + V5 `SubstrateTrust`) — same emit semantics, same V5 gate, same
+    tracing-only contract
+  - Env overrides: `WF_DAEMON_PORT` (port), `WF_POLLER_ENDPOINT`
+    (substrate URL), `WF_POLLER_INTERVAL_MS` (tick cadence),
+    `WF_POLLER_INSTANCE` (instance tag for observability)
+  - `#![forbid(unsafe_code)]` preserved
+- **`Cargo.toml`** — `[[bin]] wf-daemon` target + `axum 0.8` (tokio +
+  http1 features only) + `tower 0.5` minimal deps; `hyper` + `tower-http`
+  already transitive via reqwest so net dep growth is small
+- **`bin/wf-daemon`** (3.1 MB, sha `bf085b2f…`) — release binary
+  deployed to project-`./bin/` convention (matches V3 / PV2 / VMS / ORAC
+  / Nerve / ME placement; never `/tmp`, no shell wrappers)
+- **`~/.config/devenv/devenv.toml` `[[services]] id="workflow-trace"`**
+  entry with `auto_start = true`, `auto_restart = true`,
+  `command = "./bin/wf-daemon"`, `working_dir =
+  "/home/louranicas/claude-code-workspace/the-workflow-engine"` —
+  18-service habitat → 19-service habitat
+- **`habitat-zellij/.../bridge_health.rs`** SERVICES `(8142, "WFE")` +
+  PROBE_PATHS `(8142, "/health")` — 13-service plugin grid → 14-service
+  plugin grid; `habitat-modules` test suite 91/91 passing post-edit
+- **`habitat-plugin.wasm`** rebuilt via `habitat-zellij/build.sh` and
+  deployed to `~/.config/zellij/plugins/habitat-plugin.wasm`; verified
+  WFE string baked into the deployed wasm binary
+
+### Port story (false-positive trap recorded)
+
+First attempt assigned port **8141** because `ss -tlnp` reported it
+free. Wrong — port 8141 is **reserved for HABITAT-CONDUCTOR** (currently
+down via `auto_start=false` per OP-1 hand-off). Caught by grep audit
+across `devenv.toml` + `ai_docs/` + `QUICKSTART.md` + `MESSAGE_FLOWS.md`
++ `CODE_MODULE_MAP.md` + `ONBOARDING.md` — all reference `:8141` as the
+Conductor port that `wf-dispatch m32` posts to. Re-ported to **8142**
+(verified free across all 4 surfaces). Discipline added: **a port being
+unbound does not mean it is unreserved** — always grep docs +
+devenv.toml + plugin source before claiming a port is free for a new
+service.
+
+### Changed
+
+- **`README.md`** — status header updated to "4 binaries"; explicit
+  habitat-service-grid call-out with WFE in the 14-service row
+- **`QUICKSTART.md`** — binary table expanded from 2 to 4; new "habitat
+  service grid" section + `curl :8142/health` smoke
+- **`CLAUDE.md`** — "what IS this project" + "Two-binary split" updated
+  to "Four-binary topology"; project-charter habitat-service status added
+- **`ai_docs/INDEX.md`** — entry for new `WAVE_16_WF_DAEMON_DESIGN_S1005032.md`
+- **`ai_specs/INDEX.md`** — entry for new `WF_DAEMON_HTTP_SHAPE.md`
+- **`ai_specs/MODULE_MATRIX.md`** — wf-daemon row added (binary,
+  not a `mN_` module — appears in binary section)
+- **`ultramap/README.md`** — wf-daemon entry alongside the existing
+  wf-crystallise / wf-dispatch pipeline references
+- **`ultramap/WF_DAEMON_LIFECYCLE.md`** (new) — control flow + tokio
+  task topology for the daemon
+
+### Gate
+
+- `cargo check --release --bin wf-daemon` ✓
+- `cargo clippy --release --bin wf-daemon -- -D warnings` ✓ clean
+- `cargo clippy --release --bin wf-daemon -- -D warnings -W clippy::pedantic` ✓ clean
+- `cargo build --release --bin wf-daemon` ✓ (17 s)
+- **`habitat-modules` `cargo test --lib`** ✓ **91 / 91 passing**
+- **`habitat-modules` `cargo clippy -- -D warnings`** ✓ clean
+- **`habitat-plugin.wasm`** rebuild ✓ 1.2 MB deployed
+- Live verify: **`ALL UP 14/14 (14 probed)`** in plugin grid screenshot
+  with green `WFE` indicator between `Inj` and `ME`
+
+### Honest residuals (operator)
+
+1. **`/health` is liveness-only, not wire-aware.** WFE shows green in
+   the plugin grid even when the WFE↔SX2 wire is silently dropping
+   ticks. Future amendment: tick counters + last-ok-ms in `/health`
+   body; deferred v0.2.3+.
+2. **SX2 daemon redeploy still standing (OP-OPERATOR-D2).** Running
+   synthex-v2 binary mtime 2026-05-06 predates Wave-15 source `c5e3ae4`
+   by 19 days. Until Luke redeploys, `wf-daemon`'s poller subsystem
+   tracing-warns `outcome=substrate_unreachable` / lying-200 every tick
+   — the V5 trust gate keeps this audit-visible, the daemon itself
+   stays healthy + plugin-green.
+3. **m46 Watcher subscription to `Signal::ExternalHeartbeat`** — NA-1''
+   Option C closure; v0.2.3+ amendment.
+4. **Silence-watcher daemon task** — `WorkflowTraceParticipationStatus::Unreachable{missed_count}`
+   defined but no `Live → Unreachable` transitions; v0.2.3+ amendment.
+5. **HABITAT-CONDUCTOR bring-up (OP-1)** — Conductor `auto_start=false`
+   on `:8141`; when started, plugin grid will show 15 services + the
+   WFE→Conductor dispatch path opens up.
+6. **Workspace charter row drift** — `~/claude-code-workspace/CLAUDE.md`
+   "14 active services" table is now ≥15 with workflow-trace added;
+   charter refresh pending operator triage.
+
+### Persistence (5 surfaces)
+
+- **ai_docs:** new `ai_docs/WAVE_16_WF_DAEMON_DESIGN_S1005032.md`
+- **Obsidian vault (project):** [[Wave-16 — wf-daemon Habitat Service Shape S1005032]]
+- **Obsidian vault (main habitat):** `~/projects/claude_code/workflow-trace — Wave-16 Habitat Service S1005032.md`
+- **stcortex:** ns `workflow_trace_completion_s1004115` memory id **19192**
+  (parent_ids `[19161 Wave-15, 18791 v0.2.1-hardening]`) + 4 bidi
+  pathways (`wave_16_wfe_habitat_service_s1005032 ↔ wave_15_wfe_sx2_wiring_s1005032`
+  0.95, → `habitat_zellij_plugin_service_grid` 0.85, →
+  `workflow_trace_v020_shipped` 0.9)
+- **POVM mirror:** id `48ba6ee2-d07a-4cb0-9060-4b1921a96fc7` (deprecated
+  overlap per CLAUDE.md memory row 8; decommission 2026-07-10)
+- **injection.db:** `causal_chain` id **135** label
+  `wave16_wfe_habitat_service_s1005032` resolved_session 1005032
+
+---
+
 ## [v0.2.1-hardening] — 2026-05-24 (S1004590) — Post-ship verification close
 
 Single hygiene commit folding 5 silent-failure-hunter follow-ups + 4 Zen

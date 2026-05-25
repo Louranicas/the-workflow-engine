@@ -30,7 +30,22 @@ path = "src/bin/wf_dispatch.rs"
 name = "wf-poller"
 path = "src/bin/wf_poller.rs"
 
+# `wf-daemon` — habitat-service shape (S1005032 Wave-16). Long-running
+# tokio HTTP daemon exposing GET /health on port 8142, plus internal
+# wf-poller tick logic spawned as a tokio::task::spawn_blocking. This is
+# the service-shape binary that `~/.local/bin/devenv start` manages,
+# `habitat-nerve-center` probes, and the Zellij habitat-plugin renders in
+# the 14-service grid (V3·Nerve·TL·SX·V8·VMS·POVM·RM·PV2·ORAC·Inj·ME·PSw·WFE).
+[[bin]]
+name = "wf-daemon"
+path = "src/bin/wf_daemon.rs"
+
 [dependencies]
+# axum + tower for the wf-daemon /health endpoint (Wave-16 service-shape).
+# `hyper` + `tower-http` already in tree transitively via reqwest, so axum
+# adds only the routing layer.
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1"] }
+tower = "0.5"
 thiserror = "2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }

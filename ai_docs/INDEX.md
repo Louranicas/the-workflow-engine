@@ -100,6 +100,10 @@
 
 ---
 
+## Wave-16 — workflow-trace as habitat service (S1005032, 2026-05-25)
+
+- [`WAVE_16_WF_DAEMON_DESIGN_S1005032.md`](WAVE_16_WF_DAEMON_DESIGN_S1005032.md) — `wf-daemon` design: habitat-service shape (`/health` on `:8142` + embedded `wf-poller` subsystem); port 8141→8142 re-port story (collision with HABITAT-CONDUCTOR); convention compliance; honest residuals; cross-refs to HTTP spec + lifecycle ultramap.
+
 ## Vault canonical (for source-of-truth on planning artefacts)
 
 - [`the-workflow-engine-vault/GOD_TIER_CONSOLIDATION_S1001982.md`](../the-workflow-engine-vault/GOD_TIER_CONSOLIDATION_S1001982.md) — 11 parts state-of-world synthesis
